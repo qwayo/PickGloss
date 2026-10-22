@@ -1,0 +1,30 @@
+{
+  "name": "pickgloss",
+  "productName": "PickGloss",
+  "version": "0.1.12",
+  "private": true,
+  "license": "MIT",
+  "description": "Windows 划词与截图解释助手",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/core/*.test.cjs tests/windows/*.test.cjs tests/renderer/*.test.cjs",
+    "build:native": "node scripts/build-native.cjs",
+    "package": "node scripts/package.cjs",
+    "smoke": "electron . --smoke-test",
+    "test:host": "electron scripts/electron-contract.cjs",
+    "test:interaction": "electron scripts/check-streaming-controls.cjs",
+    "test:markdown": "electron scripts/check-markdown.cjs",
+    "check:publication": "node scripts/check-publication-hygiene.cjs",
+    "test:composer": "electron scripts/check-composer-flow.cjs",
+    "test:reading": "electron scripts/check-reading-layout.cjs"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.3",
+    "selection-hook": "2.1.1"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "44.7.2"
+  }
+}

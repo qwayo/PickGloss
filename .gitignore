@@ -1,0 +1,115 @@
+node_modules/
+.pnpm-store/
+.yarn/
+dist/
+build/
+.scratch/
+*.log
+logs/
+*.audit.json
+coverage/
+.nyc_output/
+.eslintcache
+.stylelintcache
+.parcel-cache/
+.vite/
+.turbo/
+.env
+.env.*
+!/.env.example
+
+/tmp/
+tmp/
+temp/
+
+/output/
+
+# 原型、截图和录屏仅保留在本机，不进入公开快照或便携包
+/prototypes/
+
+# 验收记录与机器证据属于本机过程材料，不进入公开仓库
+/docs/verification/
+
+# 本地工具、调试缓存与系统生成文件
+/.codex/
+/.agents/
+/.local/
+/.cache/
+/coverage/
+*.tmp
+*.bak
+*.dmp
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 个人配置、凭据与私钥
+/.secrets/
+/secrets/
+*.local
+*.local.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+*.crt
+*.snk
+*.jks
+*.keystore
+*credential*.xml
+
+# 本机自签名辅助脚本，不进入公开仓库
+/scripts/finalize-signed-package.cjs
+/scripts/finalize-self-signed-package.ps1
+
+# 本机开源前检查记录，不进入公开仓库
+/PUBLICATION-CHECKLIST-20261022.md
+
+# 误放在仓库中的运行数据
+/user-data/
+/verification-data/
+/data/
+/sessions/
+/settings.json
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# 编辑器与本地工作区配置
+/.vscode/
+/.idea/
+*.code-workspace
+*.suo
+*.user
+*.sdf
+*.opensdf
+
+# Python、测试与系统缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.venv/
+venv/
+
+# 打包、崩溃报告与本地产物
+*.zip
+*.7z
+*.rar
+*.dmg
+*.msi
+*.appx
+*.msix
+*.asar
+*.map
+Crashpad/
+crashpad/
+*.dmp

@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+output/pdf/*.pdf -text -diff
+output/docx/*.docx -text -diff
+
+docs/verification/evidence/** -text

@@ -1,0 +1,63 @@
+/* 炭黑主题中的桌面入口、快捷菜单与快捷键设置。 */
+.orb{width:40px;height:40px;padding:8px;background-color:var(--paper);color:var(--ink);--orb-finish:radial-gradient(ellipse at 30% 18%,#ffffff30,transparent 56%),radial-gradient(ellipse at 75% 85%,#0005,transparent 70%);background-image:var(--orb-finish);border:1px solid color-mix(in srgb,var(--ink) 20%,transparent);box-shadow:inset 0 1px 2px #ffffff35,inset 0 -3px 5px #0004,0 2px 4px #0005;transition:transform 160ms var(--ease),filter 160ms,box-shadow 160ms}
+.orb.dragging{box-shadow:inset 0 1px 2px #ffffff40,inset 0 -2px 4px #0005,0 1px 2px #0006}
+html[data-appearance=light] .orb{--orb-finish:radial-gradient(ellipse at 30% 18%,#fff,transparent 62%),radial-gradient(ellipse at 75% 85%,#0002,transparent 70%);background-image:var(--orb-finish);box-shadow:inset 0 1px 2px #fff,inset 0 -3px 5px #0002,0 2px 4px #0003}
+.orb>.brand{width:25px;height:25px}
+.selection-action{animation:selection-appear 180ms var(--ease) both;transform-origin:50% 65%;width:26px;height:26px;padding:0;gap:0;border-radius:9px;background:var(--paper);color:var(--ink);box-shadow:none;transition:filter var(--fast),transform 100ms var(--ease)}
+.orb-action-select{width:100%;border:1px solid var(--line);background:var(--field);border-radius:7px;padding:8px 10px}
+.window-settings{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.window-settings-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.window-settings-copy{flex:1;min-width:138px}.window-settings-copy h3{font-size:13px;font-weight:500;margin:0;line-height:1.5}
+.window-settings-copy p{font-size:12px;line-height:1.65;color:var(--muted);margin:3px 0 0}
+.window-reset{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:28px;padding:3px 8px;border:1px solid var(--line);background:var(--soft);font-size:12px;line-height:20px;white-space:nowrap}
+.window-reset .icon{width:13px;height:13px}.window-settings>[role=status]{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}
+.window-settings>[role=status]:empty,.window-settings>.inline-error:empty{display:none}
+.selection-action>.brand{width:26px;height:26px}
+.selection-action .brand-background{fill:var(--paper);stroke:var(--line);stroke-width:2px}
+.selection-action .brand-ink{fill:var(--ink)}
+.selection-action:hover{background:var(--paper);filter:brightness(1.06)}
+.menu-surface{width:100%;height:100%;padding:7px;background:transparent;display:flex;align-items:stretch}
+.quick-menu{align-self:flex-start;max-height:100%;width:100%;min-width:0;overflow-y:auto;overscroll-behavior:contain;background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:8px 6px 4px;box-shadow:0 3px 8px #0005;color:var(--ink);outline:none}
+.quick-menu-heading{display:flex;align-items:center;gap:6px;padding:1px 6px 6px;margin-bottom:4px;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;user-select:none}
+.quick-menu-heading .brand{width:18px;height:18px}.quick-menu-heading .menu-close{margin-left:auto;width:20px;height:20px}
+.quick-menu-group{padding:2px 0}.quick-menu-group+.quick-menu-group{border-top:1px solid var(--line);margin-top:3px;padding-top:5px}
+.quick-menu-item{display:flex;align-items:center;gap:8px;width:100%;min-height:30px;border-radius:5px;padding:5px 7px;text-align:left;font-size:12px;line-height:1.45;color:var(--ink);position:relative}
+.quick-menu-item>.icon{width:14px;height:14px;color:var(--muted)}.quick-menu-item:hover,.quick-menu-item:focus-visible{background:var(--soft)}
+.quick-menu-item[data-menu-command=appearance]>.icon{width:17px;height:14px;margin-left:-1.5px;margin-right:-1.5px}
+.quick-menu-item[data-menu-command=quit]{min-height:26px;padding-top:3px;padding-bottom:3px;font-size:11.5px;color:var(--muted)}
+.quick-menu-item[data-menu-command=quit]>.icon{width:13px;height:13px}
+.quick-menu-item:focus-visible{outline:1px solid var(--accent-ink);outline-offset:-1px}
+.quick-menu-item[aria-checked=true]{background:var(--selected)}.quick-menu-item[aria-checked=true]>.icon{color:var(--accent-ink)}
+.quick-menu-item kbd{margin-left:auto;font:11px/1.4 'Segoe UI',sans-serif;letter-spacing:-.15px;color:var(--muted);white-space:nowrap}
+.quick-menu-item .menu-label{min-width:0;flex:1;white-space:nowrap}.quick-menu-check{font-size:13px;line-height:1;color:var(--accent-ink)}
+.quick-menu-note{padding:5px 8px 1px;color:var(--danger);font-size:13px;overflow-wrap:anywhere}.quick-menu-note:empty{display:none}
+.shortcuts-page{min-width:0;max-width:760px;margin:0 auto}.shortcuts-page h2{margin:0 0 8px;font-size:20px}
+.shortcuts-page>.hint{margin:0 0 24px}.shortcut-group{margin:0 0 24px}.shortcut-group h3{font-size:14px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--line)}
+.shortcut-row{display:grid;grid-template-columns:minmax(0,1fr) auto 28px;column-gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+.shortcut-copy{min-width:0}.shortcut-name{display:block;font-size:14px}.shortcut-description{display:block;font-size:13px;color:var(--muted);line-height:1.6;margin-top:2px}
+.shortcut-key{padding:7px 10px;min-width:115px;min-height:34px;white-space:nowrap;background:var(--field);border:1px solid var(--line);font-size:13px}
+.shortcut-key[aria-pressed=true]{border-color:var(--accent-ink);box-shadow:0 0 0 1px var(--accent-ink)}
+.shortcut-clear{width:28px;height:28px;font-size:20px;color:var(--muted);display:grid;place-items:center;padding:0}
+.shortcut-status{grid-column:1/-1;color:var(--muted);font-size:13px;line-height:1.6;margin-top:4px;overflow-wrap:anywhere}.shortcut-status:empty{display:none}.shortcut-status.is-error{color:var(--danger)}
+.shortcut-recording,.shortcut-notice{font-size:13px;line-height:1.7;margin:8px 0;overflow-wrap:anywhere;color:var(--muted)}.shortcut-recording:empty,.shortcut-notice:empty{display:none}.shortcut-notice.is-error{color:var(--danger)}
+.shortcut-sound{margin-top:22px}.shortcut-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:18px}.shortcut-actions .text-button{margin-right:auto}
+@media(max-width:420px){.settings-navigation{gap:13px}.settings-navigation button{font-size:13px}.shortcut-row{grid-template-columns:minmax(0,1fr) 28px;row-gap:7px}.shortcut-copy{grid-column:1/-1}.shortcut-key{justify-self:start;max-width:100%}.shortcut-actions{justify-content:stretch}.shortcut-actions .primary{flex:1}.shortcuts-page h2{font-size:18px}}
+
+/* 会话历史以可回访的阅读列表呈现，操作留在每条记录旁。 */
+.history-page{max-width:760px;margin:0 auto}.history-heading{display:flex;align-items:center;gap:12px;justify-content:space-between;margin:2px 0 12px}.history-heading h1{margin:0;font-size:21px}.history-heading>.secondary{min-height:30px;padding:4px 9px;font-size:13px;gap:6px;display:flex;align-items:center;border-color:var(--line)}
+.history-tools{padding-top:4px}.history-toolbar{margin:0;gap:7px;flex-wrap:nowrap}.history-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:1px solid var(--line);background:transparent;border-radius:8px;padding-left:10px;transition:border-color var(--fast)}.history-search:focus-within{border-color:var(--accent-ink)}.history-search>.icon{width:16px;height:16px;color:var(--muted)}.history-search>input{min-width:0;border:0;background:transparent;padding:8px 7px 8px 0;font-size:13px}.history-search>input:focus-visible{outline:none}
+.history-filter-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line)}.history-page .filter-tabs{gap:18px;margin:4px 0 0;border-bottom:0}.history-page .filter-tabs button{min-height:34px}.history-page .history-count{margin:4px 0 0 auto;font-size:13px;color:var(--muted);white-space:nowrap}
+.history-page .history-day{font-size:13px;font-weight:500;color:var(--muted);margin:24px 0 6px;line-height:1.6;letter-spacing:.2px}.history-page .history-day:first-child{margin-top:14px}
+.history-page .history-item{border-top:0;border-bottom:1px solid var(--line);padding:13px 0 11px;transition:background-color 160ms}.history-topline{display:flex;align-items:flex-start;gap:8px}.history-page .history-main{min-width:0;flex:1;gap:11px;align-items:flex-start;border-radius:6px}.history-page .history-main:hover{color:var(--ink)}.history-page .history-icon{margin:1px 0 0;display:grid;place-items:center;width:31px;height:31px;flex:none;background:var(--surface-secondary);border:1px solid var(--line);border-radius:8px}.history-page .history-icon .icon{width:16px;height:16px}.history-copy{display:block;min-width:0;flex:1}.history-page .history-title{font-size:15px;line-height:1.55;font-weight:600;-webkit-line-clamp:2}.history-summary{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;font-size:13px;line-height:1.7;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}
+.history-star{margin-top:0;color:var(--muted)}.history-star.starred{color:var(--accent-ink)}.history-star.starred>.icon{fill:currentColor;stroke-width:1.2}
+.history-bottom{display:flex;align-items:center;gap:10px;padding-left:0;margin-top:7px;min-width:0}.history-page .history-meta{font-size:13px;margin:0;flex:1;min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.history-page .history-actions{margin:0;gap:2px;flex-wrap:nowrap}.history-page .history-actions button{width:28px;height:28px;padding:0;font-size:13px}.history-page .history-actions .icon{width:15px;height:15px}.history-page .history-rename{padding-left:0}.history-page .delete-confirm{margin:12px 0 3px 0;padding:8px 10px;background:var(--danger-bg);border-radius:0 6px 6px 0}.history-page .empty{padding:30px 8px;text-align:center}.history-page .empty .symbol{display:grid;place-items:center;margin-bottom:15px}.history-page .empty h2{font-size:18px}.history-page .empty p{font-size:13px}.history-page .history-more{margin-top:22px}
+@media(min-width:640px){.history-body{padding:24px 32px}.history-heading{margin-bottom:22px}.history-heading h1{font-size:24px}.history-page .history-item{padding:17px 4px}.history-page .history-title{font-size:16px}.history-summary{font-size:14px}.history-page .history-actions{opacity:1}.history-page .history-item:hover .history-actions,.history-page .history-item:focus-within .history-actions{opacity:1}}
+@media(max-width:639px){.history-body{padding-top:12px}.history-heading{margin:0 0 6px}.history-tools{padding-top:0}.history-search>input{padding-top:5px;padding-bottom:5px}.history-page .filter-tabs{margin-top:2px}.history-page .filter-tabs button{min-height:32px;padding-top:4px;padding-bottom:6px}.history-page .history-day:first-child{margin-top:10px}.history-page .history-item{padding-top:9px;padding-bottom:9px}}
+
+/* 收藏使用用户指定的金黄色，其他品牌与控件保持炭黑、银灰和暖白。 */
+:root{--favorite:#f2c14f;--favorite-outline:#f2c14f}html[data-appearance=light]{--favorite-outline:#9a6a10}.panel-footer .starred .icon,.history-star.starred>.icon{fill:var(--favorite);stroke:var(--favorite-outline)}.history-star.starred{color:var(--favorite)}
+
+@keyframes selection-appear{from{opacity:0;transform:translateY(3px) scale(.82)}to{opacity:1;transform:none}}
+.reduced-motion .orb.dragging{transform:none}
+@media(prefers-reduced-motion:reduce){.orb.dragging{transform:none}}
+.orb:hover{background-color:var(--paper);background-image:var(--orb-finish)}

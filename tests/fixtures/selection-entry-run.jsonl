@@ -1,0 +1,6 @@
+{"type":"run","candidateId":"虚构候选包","sourceProcess":"msedge","sample":"虚构固定网页","requestedCount":4,"targetMs":500,"timeoutMs":2000}
+{"type":"attempt","number":1,"result":"entry-observed","observedMs":100,"humanResult":"correct"}
+{"type":"attempt","number":2,"result":"entry-observed","observedMs":200,"humanResult":"incorrect"}
+{"type":"attempt","number":3,"result":"entry-observed","observedMs":600,"humanResult":"correct"}
+{"type":"attempt","number":4,"result":"timeout","observedMs":null,"humanResult":"timeout"}
+{"type":"end","completedCount":4}

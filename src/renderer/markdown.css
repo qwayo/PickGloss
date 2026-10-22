@@ -1,0 +1,23 @@
+.message.assistant{white-space:normal}
+.markdown-body{line-height:1.8;overflow-wrap:anywhere;min-width:0}
+.markdown-body>:first-child{margin-top:0}
+.markdown-body>:last-child{margin-bottom:0}
+.markdown-body p{margin:0 0 .8em}
+.markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4,.markdown-body h5,.markdown-body h6{line-height:1.4;margin:1.15em 0 .55em;font-weight:650}
+.markdown-body h1{font-size:1.4em}.markdown-body h2{font-size:1.25em}.markdown-body h3{font-size:1.12em}.markdown-body h4,.markdown-body h5,.markdown-body h6{font-size:1em}
+.markdown-body ul,.markdown-body ol{padding-left:1.6em;margin:.5em 0 .9em}
+.markdown-body li{padding-left:.15em;margin:.25em 0}.markdown-body li>p{margin:.25em 0}
+.markdown-body li ul,.markdown-body li ol{margin:.2em 0}
+.markdown-body blockquote{border-left:3px solid var(--muted);margin:.8em 0;padding:.2em 0 .2em 13px;color:var(--muted)}
+.markdown-body blockquote p:last-child{margin-bottom:0}
+.markdown-body code{font: .87em/1.65 Consolas,'Cascadia Code',monospace;background:var(--soft);border-radius:4px;padding:2px 4px;white-space:pre-wrap}
+.markdown-body pre{max-width:100%;overflow-x:auto;white-space:pre;background:var(--soft);border:1px solid var(--line);border-radius:7px;padding:12px;margin:.8em 0}
+.markdown-body pre code{display:block;min-width:max-content;white-space:pre;overflow-wrap:normal;padding:0;background:none}
+.markdown-body table{display:block;width:max-content;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:.8em 0;font-size:.92em}
+.markdown-body th,.markdown-body td{border:1px solid var(--line);padding:6px 10px;min-width:70px;max-width:260px;text-align:left}
+.markdown-body th{background:var(--soft);font-weight:600}.markdown-body tr:nth-child(even){background:var(--surface-secondary)}
+.markdown-body a{color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px}.markdown-body a:hover{color:var(--ink)}
+.markdown-body hr{border:0;border-top:1px solid var(--line);margin:1em 0}
+.answer-actions{display:flex;align-items:center;justify-content:flex-start;gap:2px;margin-top:8px;white-space:normal}
+.restart-answer{color:var(--muted)}.restart-answer .icon{width:14px;height:14px}
+.copy-answer{color:var(--muted);padding:0;margin-left:-4px;position:relative}.copy-answer .copy-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.copy-answer .icon{width:14px;height:14px}
