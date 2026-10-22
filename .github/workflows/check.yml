@@ -18,13 +18,15 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v7
       - name: 安装 Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - name: 安装依赖
         run: npm ci
+      - name: 安装 Electron 运行时
+        run: npx --no-install install-electron
       - name: 公开内容检查
         run: npm run check:publication
       - name: 自动化测试
-        run: npm test
+        run: npm test -- --test-concurrency=1
