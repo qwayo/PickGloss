@@ -71,55 +71,55 @@ function verify(output, args = []) {
 }
 
 test('完整的合成便携包通过公开核验命令', async () => {
-  const result = verify(await makeCase('完整'));
+  const result = verify(await makeCase('complete'));
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /15 个文件/);
 });
 
 test('便携包缺少运行时第三方许可证时失败', async () => {
-  const output = await makeCase('缺少第三方许可证', { omit: ['resources/app/node_modules/markdown-it/LICENSE'] });
+  const output = await makeCase('missing-third-party-license', { omit: ['resources/app/node_modules/markdown-it/LICENSE'] });
   const result = verify(output);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /markdown-it\/LICENSE/);
 });
 
 test('ZIP 中非抽样产品文件被替换时失败', async () => {
-  const output = await makeCase('非抽样篡改', { change: { 'resources/app/extra.txt': '被替换的内容\n' } });
+  const output = await makeCase('changed-extra-file', { change: { 'resources/app/extra.txt': '被替换的内容\n' } });
   const result = verify(output);
   assert.notEqual(result.status, 0, 'ZIP 内任一产品文件都应与清单摘要相同');
   assert.match(result.stderr, /extra\.txt/);
 });
 
 test('ZIP 中清单文件遗漏时失败', async () => {
-  const result = verify(await makeCase('遗漏', { omit: ['resources/app/extra.txt'] }));
+  const result = verify(await makeCase('omitted-file', { omit: ['resources/app/extra.txt'] }));
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /extra\.txt/);
 });
 
 test('ZIP 中同一路径重复时失败', async () => {
-  const result = verify(await makeCase('重复', { duplicate: 'resources/app/extra.txt' }));
+  const result = verify(await makeCase('duplicate-entry', { duplicate: 'resources/app/extra.txt' }));
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /重复|extra\.txt/);
 });
 
 test('ZIP 中存在清单外的产品文件时失败', async () => {
-  const result = verify(await makeCase('清单外', { unlisted: 'resources/app/unlisted.txt' }));
+  const result = verify(await makeCase('unlisted-file', { unlisted: 'resources/app/unlisted.txt' }));
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /unlisted\.txt/);
 });
 
 test('ZIP 中清单或说明文件与旁边的文件不同时失败', async () => {
-  const manifestOutput = await makeCase('清单篡改', { manifestText: JSON.stringify({ candidateId: '另一包' }) });
+  const manifestOutput = await makeCase('manifest-tamper', { manifestText: JSON.stringify({ candidateId: '另一包' }) });
   const manifestResult = verify(manifestOutput);
   assert.notEqual(manifestResult.status, 0);
   assert.match(manifestResult.stderr, /candidate-manifest\.json/);
-  const readmeResult = verify(await makeCase('说明篡改', { readme: `${readme}额外说明\n` }));
+  const readmeResult = verify(await makeCase('readme-tamper', { readme: `${readme}额外说明\n` }));
   assert.notEqual(readmeResult.status, 0);
   assert.match(readmeResult.stderr, /README\.txt/);
 });
 
 test('外部 ZIP SHA-256 匹配时通过，不匹配时失败', async () => {
-  const output = await makeCase('外部摘要');
+  const output = await makeCase('external-digest');
   const archive = path.join(output, `${candidateId}.zip`);
   const actual = hash(await fs.readFile(archive));
   const mismatched = actual === '0'.repeat(64) ? '1'.repeat(64) : '0'.repeat(64);
@@ -134,7 +134,7 @@ test('外部 ZIP SHA-256 匹配时通过，不匹配时失败', async () => {
 });
 
 test('外部 ZIP 摘要格式无效时失败', async () => {
-  const result = verify(await makeCase('外部摘要格式'), ['--expected-zip-sha256=not-a-digest']);
+  const result = verify(await makeCase('invalid-digest'), ['--expected-zip-sha256=not-a-digest']);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /格式无效/);
 });
