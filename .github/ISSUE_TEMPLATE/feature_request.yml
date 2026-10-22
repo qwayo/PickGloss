@@ -1,0 +1,24 @@
+name: 功能建议
+description: 提出与阅读解释流程相关的改进建议。
+title: "[建议] "
+labels:
+  - needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 请描述具体阅读场景，而不只是实现方式。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: 兼容性与取舍
+      description: 请说明对现有划词、截图、本地历史或服务配置的影响。
