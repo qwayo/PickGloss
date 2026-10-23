@@ -1,4 +1,5 @@
 'use strict';
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 // 隐藏渲染器内重放鼠标事件；拖动和菜单 IPC 使用内存替身，不移动桌面鼠标。
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
@@ -15,7 +16,7 @@ async function until(predicate, label) { const end=Date.now()+3000;while(Date.no
 let fixture = { settings: { prefs: { appearance: defaultAppearance() } }, status: { appearanceDark: true, appearanceMaterial: 'solid' } };
 ipcMain.handle('test:invoke', (_event, action, payload) => { calls.push({ action, payload }); return { ok: true, value: action === 'bootstrap' ? fixture : true }; });
 async function ready(win, selector) {
-  for (let i = 0; i < 150; i++) { if (await win.webContents.executeJavaScript(`Boolean(document.querySelector(${JSON.stringify(selector)}))`)) return; await delay(20); }
+  for (let i = 0; i < 150; i++) { if (await win.webContents.executeJavaScript(`Boolean(document.querySelector(${quoteJavaScriptString(selector)}))`)) return; await delay(20); }
   throw Error('品牌入口未加载');
 }
 async function mouse(win, type, x, y) { const bounds=win.getBounds();win.webContents.sendInputEvent({ type, x, y, globalX:bounds.x+x,globalY:bounds.y+y,button:'left',clickCount:1,modifiers:type==='mouseMove'?['leftButtonDown']:[] });await delay(25); }
