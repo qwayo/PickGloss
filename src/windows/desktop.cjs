@@ -283,6 +283,8 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
     const win = new BrowserWindow({ width: 430, height: 650, show: false, frame: false, title: 'PickGloss', icon: path.join(assets, 'pickgloss-app.png'),
       backgroundColor: appearanceDark ? '#252525' : '#ffffff', autoHideMenuBar: true, skipTaskbar: true, alwaysOnTop: true,
       webPreferences: { preload, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, autoplayPolicy: 'no-user-gesture-required', ...webPreferences }, ...browserOptions });
+    // 当前 Windows 运行时的默认层级可能仍落在普通窗口下；显式设置原生弹出层级。
+    win.setAlwaysOnTop(true, 'pop-up-menu');
     windows.set(kind, win);
     const previousMaterial = appearanceMaterial;
     applyWindowAppearance(kind, win);
@@ -405,7 +407,7 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
   }
 
   function nativeMenu() {
-    Menu.buildFromTemplate([
+    const menu = Menu.buildFromTemplate([
       { label: '粘贴文字', click: () => onAction('navigate', {view:'paste'}) },
       { label: '截图框选    Alt+Shift+S', click: () => onAction('start-capture') },
       { label: '会话历史', click: () => onAction('open-history') },
@@ -416,7 +418,8 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
       { label: showOrb ? '隐藏悬浮球' : '显示悬浮球', click: () => onAction('show-orb', {visible:!showOrb}) },
       { label: pausedSelection ? '开启划词入口' : '关闭划词入口', click: () => onAction('toggle-selection') },
       { type: 'separator' }, { label: '退出 PickGloss', click: () => onAction('quit') }
-    ]).popup();
+    ]);
+    tray?.popUpContextMenu(menu);
   }
 
   function menu(payload = {}) {
@@ -609,7 +612,7 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
     captureState, broadcast,
     hidePanel() {windows.get('panel')?.hide();},
     isPanelVisible() { const win=windows.get('panel');return Boolean(win&&!win.isDestroyed()&&win.isVisible()); },
-    setPinned(value) { pinned = !!value; windows.get('panel')?.setAlwaysOnTop(true); },
+    setPinned(value) { pinned = !!value; windows.get('panel')?.setAlwaysOnTop(true, 'pop-up-menu'); },
     resetPanelSize() {
       const win = panel(), bounds = win.getBounds();
       stopAnimation();
