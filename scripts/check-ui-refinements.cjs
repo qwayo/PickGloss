@@ -1,5 +1,6 @@
 'use strict';
 // 真实正式渲染器与隔离存储；显示、声音与全局按键均使用替身，不干扰用户桌面。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { app, BrowserWindow, ipcMain, nativeImage } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -27,10 +28,10 @@ async function until(predicate, label) {
   throw Error(`等待${label}超时`);
 }
 async function click(win, selector) {
-  await win.webContents.executeJavaScript(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]')||node.disabled)throw Error('操作目标不可用：'+${JSON.stringify(selector)});node.click()})()`);
+  await win.webContents.executeJavaScript(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]')||node.disabled)throw Error('操作目标不可用：'+${quoteJavaScriptString(selector)});node.click()})()`);
 }
 async function input(selector, value) {
-  await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});node.focus();node.value=${JSON.stringify(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  await evaluate(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});node.focus();node.value=${quoteJavaScriptString(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`);
 }
 async function screenshot(win, filename) {
   await win.webContents.executeJavaScript(`Promise.all(document.getAnimations().filter(item=>item.effect?.getTiming().iterations!==Infinity).map(item=>item.finished.catch(()=>{})))`);
@@ -185,7 +186,7 @@ app.whenReady().then(async () => {
     for (const mode of ['dark', 'light']) {
       fixture.settings = await store.saveSettings({ prefs: { appearance: { ...fixture.settings.prefs.appearance, current: { ...fixture.settings.prefs.appearance.current, mode, material: 'glass' } } } });
       desktop.setAppearance(fixture.settings.prefs.appearance); emit();
-      await until(() => evaluate(`document.documentElement.dataset.appearance===${JSON.stringify(mode)}`), '搜索区主题同步');
+      await until(() => evaluate(`document.documentElement.dataset.appearance===${quoteJavaScriptString(mode)}`), '搜索区主题同步');
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('.history-tools')).backgroundColor`), 'rgba(0, 0, 0, 0)');
       await screenshot(panel, mode === 'dark' ? '历史搜索-炭黑磨砂.png' : '历史搜索-暖白磨砂.png');
     }

@@ -1,4 +1,5 @@
 'use strict';
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
@@ -100,11 +101,11 @@ async function run(output) {
     const ui = browser.evaluate;
     const visible = expression => deadline(() => ui(expression), '界面状态');
     const field = async (name, value) => {
-      const result = await ui(`(() => { const input = document.querySelector(${JSON.stringify(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+      const result = await ui(`(() => { const input = document.querySelector(${quoteJavaScriptString(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${quoteJavaScriptString(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
       assert.equal(result, true, `未找到界面字段：${name}`);
     };
     const click = async (label, selector = 'button') => {
-      const result = await ui(`(() => { const button = [...document.querySelectorAll(${JSON.stringify(selector)})].find(item => item.textContent.trim() === ${JSON.stringify(label)} || item.getAttribute('aria-label') === ${JSON.stringify(label)} || item.getAttribute('title') === ${JSON.stringify(label)}); if (!button || button.disabled) return false; button.click(); return true; })()`);
+      const result = await ui(`(() => { const button = [...document.querySelectorAll(${quoteJavaScriptString(selector)})].find(item => item.textContent.trim() === ${quoteJavaScriptString(label)} || item.getAttribute('aria-label') === ${quoteJavaScriptString(label)} || item.getAttribute('title') === ${quoteJavaScriptString(label)}); if (!button || button.disabled) return false; button.click(); return true; })()`);
       assert.equal(result, true, `未找到可点击入口：${label}`);
     };
     await visible(`Boolean(document.querySelector('[data-field="paste-text"]'))`);
@@ -129,7 +130,7 @@ async function run(output) {
     await visible(`document.body.textContent.includes('开始释义')`);
     await click('开始释义');
     await deadline(() => requests.length === 1, '首轮本机解释请求');
-    await visible(`document.body.textContent.includes(${JSON.stringify(answers[0])}) && !document.body.textContent.includes('正在解释…')`);
+    await visible(`document.body.textContent.includes(${quoteJavaScriptString(answers[0])}) && !document.body.textContent.includes('正在解释…')`);
     await click('会话历史');
     await visible(`Boolean(document.querySelector('.history-item'))`);
     await click('新建');
@@ -141,12 +142,12 @@ async function run(output) {
     await click('会话历史');
     await visible(`document.querySelectorAll('.history-item').length === 2`);
     assert.equal(await ui(`document.querySelector('.history-item .history-title')?.textContent`), '第二条隔离会话');
-    assert.equal(await ui(`(() => { const item = [...document.querySelectorAll('.history-item')].find(entry => entry.textContent.includes(${JSON.stringify(selectedText)})); item?.querySelector('.history-main')?.click(); return Boolean(item); })()`), true);
-    await visible(`document.querySelector('.selected-word')?.textContent === ${JSON.stringify(selectedText)}`);
+    assert.equal(await ui(`(() => { const item = [...document.querySelectorAll('.history-item')].find(entry => entry.textContent.includes(${quoteJavaScriptString(selectedText)})); item?.querySelector('.history-main')?.click(); return Boolean(item); })()`), true);
+    await visible(`document.querySelector('.selected-word')?.textContent === ${quoteJavaScriptString(selectedText)}`);
     await field('question', questionText);
     await click('发送追问');
     await deadline(() => requests.length === 2, '本机追问请求');
-    await visible(`document.body.textContent.includes(${JSON.stringify(answers[1])}) && !document.body.textContent.includes('正在解释…')`);
+    await visible(`document.body.textContent.includes(${quoteJavaScriptString(answers[1])}) && !document.body.textContent.includes('正在解释…')`);
     await click('关闭窗口');
     await visible(`document.visibilityState === 'hidden'`);
     const second = spawnSync(executable, [`--verification-data-dir=${isolated}`], { cwd: packageDirectory, windowsHide: true, timeout: 15000, encoding: 'utf8' });
@@ -159,14 +160,14 @@ async function run(output) {
     await click(`打开会话：${selectedText}`, '.history-item .history-main');
     await visible(`Boolean(document.querySelector('.selected-word'))`);
     assert.equal(await ui(`document.querySelector('.selected-word')?.textContent`), selectedText);
-    assert.equal(await ui(`document.querySelector('.conversation')?.textContent.includes(${JSON.stringify(answers[0])}) && document.querySelector('.conversation')?.textContent.includes(${JSON.stringify(answers[1])})`), true);
+    assert.equal(await ui(`document.querySelector('.conversation')?.textContent.includes(${quoteJavaScriptString(answers[0])}) && document.querySelector('.conversation')?.textContent.includes(${quoteJavaScriptString(answers[1])})`), true);
     assert.equal(requests.length, 2, '历史重开不应自动请求模型');
     // 先让旧会话成为当前会话，再打开一个筛空的历史页；入口仍应取全局最新活动。
     const older = await ui(`window.pickgloss.invoke('bootstrap').then(r=>r.value.history.find(s=>s.text==='第二条隔离会话').id)`);
-    await ui(`window.pickgloss.invoke('open-session',{id:${JSON.stringify(older)}})`);
+    await ui(`window.pickgloss.invoke('open-session',{id:${quoteJavaScriptString(older)}})`);
     await ui(`window.pickgloss.invoke('search-history',{query:'不存在的筛选',savedOnly:true})`);
     assert.equal((await ui(`window.pickgloss.invoke('open-latest-session')`)).ok, true);
-    await visible(`document.querySelector('.selected-word')?.textContent === ${JSON.stringify(selectedText)}`);
+    await visible(`document.querySelector('.selected-word')?.textContent === ${quoteJavaScriptString(selectedText)}`);
     assert.equal(requests.length, 2, '打开最新会话不得重发模型请求');
 
     const firstPayload = JSON.stringify(requests[0].messages);

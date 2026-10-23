@@ -1,5 +1,6 @@
 'use strict';
 // 隐藏的正式渲染器与原生窗口，使用真实设置存储、真实 preload 和虚构会话。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -23,8 +24,8 @@ async function waitFor(predicate, label) {
   throw Error(`等待${label}超时：${await evaluate('document.body.innerText')}`);
 }
 const ready = () => waitFor(() => evaluate(`Boolean(document.querySelector('.panel'))`), '正式界面');
-async function click(selector) { await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]')||node.disabled)throw Error('操作目标不可见或禁用');node.click();})()`); }
-async function input(selector, value) { await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]'))throw Error('输入目标不可见');node.focus();node.value=${JSON.stringify(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`); }
+async function click(selector) { await evaluate(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]')||node.disabled)throw Error('操作目标不可见或禁用');node.click();})()`); }
+async function input(selector, value) { await evaluate(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]'))throw Error('输入目标不可见');node.focus();node.value=${quoteJavaScriptString(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`); }
 async function shot(name) {
   await evaluate(`Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished.catch(()=>{})))`);
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');

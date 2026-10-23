@@ -1,6 +1,7 @@
 'use strict';
 
 // 仅在用户提供本机密钥文件或 DPAPI 凭据后执行；对正式包、虚构样本和按量付费 MiMo 发起真实请求。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
@@ -78,11 +79,11 @@ async function connect(port) {
 function uiActions(evaluate) {
   const visible = (expression, title, timeoutMs) => until(() => evaluate(expression), title, timeoutMs);
   const field = async (name, value) => {
-    const expression = `(() => { const input = document.querySelector(${JSON.stringify(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`;
+    const expression = `(() => { const input = document.querySelector(${quoteJavaScriptString(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${quoteJavaScriptString(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`;
     assert.equal(await evaluate(expression), true, `未找到字段：${name}`);
   };
   const click = async (label, selector = 'button') => {
-    const expression = `(() => { const node = [...document.querySelectorAll(${JSON.stringify(selector)})].find(item => item.getClientRects().length && !item.disabled && (item.textContent.trim() === ${JSON.stringify(label)} || item.getAttribute('aria-label') === ${JSON.stringify(label)} || item.getAttribute('title') === ${JSON.stringify(label)})); if (!node) return false; node.click(); return true; })()`;
+    const expression = `(() => { const node = [...document.querySelectorAll(${quoteJavaScriptString(selector)})].find(item => item.getClientRects().length && !item.disabled && (item.textContent.trim() === ${quoteJavaScriptString(label)} || item.getAttribute('aria-label') === ${quoteJavaScriptString(label)} || item.getAttribute('title') === ${quoteJavaScriptString(label)})); if (!node) return false; node.click(); return true; })()`;
     await until(() => evaluate(expression), `可点击入口：${label}`);
   };
   return { visible, field, click };

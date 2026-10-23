@@ -1,5 +1,6 @@
 'use strict';
 // 使用正式候选包和隔离虚构数据，贯通会话整理、留存和旧记录读取。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
@@ -181,12 +182,12 @@ async function run(output, artifactRoot, exclusive) {
     let ui = await launch();
     const visible = (expression, title = '界面状态') => until(() => ui(expression), title);
     const field = async (name, value) => {
-      assert.equal(await ui(`(() => { const input = document.querySelector(${JSON.stringify(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`), true, `找不到字段：${name}`);
+      assert.equal(await ui(`(() => { const input = document.querySelector(${quoteJavaScriptString(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${quoteJavaScriptString(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`), true, `找不到字段：${name}`);
     };
     const click = async (label, selector = 'button') => {
-      await until(() => ui(`(() => { const item = [...document.querySelectorAll(${JSON.stringify(selector)})].find(node => node.textContent.trim() === ${JSON.stringify(label)} || node.getAttribute('aria-label') === ${JSON.stringify(label)} || node.getAttribute('title') === ${JSON.stringify(label)}); if (!item || item.disabled) return false; item.click(); return true; })()`), `可点击入口：${label}`);
+      await until(() => ui(`(() => { const item = [...document.querySelectorAll(${quoteJavaScriptString(selector)})].find(node => node.textContent.trim() === ${quoteJavaScriptString(label)} || node.getAttribute('aria-label') === ${quoteJavaScriptString(label)} || node.getAttribute('title') === ${quoteJavaScriptString(label)}); if (!item || item.disabled) return false; item.click(); return true; })()`), `可点击入口：${label}`);
     };
-    const count = async expected => visible(`document.querySelector('.history-count')?.textContent === ${JSON.stringify(`${expected} 个会话`)}`, `历史数量 ${expected}`);
+    const count = async expected => visible(`document.querySelector('.history-count')?.textContent === ${quoteJavaScriptString(`${expected} 个会话`)}`, `历史数量 ${expected}`);
     const search = async (query, expected) => {
       await visible(`Boolean(document.querySelector('[data-field="history-search"]'))`, '历史搜索入口');
       await field('history-search', query);

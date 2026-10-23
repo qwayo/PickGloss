@@ -1,5 +1,6 @@
 'use strict';
 // 在隐藏的正式 Electron 渲染器里重放输入事件；IPC 和模型由固定样本替代。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -49,7 +50,7 @@ app.whenReady().then(async () => {
     await waitFor(`Boolean(document.querySelector('[data-field="question"]'))`, '追问框');
     const composition = await win.webContents.executeJavaScript(`(() => {
       const input = document.querySelector('[data-field="question"]');
-      input.focus(); input.value = ${JSON.stringify(fixture.contextQuestion)};
+      input.focus(); input.value = ${quoteJavaScriptString(fixture.contextQuestion)};
       input.dispatchEvent(new Event('input', { bubbles: true }));
       const key = options => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...options }));
       const composing = key({ isComposing: true });
@@ -80,7 +81,7 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('[data-field="question"]'); input.value='语境模式未发送草稿'; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelectorAll('.mode-tabs button')[1].click(); })()`);
     await waitFor(`document.querySelector('[data-field="question"]')?.dataset.mode==='independent'`, '独立释义');
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-field="question"]').value`), '');
-    await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('[data-field="question"]'); input.value=${JSON.stringify(fixture.independentDraft)}; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelectorAll('.mode-tabs button')[0].click(); })()`);
+    await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('[data-field="question"]'); input.value=${quoteJavaScriptString(fixture.independentDraft)}; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelectorAll('.mode-tabs button')[0].click(); })()`);
     await waitFor(`document.querySelector('[data-field="question"]')?.dataset.mode==='context'`, '语境解释');
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-field="question"]').value`), '语境模式未发送草稿');
     await win.webContents.executeJavaScript(`document.querySelector('.panel-footer .provider').click()`);
@@ -96,7 +97,7 @@ app.whenReady().then(async () => {
     current.session = { id: '工单16固定截图会话', kind: 'image', imageData: fixture.imageData, note: '', activeMode: 'visual', threads: { visual: { status: 'idle', messages: [], draft: '' } } };
     await win.loadFile(path.join(sourceRoot, 'src/renderer/index.html'));
     await waitFor(`Boolean(document.querySelector('[data-field="image-note"]'))`, '截图说明');
-    await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('[data-field="image-note"]'); input.value=${JSON.stringify(fixture.imageNote)}; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('.panel-footer .provider').click(); })()`);
+    await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('[data-field="image-note"]'); input.value=${quoteJavaScriptString(fixture.imageNote)}; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('.panel-footer .provider').click(); })()`);
     await waitFor(`Boolean(document.querySelector('.settings-section'))`, '截图服务设置');
     assert.ok(calls.some(call => call.action === 'set-note' && call.payload.id === current.session.id && call.payload.note === fixture.imageNote));
     await win.webContents.executeJavaScript(`document.querySelector('[title="返回"]').click()`);
