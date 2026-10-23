@@ -1,4 +1,5 @@
 'use strict';
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 // 使用正式渲染器和桌面模块，隔离数据、模型、剪贴板、划词进程与托盘。
 const electron = require('electron');
 const { app, ipcMain } = electron;
@@ -28,7 +29,7 @@ async function until(predicate, label) {
   while (Date.now() < deadline) { if (await predicate()) return; await delay(10); }
   throw Error(`等待${label}超时`);
 }
-async function click(selector) { await evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`); }
+async function click(selector) { await evaluate(`document.querySelector(${quoteJavaScriptString(selector)}).click()`); }
 async function shot(name, win = panel) {
   await win.webContents.executeJavaScript('Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))');
   await win.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
@@ -123,7 +124,7 @@ app.whenReady().then(async () => {
     for (const mode of ['light', 'dark', 'light', 'dark']) for (const material of ['glass', 'solid']) {
       state.settings.prefs.appearance.current = { ...state.settings.prefs.appearance.current, mode, material };
       desktop.setAppearance(state.settings.prefs.appearance); emit();
-      await until(() => evaluate(`document.documentElement.dataset.appearance===${JSON.stringify(mode)}`), '主题切换');
+      await until(() => evaluate(`document.documentElement.dataset.appearance===${quoteJavaScriptString(mode)}`), '主题切换');
       assert.equal(panel.testShape, undefined, '不能再用像素区域裁切');
       assert.equal(panel.testOptions.transparent, false);
       assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderTopLeftRadius'), '8px');

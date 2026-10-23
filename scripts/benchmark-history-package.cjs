@@ -1,4 +1,5 @@
 'use strict';
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 // 固定虚构样本与正式候选包界面计时；不读取已有用户目录。
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -210,7 +211,7 @@ async function connect(port) {
 
 function observedOperation(action, expected) {
   return `(async () => {
-    const wanted = ${JSON.stringify(expected)};
+    const wanted = JSON.parse(${quoteJavaScriptString(JSON.stringify(expected))});
     const action = ${action};
     return await new Promise((resolve, reject) => {
       let finished = false;
@@ -302,18 +303,18 @@ async function run() {
       for (const item of searchCases) {
         const baselineCount = item.savedOnly ? `${fixture.characteristics.saved} 个会话` : '1000 个会话';
         await ui(`(() => {
-          const name = ${JSON.stringify(item.savedOnly ? '手动收藏' : '全部会话')};
+          const name = ${quoteJavaScriptString(item.savedOnly ? '手动收藏' : '全部会话')};
           const tab = [...document.querySelectorAll('[role="tab"]')].find(node => node.textContent.trim() === name);
           if (!tab) throw new Error('找不到历史筛选'); tab.click();
           const input = document.querySelector('[data-field="history-search"]');
           if (!input) throw new Error('找不到历史搜索'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
         })()`);
-        await until(() => ui(`document.querySelector('.history-count')?.textContent === ${JSON.stringify(baselineCount)} && document.querySelector('[data-field="history-search"]')?.value === ''`), '搜索前基线');
+        await until(() => ui(`document.querySelector('.history-count')?.textContent === ${quoteJavaScriptString(baselineCount)} && document.querySelector('[data-field="history-search"]')?.value === ''`), '搜索前基线');
         let value;
         try {
           value = await ui(observedOperation(`() => {
             const input = document.querySelector('[data-field="history-search"]');
-            if (!input) throw new Error('找不到搜索框'); input.value = ${JSON.stringify(item.query)};
+            if (!input) throw new Error('找不到搜索框'); input.value = ${quoteJavaScriptString(item.query)};
             input.dispatchEvent(new Event('input', { bubbles: true }));
           }`, { query: item.query }));
           assert.equal(value.count, `${item.expected} 个会话`, `${item.field}结果数量`);

@@ -16,6 +16,7 @@
     "test:interaction": "electron scripts/check-streaming-controls.cjs",
     "test:markdown": "electron scripts/check-markdown.cjs",
     "check:publication": "node scripts/check-publication-hygiene.cjs",
+    "check:script-encoding": "node scripts/check-script-encoding.cjs",
     "test:composer": "electron scripts/check-composer-flow.cjs",
     "test:reading": "electron scripts/check-reading-layout.cjs"
   },
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "@electron/packager": "20.3.0",
+    "acorn": "8.19.0",
     "electron": "44.9.0"
   }
 }

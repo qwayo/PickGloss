@@ -1,4 +1,5 @@
 'use strict';
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 // 旧版与候选包共用一份隔离虚构数据，走正式 renderer、preload、主进程和正常退出。
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -94,7 +95,7 @@ async function connect(port) {
     return result.result?.value;
   };
   const invoke = async (action, payload = {}) => {
-    const result = await evaluate(`window.pickgloss.invoke(${JSON.stringify(action)}, ${JSON.stringify(payload)})`);
+    const result = await evaluate(`window.pickgloss.invoke(${quoteJavaScriptString(action)}, JSON.parse(${quoteJavaScriptString(JSON.stringify(payload))}))`);
     assert.equal(result?.ok, true, `${action}：${result?.error || '调用失败'}`);
     return result.value;
   };

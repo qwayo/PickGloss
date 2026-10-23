@@ -1,4 +1,5 @@
 'use strict';
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 
 // 同一固定虚构标题的笔画按空白列分簇，避免把左侧来源标签接到回答标题上。
 // 颜色、透明度、取样带和80像素连续性阈值保持不变。
@@ -253,7 +254,7 @@ app.whenReady().then(async () => {
       if (phase === 'idle') return;
       paints.push({ at:performance.now(), phase, dirty:{...dirty}, size:image.getSize(), image });
     });
-    await win.webContents.executeJavaScript(`resizePresentation.start(${JSON.stringify(scrollPosition)})`);
+    await win.webContents.executeJavaScript(`resizePresentation.start(${quoteJavaScriptString(scrollPosition)})`);
     await sleep(100);
     const rounds = [];
     const actions=Array.from({length:cycles},()=>sequence==='rapid'?[{wide:true,wait:145},{wide:false,wait:85},{wide:true,wait:440},{wide:false,wait:370}]:[{wide:true,wait:440},{wide:false,wait:370}]).flat();
@@ -262,7 +263,7 @@ app.whenReady().then(async () => {
       phase = `${round+1}-${wide?'expand':'contract'}`;
       measurementPhase=phase;
       const start = performance.now();
-      const rendererStart = await win.webContents.executeJavaScript(`resizePresentation.phase=${JSON.stringify(phase)}; performance.now()`);
+      const rendererStart = await win.webContents.executeJavaScript(`resizePresentation.phase=${quoteJavaScriptString(phase)}; performance.now()`);
       desktop.setWide(wide);
       await sleep(wait);
       const rendererEnd = await win.webContents.executeJavaScript('performance.now()');

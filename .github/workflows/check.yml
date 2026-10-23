@@ -24,6 +24,10 @@ jobs:
           cache: npm
       - name: 安装依赖
         run: npm ci
+      - name: 脚本编码检查
+        run: npm run check:script-encoding
+      - name: 原生助手编译检查
+        run: npm run build:native -- --output-dir "$env:RUNNER_TEMP/pickgloss-native"
       - name: 安装 Electron 运行时
         run: npx --no-install install-electron
       - name: 公开内容检查
