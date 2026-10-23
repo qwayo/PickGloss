@@ -53,7 +53,7 @@ function desktopHarness({ loading = false, animate = false, onWindowState, windo
     setBackgroundMaterial(value) { if (materialError && value === 'acrylic') throw new Error('测试系统不支持材质'); this.material = value; }
     setBackgroundColor(value) { this.background = value; }
     setShape(rects) { this.shape = rects; }
-    setAlwaysOnTop(value) { this.alwaysOnTop = value; }
+    setAlwaysOnTop(value, level) { this.alwaysOnTop = value; this.alwaysOnTopLevel = level; }
     setIgnoreMouseEvents(value) { this.ignoresMouse = value; }
     show() { const changed = !this.visible; this.visible = true; if (changed) this.emit('show'); } showInactive() { this.show(); } focus() { if (focused !== this) { const previous = focused; focused = this; previous?.emit('blur'); } } hide() { const changed = this.visible; this.visible = false; if (changed) this.emit('hide'); }
     isVisible() { return Boolean(this.visible); }
@@ -61,11 +61,12 @@ function desktopHarness({ loading = false, animate = false, onWindowState, windo
   }
   class FakeTray extends EventEmitter {
     constructor(image) { super(); this.image = image; trays.push(this); }
+    popUpContextMenu(menu) { this.popupMenus ||= []; this.popupMenus.push(menu); }
     setImage(image) { this.image = image; } setToolTip(value) { this.tooltip = value; } destroy() {}
   }
   const display = () => ({ id: 1, bounds: workArea, workArea, scaleFactor: 2 });
   const electron = { BrowserWindow: Window, ipcMain, nativeTheme, desktopCapturer: { getSources: getSources || (async () => []) }, systemPreferences: { getAnimationSettings: () => animationSettings },
-    Menu: { buildFromTemplate(template) { menus.push(template); return { popup() {} }; } }, Tray: FakeTray, nativeImage: { createFromPath: value => value },
+    Menu: { buildFromTemplate(template) { menus.push(template); return { template, popup() {} }; } }, Tray: FakeTray, nativeImage: { createFromPath: value => value },
     utilityProcess: { fork: () => worker }, app: { getAppPath: () => '测试程序目录' }, screen: Object.assign(new EventEmitter(), {
     getCursorScreenPoint: () => ({ x: 500, y: 300 }),
     getDisplayMatching: display, getPrimaryDisplay: display, getAllDisplays: () => [display()],
@@ -84,6 +85,25 @@ function desktopHarness({ loading = false, animate = false, onWindowState, windo
   return { desktop, made, messages, statuses, selections, commands, worker, ipcMain, time, nativeTheme, animationSettings, trays, menus, actions,
     changeDisplay(area) { workArea = area; electron.screen.emit('display-metrics-changed'); } };
 }
+
+test('桌面窗口显式使用原生置顶层级，固定状态切换不退回默认层级', () => {
+  const { desktop, made, worker } = desktopHarness();
+  desktop.openPanel(); desktop.setOrb(true);
+  made.find(win => win.kind === 'orb').emit('ready-to-show');
+  desktop.startSelection(true);
+  worker.emit('message', { type: 'selection', text: '虚构选区', point: { x: 700, y: 300 } });
+  desktop.menu({ source: 'panel' });
+  for (const kind of ['panel', 'orb', 'selection', 'menu']) {
+    const win = made.find(value => value.kind === kind);
+    assert.ok(win, `${kind} 应创建窗口`);
+    assert.equal(win.alwaysOnTop, true, `${kind} 不能只依赖构造选项置顶`);
+    assert.equal(win.alwaysOnTopLevel, 'pop-up-menu', `${kind} 应设置能生效的原生层级`);
+  }
+  for (const pinned of [true, false]) {
+    desktop.setPinned(pinned);
+    assert.equal(made.find(win => win.kind === 'panel').alwaysOnTopLevel, 'pop-up-menu');
+  }
+});
 
 test('系统圆角与材质共用非透明原生边界，不再创建像素区域和第二扇光晕窗', () => {
   const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
@@ -404,8 +424,14 @@ test('原生主题跟随系统，托盘使用系统任务栏明暗并提供外�
   assert.equal(win.material, 'none'); assert.equal(win.background, '#252525'); assert.equal(win.opacity, 1); assert.equal(win.options.transparent, false);
   assert.equal(made.find(item => item.kind === 'orb').options.transparent, true);
   assert.equal(win.options.title, 'PickGloss'); assert.match(win.options.icon, /pickgloss-app\.png$/);
-  trays[0].emit('click'); menus[0].find(item => item.label === '外观与主题').click();
+  trays[0].emit('click');
+  assert.equal(trays[0].popupMenus.length, 1, '左键应使用所属托盘的原生弹出入口');
+  assert.equal(trays[0].popupMenus[0].template, menus[0]);
+  menus[0].find(item => item.label === '外观与主题').click();
   assert.deepEqual(actions.at(-1), ['open-appearance']);
+  trays[0].emit('right-click');
+  assert.equal(trays[0].popupMenus.length, 2, '右键应使用所属托盘的原生弹出入口');
+  assert.equal(trays[0].popupMenus[1].template, menus[1]);
 });
 
 test('置顶与无描边均不创建独立光晕窗，窗口显示和尺寸始终归主窗', () => {
