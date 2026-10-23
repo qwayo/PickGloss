@@ -1,5 +1,6 @@
 'use strict';
 // 从统一的选区与释义气泡标志生成矢量、应用和系统托盘位图，窗口保持隐藏。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -25,7 +26,7 @@ app.whenReady().then(async () => {
     for (const [file, color] of [['pickgloss-shi-tray.svg', '#111111'], ['pickgloss-shi-tray-inverse.svg', '#e5e7eb']]) await fs.writeFile(path.join(target, file), `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><title>PickGloss：选区与释义气泡</title>${paths('small', color)}</svg>\n`);
     await fs.writeFile(path.join(target, 'pickgloss-shi-symbols.svg'), `<svg xmlns="http://www.w3.org/2000/svg"><defs>${['standard','small'].map(name => `<symbol id="${name}" viewBox="0 0 32 32">${paths(name, 'currentColor')}</symbol>`).join('')}</defs></svg>\n`);
     const raster = async (svg, size) => {
-      const result = await win.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>{const canvas=document.createElement('canvas');canvas.width=${size};canvas.height=${size};canvas.getContext('2d').drawImage(image,0,0,${size},${size});resolve(canvas.toDataURL('image/png'));};image.onerror=()=>reject(Error('图标导出失败'));image.src=${JSON.stringify(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)};})`);
+      const result = await win.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>{const canvas=document.createElement('canvas');canvas.width=${size};canvas.height=${size};canvas.getContext('2d').drawImage(image,0,0,${size},${size});resolve(canvas.toDataURL('image/png'));};image.onerror=()=>reject(Error('图标导出失败'));image.src=${quoteJavaScriptString(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)};})`);
       return Buffer.from(result.split(',')[1], 'base64');
     };
     for (const [name, size, svg] of [

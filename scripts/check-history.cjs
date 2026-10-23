@@ -1,5 +1,6 @@
 'use strict';
 // 真实界面搭配隔离 IPC 数据检查交互；不访问用户会话、剪贴板、服务或回收站。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -41,7 +42,7 @@ async function until(expression) {
   throw new Error(`界面未达到预期状态：${expression}`);
 }
 async function search(value, count) {
-  await run(`(() => { const input=document.querySelector('[data-field="history-search"]'); input.value=${JSON.stringify(value)}; input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+  await run(`(() => { const input=document.querySelector('[data-field="history-search"]'); input.value=${quoteJavaScriptString(value)}; input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
   await until(`document.querySelector('.history-count')?.textContent === '${count} 个会话'`);
 }
 app.whenReady().then(async () => {

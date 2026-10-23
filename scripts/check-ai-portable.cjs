@@ -1,5 +1,6 @@
 'use strict';
 
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
@@ -73,11 +74,11 @@ async function connect(port) {
 function uiActions(evaluate) {
   const visible = (expression, title) => until(() => evaluate(expression), title);
   const field = async (name, value) => {
-    const expression = `(() => { const input = document.querySelector(${JSON.stringify(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`;
+    const expression = `(() => { const input = document.querySelector(${quoteJavaScriptString(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${quoteJavaScriptString(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`;
     assert.equal(await evaluate(expression), true, `未找到字段：${name}`);
   };
   const click = async (label, selector = 'button') => {
-    const expression = `(() => { const node = [...document.querySelectorAll(${JSON.stringify(selector)})].find(item => item.getClientRects().length && !item.disabled && (item.textContent.trim() === ${JSON.stringify(label)} || item.getAttribute('aria-label') === ${JSON.stringify(label)} || item.getAttribute('title') === ${JSON.stringify(label)})); if (!node) return false; node.click(); return true; })()`;
+    const expression = `(() => { const node = [...document.querySelectorAll(${quoteJavaScriptString(selector)})].find(item => item.getClientRects().length && !item.disabled && (item.textContent.trim() === ${quoteJavaScriptString(label)} || item.getAttribute('aria-label') === ${quoteJavaScriptString(label)} || item.getAttribute('title') === ${quoteJavaScriptString(label)})); if (!node) return false; node.click(); return true; })()`;
     await until(() => evaluate(expression), `可点击入口：${label}`);
   };
   return { visible, field, click };
@@ -157,7 +158,7 @@ async function run(output) {
     await ui.field('paste-text', TEXT);
     await ui.field('paste-context', PARAGRAPH);
     await ui.click('开始解释');
-    await ui.visible(`document.querySelector('.selected-word')?.textContent === ${JSON.stringify(TEXT)}`, '已接纳文字会话');
+    await ui.visible(`document.querySelector('.selected-word')?.textContent === ${quoteJavaScriptString(TEXT)}`, '已接纳文字会话');
     const textId = await until(async () => {
       const entries = await fs.readdir(path.join(isolated, 'data', 'sessions'));
       return entries.find(id => id !== image.id);

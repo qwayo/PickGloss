@@ -1,6 +1,7 @@
 'use strict';
 // 使用实际 Electron DOM 和鼠标事件，在按下与松开之间确定性插入流式状态。
 // 窗口隐藏、数据隔离，测试桥不调用实际模型，也不读取用户数据。
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -55,7 +56,7 @@ app.whenReady().then(async () => {
       const selector = `[title="${label}"]`;
       let point;
       for (let attempt = 0; attempt < 100 && !point; attempt++) {
-        point = await win.webContents.executeJavaScript(`(() => { const b = document.querySelector(${JSON.stringify(selector)}); if (!b) return null; b.scrollIntoView({block:'nearest'}); const r = b.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)}; })()`);
+        point = await win.webContents.executeJavaScript(`(() => { const b = document.querySelector(${quoteJavaScriptString(selector)}); if (!b) return null; b.scrollIntoView({block:'nearest'}); const r = b.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)}; })()`);
         if (!point) await delay(10);
       }
       assert.ok(point, '停止控件应出现');
@@ -82,7 +83,7 @@ app.whenReady().then(async () => {
       assert.equal(await win.webContents.executeJavaScript(`document.querySelectorAll('.stream-status,.stream-dot').length`), 0, '已有内容时完整重绘也不再显示正在解释');
       assert.equal(await win.webContents.executeJavaScript(`document.querySelectorAll('.answer-pane [title="停止"]').length`), 0, '内容区不重复提供停止按钮');
       assert.equal(await win.webContents.executeJavaScript(`document.querySelectorAll('.answer-actions').length`), 0, '生成中完整重绘仍不显示回答操作栏');
-      await win.webContents.executeJavaScript(`window.testPressedButton = document.querySelector(${JSON.stringify(selector)})`);
+      await win.webContents.executeJavaScript(`window.testPressedButton = document.querySelector(${quoteJavaScriptString(selector)})`);
       await input('mouseDown', point.x, point.y);
       if (!process.argv.includes('--no-stream')) {
         current.session.threads[mode].messages[0].content += '新的流式片段。';
@@ -92,7 +93,7 @@ app.whenReady().then(async () => {
       }
       assert.equal(await win.webContents.executeJavaScript(`document.querySelectorAll('.stream-status,.stream-dot').length`), 0, '继续输出内容时不再显示正在解释');
       assert.equal(await win.webContents.executeJavaScript(`document.querySelectorAll('.answer-actions').length`), 0, '继续输出时也不提前显示复制和重新解释');
-      const retained = await win.webContents.executeJavaScript(`(() => { const b=document.querySelector(${JSON.stringify(selector)}); const r=b.getBoundingClientRect(); return {同一个按钮:b===window.testPressedButton, 原点击仍在按钮范围:${point.x}>=r.left && ${point.x}<=r.right && ${point.y}>=r.top && ${point.y}<=r.bottom}; })()`);
+      const retained = await win.webContents.executeJavaScript(`(() => { const b=document.querySelector(${quoteJavaScriptString(selector)}); const r=b.getBoundingClientRect(); return {同一个按钮:b===window.testPressedButton, 原点击仍在按钮范围:${point.x}>=r.left && ${point.x}<=r.right && ${point.y}>=r.top && ${point.y}<=r.bottom}; })()`);
       await input('mouseUp', point.x, point.y);
       await delay(30);
       const stops = calls.filter(call => call.action === 'stop');
