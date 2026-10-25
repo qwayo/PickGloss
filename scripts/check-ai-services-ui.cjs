@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { setTimeout: delay } = require('node:timers/promises');
+const { createUiDriver } = require('./ui-driver.cjs');
 
 app.setPath('userData', path.join(os.tmpdir(), `pickgloss-services-ui-${process.pid}`));
 const rootArg = process.argv.indexOf('--app-root');
@@ -25,6 +26,7 @@ const viewportHeight = dimension('--height', 690);
 const imageData = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jUioAAAAASUVORK5CYII=';
 const calls = [], openedLinks = [], remoteRequests = [], consoleErrors = [];
 let win, sendFailureMode = '';
+const driver = createUiDriver(code => win.webContents.executeJavaScript(code));
 
 const current = {
   view: 'explain', history: [], settingsFilePath: 'C:\\Users\\Mock\\PickGloss\\settings.json',
@@ -148,11 +150,7 @@ ipcMain.handle('test:invoke', async (_, action, payload) => {
 });
 
 async function waitFor(script, description) {
-  for (let index = 0; index < 180; index++) {
-    if (await win.webContents.executeJavaScript(script)) return;
-    await delay(10);
-  }
-  throw new Error(`等待${description}超时`);
+  await driver.waitFor(script, description, { stage: description, allowErrors: true });
 }
 
 async function waitForCall(action, predicate = () => true) {
@@ -161,7 +159,8 @@ async function waitForCall(action, predicate = () => true) {
     if (found) return found;
     await delay(10);
   }
-  throw new Error(`等待 IPC 操作 ${action} 超时`);
+  driver.phase(`等待 IPC 操作 ${action}`);
+  throw await driver.diagnose('目标 IPC 操作已到达');
 }
 
 async function verifyQuestionDraftRecovery(id, delivery, edits, expected) {
@@ -221,6 +220,14 @@ app.whenReady().then(async () => {
     });
     await win.loadFile(path.join(sourceRoot, 'src/renderer/index.html'));
     await waitFor(`Boolean(document.querySelector('.composer .web-search-toggle'))`, '追问联网按钮');
+    // 仅模拟本测试窗口的媒体条件，不修改系统偏好；两种条件都执行，避免 CI 的系统偏好吞掉动效断言。
+    win.webContents.debugger.attach('1.3');
+    await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    await waitFor(`matchMedia('(prefers-reduced-motion: reduce)').matches && document.documentElement.classList.contains('reduced-motion')`, '系统减少动态效果媒体');
+    assert.equal(await win.webContents.executeJavaScript(`[...document.querySelectorAll('.mode-content,.mode-tabs .mode-indicator')].reduce((sum,node)=>sum+node.getAnimations().length,0)`), 0, '系统媒体要求减少动态效果时取消内容与横条动画');
+    await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+    await waitFor(`!matchMedia('(prefers-reduced-motion: reduce)').matches && !document.documentElement.classList.contains('reduced-motion')`, '正常动效媒体');
+    console.log('隔离窗口减少动态效果与正常动效两种媒体条件检查通过。');
 
     const initial = await win.webContents.executeJavaScript(`(() => ({
       searchPressed: document.querySelector('.composer .web-search-toggle').getAttribute('aria-pressed'),
@@ -483,7 +490,7 @@ app.whenReady().then(async () => {
     for (let index = 0; index < 180 && openedLinks.length < 2; index++) await delay(10);
     assert.deepEqual(openedLinks.at(-1), 'https://api.search.brave.com/app/keys', '官方 API Key 入口使用 open-link');
 
-    await win.webContents.executeJavaScript(`(() => { const button=[...document.querySelectorAll('[data-provider="search"] button')].find(node=>node.textContent==='测试搜索服务'); button.click(); })()`);
+    await driver.click('测试搜索服务', { scope: '[data-provider="search"]' });
     await waitFor(`document.querySelector('[data-provider="search"] .test-result')?.textContent.includes('虚构搜索服务连接成功')`, '搜索服务测试反馈');
     const searchTest = calls.find(item => item.action === 'test-search-provider');
     assert.deepEqual(searchTest?.payload, { config: { providerId: 'brave', baseUrl: 'https://saved.brave.invalid' } });
@@ -499,7 +506,7 @@ app.whenReady().then(async () => {
     assert.deepEqual(customDraft,{protocol:'deepseek',url:'https://custom-search.mock.invalid/query',key:'虚构自定义搜索Key',visible:true,keyLinkHidden:true});
     await pushState();
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="search-protocol"]').value`),'deepseek','状态重绘保留未保存的协议选择');
-    await win.webContents.executeJavaScript(`([...document.querySelectorAll('[data-provider="search"] button')].find(node=>node.textContent==='测试搜索服务')).click()`);
+    await driver.click('测试搜索服务', { scope: '[data-provider="search"]' });
     await waitForCall('test-search-provider',item=>item.payload.config.providerId==='custom');
     assert.deepEqual(calls.find(item=>item.action==='test-search-provider'&&item.payload.config.providerId==='custom').payload.config,{providerId:'custom',protocol:'deepseek',baseUrl:'https://custom-search.mock.invalid/query',apiKey:'虚构自定义搜索Key'});
     await delay(220);
@@ -536,7 +543,8 @@ app.whenReady().then(async () => {
     console.log(`AI 服务 renderer 隔离交互通过（请求视口 ${viewportWidth}×${viewportHeight}）；截图证据：${outputRoot}`);
     clearTimeout(watchdog); win.destroy(); app.exit(0);
   } catch (error) {
-    console.error(error.stack);
+    console.error(error.message.startsWith('界面检查失败：') ? error.message : (await driver.diagnose('当前界面断言或操作通过', '断言或操作失败').catch(() => new Error('界面检查失败：当前窗口状态不可读取'))).message);
+    console.error(`失败位置：${error.stack?.split('\n').find(line => line.trim().startsWith('at ')) || '未提供位置'}；异常类型：${error.code || error.name}`);
     clearTimeout(watchdog); win?.destroy(); app.exit(1);
   }
 });

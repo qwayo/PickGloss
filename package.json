@@ -18,7 +18,10 @@
     "check:publication": "node scripts/check-publication-hygiene.cjs",
     "check:script-encoding": "node scripts/check-script-encoding.cjs",
     "test:composer": "electron scripts/check-composer-flow.cjs",
-    "test:reading": "electron scripts/check-reading-layout.cjs"
+    "test:reading": "electron scripts/check-reading-layout.cjs",
+    "check:ui": "node scripts/check-ui.cjs",
+    "check:native-edges": "electron scripts/check-native-edges.cjs",
+    "check:portable": "node scripts/check-portable-suite.cjs"
   },
   "dependencies": {
     "markdown-it": "15.0.3",

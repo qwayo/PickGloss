@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
+const { createUiDriver } = require('./ui-driver.cjs');
 
 const selectedText = 'compound';
 const contextText = 'Small discoveries compound over time.';
@@ -53,12 +54,13 @@ async function connect(port) {
   });
   const send = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++serial;
-    pending.set(id, { resolve, reject });
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('界面调试通道响应超时（内容已隐藏）')); }, 12000);
+    pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
     socket.send(JSON.stringify({ id, method, params }));
   });
   const evaluate = async expression => {
     const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || '界面操作失败。');
+    if (result.exceptionDetails) throw new Error('界面操作失败（异常内容已隐藏）。');
     return result.result?.value;
   };
   return { socket, send, evaluate };
@@ -93,21 +95,19 @@ async function run(output) {
   });
   await listen(server);
   const port = server.address().port, debugPort = await freePort();
-  let child, browser;
+  let child, browser, driver;
   try {
     const launchArgs = [`--verification-data-dir=${isolated}`, `--remote-debugging-port=${debugPort}`];
     child = spawn(executable, launchArgs, { cwd: packageDirectory, windowsHide: true, stdio: 'ignore' });
     browser = await connect(debugPort);
     const ui = browser.evaluate;
-    const visible = expression => deadline(() => ui(expression), '界面状态');
+    driver = createUiDriver(ui);
+    const visible = (expression, expected = '目标界面状态') => driver.waitFor(expression, expected, { allowErrors: true });
     const field = async (name, value) => {
       const result = await ui(`(() => { const input = document.querySelector(${quoteJavaScriptString(`[data-field="${name}"]`)}); if (!input) return false; input.value = ${quoteJavaScriptString(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
       assert.equal(result, true, `未找到界面字段：${name}`);
     };
-    const click = async (label, selector = 'button') => {
-      const result = await ui(`(() => { const button = [...document.querySelectorAll(${quoteJavaScriptString(selector)})].find(item => item.textContent.trim() === ${quoteJavaScriptString(label)} || item.getAttribute('aria-label') === ${quoteJavaScriptString(label)} || item.getAttribute('title') === ${quoteJavaScriptString(label)}); if (!button || button.disabled) return false; button.click(); return true; })()`);
-      assert.equal(result, true, `未找到可点击入口：${label}`);
-    };
+    const click = (label, selector = 'button') => driver.click(label, { selector, stage: selector === '.history-item .history-main' ? '打开测试会话' : `点击${label}` });
     await visible(`Boolean(document.querySelector('[data-field="paste-text"]'))`);
     assert.equal((await ui(`window.pickgloss.invoke('open-latest-session')`)).ok, true);
     await visible(`Boolean(document.querySelector('[data-field="paste-text"]'))`);
@@ -121,7 +121,7 @@ async function run(output) {
     const sessionRoot = path.join(isolated, 'data', 'sessions');
     const sessions = await deadline(async () => { const entries = await fs.readdir(sessionRoot); return entries.length === 1 ? entries : null; }, '无配置材料落盘');
     assert.equal(requests.length, 0, '无配置时不得发送请求');
-    await click('配置 AI 服务');
+    await driver.click('配置 AI 服务', { scope: '.panel-footer', stage: '打开 AI 服务设置' });
     await visible(`Boolean(document.querySelector('[data-field="text-baseUrl"]'))`);
     // 隔离模式也检查未选中的厂商草稿；所有预设仅使用本机测试地址。
     await ui(`(() => {
@@ -138,8 +138,23 @@ async function run(output) {
     await field('text-baseUrl', `http://127.0.0.1:${port}/v1`);
     await field('text-model', '本机验证模型');
     await field('text-apiKey', fakeKey);
-    await click('保存设置', '[data-settings-section="service"] button');
-    await visible(`document.body.textContent.includes('开始释义')`);
+    // 失败注入走真实 preload 和主进程校验；拒绝非本机地址发生在网络请求之前。
+    const injectedFailure = process.argv.includes('--inject-save-failure');
+    if (injectedFailure) await field('text-baseUrl', 'https://blocked.invalid/v1');
+    await driver.click('保存设置', { scope: '[data-settings-section="service"]', stage: '保存服务设置' });
+    if (injectedFailure) {
+      await assert.rejects(driver.waitFor(`document.body.textContent.includes('开始释义')`, '保存成功后返回解释页'), error => {
+        assert.match(error.message, /阶段=保存服务设置.*界面拒绝了操作.*隔离模式拒绝服务地址/);
+        assert.doesNotMatch(error.message, /blocked\.invalid|fake-key|compound/);
+        return true;
+      });
+      await wait(250);
+      assert.equal(requests.length, 0, '保存失败后不得发送解释请求');
+      await fs.writeFile(path.join(output, '保存失败注入结果.json'), JSON.stringify({ 通过: true, 阶段: '保存服务设置', 错误: '隔离模式拒绝服务地址', 后续解释请求数: requests.length }, null, 2), 'utf8');
+      console.log('真实便携包保存失败注入通过：定位到保存服务设置阶段，错误已脱敏，后续请求为零。');
+      return;
+    }
+    await driver.waitFor(`document.body.textContent.includes('开始释义')`, '保存成功后返回解释页', { stage: '保存服务设置' });
     await click('开始释义');
     await deadline(() => requests.length === 1, '首轮本机解释请求');
     await visible(`document.body.textContent.includes(${quoteJavaScriptString(answers[0])}) && !document.body.textContent.includes('正在解释…')`);
@@ -202,6 +217,11 @@ async function run(output) {
     const reportPath = path.join(output, '隔离贯通结果.json');
     await fs.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf8');
     console.log(`隔离贯通通过：${manifest.candidateId}；本机请求 ${requests.length} 次；报告 ${reportPath}`);
+  } catch (error) {
+    const diagnostic = driver ? (await driver.diagnose('本阶段检查通过', '断言或操作失败').catch(() => new Error('界面调试通道不可用'))).message : '正式界面尚未连接';
+    const safe = error.message.startsWith('界面检查失败：') ? error.message : `${diagnostic}；异常类型=${error.code || error.name}`;
+    await fs.writeFile(path.join(output, '便携失败诊断.json'), JSON.stringify({ 通过: false, 诊断: safe }, null, 2), 'utf8');
+    throw new Error(safe);
   } finally {
     browser?.socket.close();
     if (child?.pid) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, encoding: 'utf8' });

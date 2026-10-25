@@ -9,6 +9,7 @@ const path = require('node:path');
 const Module = require('node:module');
 const assert = require('node:assert/strict');
 const { setTimeout: delay } = require('node:timers/promises');
+const { createUiDriver } = require('./ui-driver.cjs');
 const root = path.resolve(process.argv.find(a => a.startsWith('--source-root='))?.slice(14) || path.join(__dirname, '..'));
 const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/floating-20261021') : path.resolve(process.argv[outputIndex + 1]);
@@ -22,15 +23,20 @@ class TestWindow extends electron.BrowserWindow {
   setBounds(bounds) { this.resizeCalls ||= []; this.resizeCalls.push({ width: bounds.width, height: bounds.height }); super.setBounds(bounds); }
   setShape(rects) { this.testShape = rects; super.setShape(rects); }
 }
-let desktop, panel, store, state, failSave = false;
+let desktop, panel, store, state, failSave = false, fixtureReducedMotion = false;
 const errors = [], checks = [];
 const evaluate = code => panel.webContents.executeJavaScript(code);
+const driver = createUiDriver(evaluate, { timeoutMs: 7000, intervalMs: 10 });
 async function until(predicate, label) {
   const deadline = Date.now() + 7000;
   while (Date.now() < deadline) { if (await predicate()) return; await delay(10); }
-  throw Error(`等待${label}超时`);
+  driver.phase(label);
+  throw await driver.diagnose(label);
 }
-async function click(selector) { await evaluate(`document.querySelector(${quoteJavaScriptString(selector)}).click()`); }
+async function click(selector) {
+  await driver.waitFor(`Boolean(document.querySelector(${quoteJavaScriptString(selector)})?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))`, '切换动画结束且控件可见', { stage: `点击控件 ${selector}`, allowErrors: true });
+  await driver.click(undefined, { selector, stage: `点击控件 ${selector}` });
+}
 async function shot(name, win = panel) {
   await win.webContents.executeJavaScript('Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))');
   await win.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
@@ -65,12 +71,19 @@ app.whenReady().then(async () => {
     const target = path.join(root, 'src/windows/desktop.cjs'), loaded = new Module(target, module);
     loaded.filename = target; loaded.paths = module.paths;
     const forbidden = () => { throw Error('隔离检查禁止访问桌面采集和托盘'); };
-    loaded.require = name => name === 'electron' ? { ...electron, BrowserWindow: TestWindow, Tray: class { constructor() { forbidden(); } }, utilityProcess: { fork: forbidden }, desktopCapturer: { getSources: forbidden } } : Module.prototype.require.call(loaded, name);
+    loaded.require = name => name === 'electron' ? { ...electron, BrowserWindow: TestWindow,
+      systemPreferences: { ...electron.systemPreferences, getAnimationSettings: () => preview ? electron.systemPreferences.getAnimationSettings() : { prefersReducedMotion: fixtureReducedMotion, shouldRenderRichAnimation: !fixtureReducedMotion } },
+      Tray: class { constructor() { forbidden(); } }, utilityProcess: { fork: forbidden }, desktopCapturer: { getSources: forbidden } } : Module.prototype.require.call(loaded, name);
     loaded._compile(await fs.readFile(target, 'utf8'), target);
     desktop = loaded.exports.createDesktop({ onAction() {}, onSelection() {}, onStatus(patch) { Object.assign(state.status, patch); if (typeof patch.wide === 'boolean') state.wide = patch.wide; emit(); } });
     desktop.setAppearance(state.settings.prefs.appearance); desktop.setWide(false); panel = windows[0];
     panel.webContents.on('console-message', event => { if (event.level === 'error') errors.push(event.message); });
     await until(() => evaluate('Boolean(document.querySelector(".message"))'), '正式界面');
+    if (!preview) {
+      panel.webContents.debugger.attach('1.3');
+      await panel.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+      await until(() => evaluate('!matchMedia("(prefers-reduced-motion: reduce)").matches && !document.documentElement.classList.contains("reduced-motion")'), '隐藏窗口正常动效媒体');
+    }
     if (process.argv.includes('--position-only')) {
       const area = electron.screen.getPrimaryDisplay().workArea, records = [];
       for (let round = 0; round < 3; round++) for (const fraction of [.52, .64, .8]) {
@@ -213,6 +226,22 @@ app.whenReady().then(async () => {
     await until(() => evaluate('!document.documentElement.classList.contains("layout-preparing")'), '目标内容恢复显示');
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel-body")).visibility'), 'visible');
     checks.push({ 检查: '三轮往返逐帧检查及即时反向', 采样帧: frames.length, 重叠: false });
+    // 减少动态效果是另一条必检路径；不跳过上方正常动效的逐帧断言。
+    await evaluate('Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))');
+    fixtureReducedMotion = true;
+    const reducedResizeStart = panel.resizeCalls.length;
+    for (const wide of [true, false]) {
+      await handle('wide', { wide });
+      assert.equal(state.status.reducedMotion, true);
+      assert.equal(state.status.windowTransitioning, false, '减少动态效果时直接提交目标尺寸');
+      assert.equal(panel.getBounds().width, wide ? 860 : 300);
+    }
+    assert.deepEqual(panel.resizeCalls.slice(reducedResizeStart).map(bounds => bounds.width), [860, 300], '减少动态效果时每次仅写入一次目标尺寸');
+    await until(() => evaluate('document.documentElement.classList.contains("reduced-motion")'), '原生减少动态效果同步');
+    assert.equal(await evaluate('document.querySelector(".panel-body").getAnimations().length'), 0, '减少动态效果时不播放布局恢复动画');
+    fixtureReducedMotion = false; desktop.setAppearance(state.settings.prefs.appearance);
+    await until(() => evaluate('!document.documentElement.classList.contains("reduced-motion")'), '原生正常动效恢复');
+    checks.push({ 检查: '原生减少动态效果直接落位及正常动效恢复', 通过: true });
     desktop.setOrb(true); const orb = windows.find(w => w !== panel && !w.getParentWindow());
     await until(() => orb.webContents.executeJavaScript('Boolean(document.querySelector(".orb"))'), '悬浮球');
     await shot('深色悬浮球', orb);
@@ -222,5 +251,9 @@ app.whenReady().then(async () => {
     await fs.writeFile(path.join(output, '界面检查.json'), JSON.stringify({ 通过: true, 说明: '真实 Electron 隐藏窗口，虚构会话和隔离存储；不代表真实桌面流畅度或系统磨砂观感验收。', checks }, null, 2));
     console.log('悬浮窗检查通过：圆角、主题、置顶、色板指针、识别页和三轮展开采样。');
     clearTimeout(timeout); desktop.dispose(); app.exit(0);
-  } catch (error) { console.error(error); clearTimeout(timeout); desktop?.dispose(); app.exit(1); }
+  } catch (error) {
+    console.error(error.message.startsWith('界面检查失败：') ? error.message : (await driver.diagnose('当前浮窗断言或操作通过', '断言或操作失败').catch(() => new Error('界面检查失败：当前窗口状态不可读取'))).message);
+    console.error(`失败位置：${error.stack?.split('\n').find(line => line.trim().startsWith('at ')) || '未提供位置'}；异常类型：${error.code || error.name}`);
+    clearTimeout(timeout); desktop?.dispose(); app.exit(1);
+  }
 });
