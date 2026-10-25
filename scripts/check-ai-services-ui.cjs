@@ -220,6 +220,14 @@ app.whenReady().then(async () => {
     });
     await win.loadFile(path.join(sourceRoot, 'src/renderer/index.html'));
     await waitFor(`Boolean(document.querySelector('.composer .web-search-toggle'))`, '追问联网按钮');
+    // 仅模拟本测试窗口的媒体条件，不修改系统偏好；两种条件都执行，避免 CI 的系统偏好吞掉动效断言。
+    win.webContents.debugger.attach('1.3');
+    await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    await waitFor(`matchMedia('(prefers-reduced-motion: reduce)').matches && document.documentElement.classList.contains('reduced-motion')`, '系统减少动态效果媒体');
+    assert.equal(await win.webContents.executeJavaScript(`[...document.querySelectorAll('.mode-content,.mode-tabs .mode-indicator')].reduce((sum,node)=>sum+node.getAnimations().length,0)`), 0, '系统媒体要求减少动态效果时取消内容与横条动画');
+    await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+    await waitFor(`!matchMedia('(prefers-reduced-motion: reduce)').matches && !document.documentElement.classList.contains('reduced-motion')`, '正常动效媒体');
+    console.log('隔离窗口减少动态效果与正常动效两种媒体条件检查通过。');
 
     const initial = await win.webContents.executeJavaScript(`(() => ({
       searchPressed: document.querySelector('.composer .web-search-toggle').getAttribute('aria-pressed'),

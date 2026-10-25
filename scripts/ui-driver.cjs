@@ -14,7 +14,8 @@ function inspectUi(options) {
   const pages = [['设置', '.settings-navigation'], ['文字识别', '[data-field="paste-text"]'], ['解释', '.selected-word'], ['历史', '[data-field="history-search"]'], ['截图预览', '.recognition-preview']].filter(([, selector]) => shown(document.querySelector(selector))).map(([name]) => name);
   const alerts = [...document.querySelectorAll('.inline-error,.global-error,.appearance-notice.is-error,[role="alert"]')].filter(node => shown(node) && node.textContent.trim());
   const errors = [...new Set(alerts.map(node => /隔离.*本机|本机.*地址/.test(node.textContent) ? '隔离模式拒绝服务地址' : /写盘|写入|保存失败/.test(node.textContent) ? '设置写入失败' : '界面报告错误（原文已隐藏）'))];
-  const report = { pages, sections, errors, scopes: roots.length, matched: matched.length, visible: visible.length, actionable: active.length };
+  const report = { pages, sections, errors, scopes: roots.length, matched: matched.length, visible: visible.length, actionable: active.length,
+    motionReduced: matchMedia('(prefers-reduced-motion: reduce)').matches, reducedMotion: document.documentElement.classList.contains('reduced-motion') };
   if (options.click && roots.length === 1 && active.length === 1) {
     active[0].scrollIntoView({ block: 'center', inline: 'nearest' });
     active[0].click(); report.clicked = true;
