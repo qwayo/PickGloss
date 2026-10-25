@@ -98,7 +98,7 @@ test('联网资料作为独立引用材料传入，保留原上下文并要求�
   const payload = JSON.stringify(messages);
   assert.ok(payload.includes(input.context));
   assert.ok(payload.includes('来源中的事实'));
-  assert.ok(payload.includes('https://example.com/docs'));
+  assert.deepEqual(JSON.parse(messages.at(-2).content.split('\n')[1]), sources);
   assert.ok(payload.includes('真实来源编号 [1]'));
   assert.ok(payload.includes('选定内容及上下文'));
   assert.equal(messages.filter(message => message.role === 'user').at(-2).content.includes('独立的联网资料'), true);
@@ -120,12 +120,14 @@ test('历史联网引用绑定原回答，本轮来源使用独立编号上下�
     { id: 'old-user', role: 'user', content: '上一个问题' },
     { id: 'old-answer', role: 'assistant', content: '旧回答 [1]', search: { status: 'complete', providerId: 'exa', query: '历史检索词', sources: [{ id: 1, title: '历史来源', url: 'https://history.example/article', snippet: '只对应旧回答' }] } },
   ];
-  const messages = buildMessages(input, 'independent', '新问题', { sources: [{ id: 1, title: '本轮来源', url: 'https://current.example/article', snippet: '只对应新回答' }] });
+  const sources = [{ id: 1, title: '本轮来源', url: 'https://current.example/article', snippet: '只对应新回答' }];
+  const messages = buildMessages(input, 'independent', '新问题', { sources });
   const payload = JSON.stringify(messages);
   assert.ok(payload.includes('旧回答 [1]'));
-  assert.ok(payload.includes('https://history.example/article'));
+  const historical = messages.find(message => message.content.startsWith('以下 JSON 是历史联网资料'));
+  assert.deepEqual(JSON.parse(historical.content.split('\n')[1]).sources, input.threads.independent.messages[1].search.sources);
   assert.ok(payload.includes('只对应旧回答'));
-  assert.ok(payload.includes('https://current.example/article'));
+  assert.deepEqual(JSON.parse(messages.at(-2).content.split('\n')[1]), sources);
   assert.ok(payload.includes('只对应新回答'));
   assert.ok(payload.includes('old-answer'));
   assert.ok(payload.includes('历史回答'));
