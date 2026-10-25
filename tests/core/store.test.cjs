@@ -279,6 +279,173 @@ test('没有宿主加密能力时拒绝保存密钥并保留原设置', async ()
   assert.equal(await fs.readFile(path.join(directory, 'settings.json'), 'utf8'), before);
 });
 
+test('服务厂商草稿分别保存密钥，公开设置不含密文，切换时不继承其他厂商密钥', async () => {
+  const { directory, store, injections } = await setup();
+  await store.saveSettings({
+    text: { providerId: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'deepseek-虚构密钥' },
+    search: { providerId: 'exa', baseUrl: 'https://api.exa.ai/search', apiKey: 'exa-虚构密钥' },
+    serviceProfiles: {
+      text: { mimo: { baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.6-pro', apiKey: 'mimo-虚构密钥' } },
+    },
+  });
+  const publicView = await store.getSettings();
+  assert.deepEqual(publicView.text, { providerId: 'deepseek', baseUrl: 'https://api.deepseek.com', hasKey: true, model: 'deepseek-flash' });
+  assert.equal(publicView.search.providerId, 'exa');
+  assert.equal(publicView.serviceProfiles.text.deepseek.hasKey, true);
+  assert.equal('apiKey' in publicView.serviceProfiles.text.deepseek, false);
+  assert.equal(JSON.stringify(publicView).includes('keyCiphertext'), false);
+  assert.equal(JSON.stringify(publicView).includes('deepseek-虚构密钥'), false);
+
+  const privateView = await store.getSettings({ includeSecrets: true });
+  assert.equal(privateView.serviceProfiles.text.deepseek.apiKey, 'deepseek-虚构密钥');
+  assert.equal(privateView.serviceProfiles.search.exa.apiKey, 'exa-虚构密钥');
+
+  await store.saveSettings({ text: { providerId: 'mimo' } });
+  const selected = await store.getSettings({ includeSecrets: true });
+  assert.equal(selected.text.providerId, 'mimo');
+  assert.equal(selected.text.apiKey, 'mimo-虚构密钥');
+  assert.equal(selected.serviceProfiles.text.deepseek.apiKey, 'deepseek-虚构密钥');
+
+  const before = await fs.readFile(path.join(directory, 'settings.json'), 'utf8');
+  await assert.rejects(store.saveSettings({ serviceProfiles: { text: { mimo: { baseUrl: 'https://other.example/v1' } } } }), { code: 'KEY_ORIGIN_CHANGED' });
+  assert.equal(await fs.readFile(path.join(directory, 'settings.json'), 'utf8'), before);
+
+  const disk = await fs.readFile(path.join(directory, 'settings.json'), 'utf8');
+  for (const secret of ['deepseek-虚构密钥', 'mimo-虚构密钥', 'exa-虚构密钥']) assert.equal(disk.includes(secret), false);
+  const restarted = createStore(injections); await restarted.init();
+  assert.equal((await restarted.getSettings({ includeSecrets: true })).serviceProfiles.text.deepseek.apiKey, 'deepseek-虚构密钥');
+});
+
+test('自定义搜索协议随服务草稿保存，预设协议固定且各 provider 密钥隔离', async () => {
+  const { directory, store, injections } = await setup();
+  const initial = await store.getSettings();
+  assert.equal(initial.serviceProfiles.search.custom.protocol, 'exa');
+  assert.equal(initial.serviceProfiles.search.custom.baseUrl, '');
+  await store.saveSettings({
+    search: { providerId: 'custom', protocol: 'brave', baseUrl: 'https://custom.example.test/search', apiKey: 'custom-虚构密钥' },
+    serviceProfiles: {
+      search: {
+        exa: { protocol: 'deepseek', baseUrl: 'https://api.exa.ai/search', apiKey: 'exa-虚构密钥' },
+        custom: { protocol: 'deepseek' },
+      },
+    },
+  });
+
+  const publicView = await store.getSettings();
+  assert.deepEqual(publicView.search, {
+    providerId: 'custom', protocol: 'brave', baseUrl: 'https://custom.example.test/search', hasKey: true,
+  });
+  assert.equal(publicView.serviceProfiles.search.custom.protocol, 'brave');
+  assert.equal(publicView.serviceProfiles.search.exa.protocol, 'exa');
+  assert.equal('apiKey' in publicView.serviceProfiles.search.custom, false);
+
+  let privateView = await store.getSettings({ includeSecrets: true });
+  assert.equal(privateView.serviceProfiles.search.custom.apiKey, 'custom-虚构密钥');
+  assert.equal(privateView.serviceProfiles.search.custom.protocol, 'brave');
+  assert.equal(privateView.serviceProfiles.search.exa.apiKey, 'exa-虚构密钥');
+  assert.equal(privateView.serviceProfiles.search.exa.protocol, 'exa');
+
+  await store.saveSettings({ search: { providerId: 'exa', protocol: 'deepseek' } });
+  privateView = await store.getSettings({ includeSecrets: true });
+  assert.equal(privateView.search.protocol, 'exa');
+  assert.equal(privateView.search.apiKey, 'exa-虚构密钥');
+  await store.saveSettings({ search: { providerId: 'custom' } });
+  privateView = await store.getSettings({ includeSecrets: true });
+  assert.equal(privateView.search.protocol, 'brave');
+  assert.equal(privateView.search.apiKey, 'custom-虚构密钥');
+
+  const disk = await fs.readFile(path.join(directory, 'settings.json'), 'utf8');
+  assert.equal(disk.includes('custom-虚构密钥'), false);
+  assert.equal(disk.includes('exa-虚构密钥'), false);
+  const restarted = createStore(injections); await restarted.init();
+  privateView = await restarted.getSettings({ includeSecrets: true });
+  assert.equal(privateView.search.protocol, 'brave');
+  assert.equal(privateView.serviceProfiles.search.custom.apiKey, 'custom-虚构密钥');
+  assert.equal(privateView.serviceProfiles.search.exa.protocol, 'exa');
+});
+
+test('自定义搜索协议只接受三个已支持适配', async () => {
+  const { directory, store } = await setup();
+  const before = await fs.readFile(path.join(directory, 'settings.json'), 'utf8');
+  await assert.rejects(store.saveSettings({ search: { providerId: 'custom', protocol: 'arbitrary-template' } }), { code: 'INVALID_INPUT' });
+  assert.equal(await fs.readFile(path.join(directory, 'settings.json'), 'utf8'), before);
+});
+
+test('旧 version 1 平面密钥迁移到 custom 草稿且截图自动解释默认关闭', async () => {
+  const { directory, store, injections } = await setup();
+  await store.saveSettings({ text: { baseUrl: 'https://legacy.example/v1', model: '旧模型', apiKey: '旧配置虚构密钥' } });
+  const file = path.join(directory, 'settings.json');
+  const legacy = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete legacy.serviceProfiles; delete legacy.search; delete legacy.text.providerId; delete legacy.vision.providerId;
+  delete legacy.prefs.autoExplainCapture; delete legacy.prefs.webSearchEnabled;
+  await fs.writeFile(file, JSON.stringify(legacy), 'utf8');
+  const restarted = createStore(injections); await restarted.init();
+  const migrated = await restarted.getSettings();
+  assert.equal(migrated.text.providerId, 'custom');
+  assert.equal(migrated.serviceProfiles.text.custom.hasKey, true);
+  assert.equal(migrated.prefs.autoExplainCapture, false);
+  assert.equal(migrated.prefs.webSearchEnabled, false);
+  await restarted.saveSettings({ prefs: { autoExplainCapture: true } });
+  const privateView = await restarted.getSettings({ includeSecrets: true });
+  assert.equal(privateView.serviceProfiles.text.custom.apiKey, '旧配置虚构密钥');
+  assert.equal(privateView.prefs.autoExplainCapture, true);
+});
+
+test('联网开关、contextPending、requestQuestion 与安全来源随会话历史保存', async () => {
+  const { store, injections } = await setup();
+  const created = await store.createSession({ text: '选定内容', contextPending: true });
+  assert.equal(created.webSearchEnabled, false);
+  assert.equal(created.contextPending, true);
+  const source = { id: 1, title: '官方资料', url: 'https://example.com/docs', snippet: '可引用的内容' };
+  await store.updateSession(created.id, {
+    webSearchEnabled: true,
+    contextPending: false,
+    threads: { context: { messages: [{ id: 'assistant-1', role: 'assistant', content: '回答 [1]', requestQuestion: '补充解释', search: { status: 'complete', providerId: 'exa', query: '简短问题', sources: [source] } }] } },
+  });
+  const restarted = createStore(injections); await restarted.init();
+  const loaded = await restarted.getSession(created.id);
+  assert.equal(loaded.webSearchEnabled, true);
+  assert.equal(loaded.contextPending, false);
+  assert.equal(loaded.threads.context.messages[0].requestQuestion, '补充解释');
+  assert.deepEqual(loaded.threads.context.messages[0].search.sources, [source]);
+
+  for (const invalidUrl of ['file:///private.txt', 'javascript:alert(1)', 'https://user:pass@example.com']) {
+    await assert.rejects(store.updateSession(created.id, { threads: { context: { messages: [{ id: 'unsafe', role: 'assistant', content: 'x', search: { status: 'complete', providerId: 'exa', query: 'x', sources: [{ id: 1, title: '不安全', url: invalidUrl }] } }] } } }), { code: 'INVALID_INPUT' });
+  }
+  await assert.rejects(store.updateSession(created.id, { threads: { context: { messages: [{ id: 'too-many', role: 'assistant', content: 'x', search: { status: 'complete', providerId: 'exa', query: 'x', sources: Array.from({ length: 11 }, (_, index) => ({ id: index + 1, title: '标题', url: `https://example.com/${index}` })) } }] } } }), { code: 'INVALID_INPUT' });
+});
+
+test('全局联网偏好默认关闭、供新会话继承并在重启后保留', async () => {
+  const { store, injections } = await setup();
+  const existing = await store.createSession({ text: '既有材料' });
+  assert.equal(existing.webSearchEnabled, false);
+
+  const savedSettings = await store.saveSettings({ prefs: { webSearchEnabled: true } });
+  assert.equal(savedSettings.prefs.webSearchEnabled, true);
+  const inherited = await store.createSession({ text: '新材料' });
+  assert.equal(inherited.webSearchEnabled, true);
+  const explicitOverride = await store.createSession({ text: '显式关闭的新材料', webSearchEnabled: false });
+  assert.equal(explicitOverride.webSearchEnabled, false);
+  assert.equal((await store.getSession(existing.id)).webSearchEnabled, false, '全局默认值不能改写既有会话');
+
+  const restarted = createStore(injections);
+  await restarted.init();
+  assert.equal((await restarted.getSettings()).prefs.webSearchEnabled, true);
+  const afterRestart = await restarted.createSession({ text: '重启后的新材料' });
+  assert.equal(afterRestart.webSearchEnabled, true);
+  assert.equal((await restarted.getSession(existing.id)).webSearchEnabled, false);
+});
+
+test('联网搜索词按 Unicode 码点计数并与搜索请求上限一致', async () => {
+  const { store } = await setup();
+  const session = await store.createSession({ text: '选定内容' });
+  const query = '𠮷'.repeat(128);
+  await store.updateSession(session.id, { threads: { context: { messages: [{ id: 'unicode-query', role: 'assistant', content: '完成', search: { status: 'complete', providerId: 'deepseek', query, sources: [] } }] } } });
+  const loaded = await store.getSession(session.id);
+  assert.equal(loaded.threads.context.messages[0].search.query, query);
+  await assert.rejects(store.updateSession(session.id, { threads: { context: { messages: [{ id: 'too-long-query', role: 'assistant', content: '失败', search: { status: 'failed', providerId: 'deepseek', query: '𠮷'.repeat(129), sources: [] } }] } } }));
+});
+
 test('删除整会话委托宿主回收站，可从宿主保留的目录恢复', async () => {
   let trashed;
   const { directory, store } = await setup({ trash: async (target) => { trashed = `${target}.回收站测试`; await fs.rename(target, trashed); } });

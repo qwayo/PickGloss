@@ -11,9 +11,15 @@ const pending = new Set();
 const errors = new Map();
 const drafts = new Map();
 const dirtyDrafts = new Map();
+const draftVersions = new Map();
+const questionSubmissions = new Map();
 const notes = new Map();
 const dirtyNotes = new Map();
 const tests = new Map();
+const serviceDrafts = { text: new Map(), vision: new Map(), search: new Map() };
+const selectedProviders = { text: 'custom', vision: 'custom', search: 'exa' };
+const webSearchOverrides = new Map();
+const sourceIconCache = new Map();
 const copyFeedback = new Map();
 let state = null;
 let renderedKey = '';
@@ -46,7 +52,8 @@ let readingLayout = window.innerWidth >= 640;
 let readingAnchor = null;
 let transitionAnchor = null;
 let restoringAnchor = false;
-let indicatorPosition = null;
+const tabPositions = new Map();
+const contentTransitions = new Map();
 let layoutViewport = '';
 let menuGeneration = null, menuWasOpen = false, menuAnimation = null, menuSignature = '', menuBusy = false;
 let menuMeasureKey = '';
@@ -111,6 +118,10 @@ function syncWindowLayout() {
   }
   readingLayout = reading;
   root.querySelector('.panel')?.classList.toggle('is-pinned', Boolean(state?.pinned));
+  const panel = root.querySelector('.panel');
+  if (panel && state?.status?.nativeRoundedFrame) {
+    panel.style.setProperty('--actual-panel-border', getComputedStyle(panel).borderLeftWidth);
+  }
   layoutViewport = viewport;
   syncModeIndicator();
   // 状态推送不等于尺寸变化；否则延迟的动画终态会覆盖刚发生的滚动。
@@ -141,19 +152,70 @@ function restoreReadingAnchor(anchor) {
   requestAnimationFrame(() => { restoringAnchor = false; });
 }
 
-function syncModeIndicator() {
-  const tabs = root.querySelector('.mode-tabs[aria-label="解释模式"]');
-  const selected = tabs?.querySelector('[aria-selected="true"]');
-  if (!selected) { indicatorPosition = null; return; }
+// 状态回推会重建节点，保留动画起点和时间，避免横条被重绘打断。
+function syncTabIndicator(tabs, key, value) {
+  const selected = tabs?.querySelector('[role="tab"][aria-selected="true"]');
+  if (!selected) return;
   let indicator = tabs.querySelector('.mode-indicator');
-  if (!indicator) { indicator = el('span', { class: 'mode-indicator', 'aria-hidden': 'true' }); tabs.prepend(indicator); }
-  const next = { key: session()?.id, mode: mode(), left: selected.offsetLeft, width: selected.offsetWidth };
-  if (indicator.style.left !== `${next.left}px`) indicator.style.left = `${next.left}px`;
-  if (indicator.style.width !== `${next.width}px`) indicator.style.width = `${next.width}px`;
-  if (indicatorPosition?.key === next.key && indicatorPosition.mode !== next.mode && !document.documentElement.classList.contains('reduced-motion')) {
-    indicator.animate([{ left: `${indicatorPosition.left}px`, width: `${indicatorPosition.width}px` }, { left: `${next.left}px`, width: `${next.width}px` }], { duration: 200, easing: 'cubic-bezier(.2,.8,.2,1)' });
+  if (!indicator) { indicator = el('span', { class: 'mode-indicator', 'aria-hidden': 'true' }); tabs.append(indicator); }
+  const now = Date.now(), previous = tabPositions.get(key);
+  const next = { value, left: selected.offsetLeft, width: selected.offsetWidth, viewport: window.innerWidth };
+  let transition = previous?.transition;
+  if (previous && previous.viewport === next.viewport && previous.value !== value) {
+    const progress = previous.animation?.effect?.getComputedTiming().progress ?? 1;
+    const from = previous.transition ? {
+      left: previous.transition.from.left + (previous.left - previous.transition.from.left) * progress,
+      width: previous.transition.from.width + (previous.width - previous.transition.from.width) * progress,
+    } : previous;
+    transition = { from: { left: from.left, width: from.width }, start: now };
+  } else if (previous?.viewport !== next.viewport || previous?.left !== next.left || previous?.width !== next.width) transition = null;
+  indicator.style.left = `${next.left}px`; indicator.style.width = `${next.width}px`;
+  for (const animation of indicator.getAnimations()) animation.cancel();
+  if (transition && now - transition.start < 200 && !document.documentElement.classList.contains('reduced-motion')) {
+    next.animation = indicator.animate([{ left: `${transition.from.left}px`, width: `${transition.from.width}px` },
+      { left: `${next.left}px`, width: `${next.width}px` }], { duration: 200, easing: 'cubic-bezier(.2,.8,.2,1)' });
+    next.animation.currentTime = now - transition.start;
+    next.transition = transition;
   }
-  indicatorPosition = next;
+  tabPositions.set(key, next);
+}
+
+function revealTabContent(node, key, value, order) {
+  if (!node) return;
+  const previous = contentTransitions.get(key), now = Date.now();
+  let transition = previous?.transition;
+  if (previous && previous.value !== value) transition = { start: now, direction: order.indexOf(value) >= order.indexOf(previous.value) ? 1 : -1 };
+  for (const animation of node.getAnimations()) animation.cancel();
+  if (transition && now - transition.start < 180 && !document.documentElement.classList.contains('reduced-motion')) {
+    const animation = node.animate([{ opacity: 0, transform: `translateX(${transition.direction * 10}px)` }, { opacity: 1, transform: 'translateX(0)' }],
+      { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' });
+    animation.currentTime = now - transition.start;
+  } else transition = null;
+  contentTransitions.set(key, { value, transition });
+}
+
+function syncModeIndicator() {
+  syncTabIndicator(root.querySelector('.mode-tabs[aria-label="解释模式"]'), `mode:${session()?.id}`, mode());
+  syncTabIndicator(root.querySelector('.settings-navigation'), 'settings', settingsSection);
+  syncTabIndicator(root.querySelector('.mode-tabs[aria-label="服务类型"]'), 'services', settingsTab);
+}
+
+function syncContentTransitions() {
+  if (state?.view === 'settings') {
+    revealTabContent(root.querySelector(`[data-settings-section="${settingsSection}"]`), 'settings', settingsSection, ['general', 'service', 'appearance', 'shortcuts']);
+    if (settingsSection === 'service') revealTabContent(root.querySelector(`[data-provider="${settingsTab}"]`), 'services', settingsTab, ['text', 'vision', 'search']);
+  } else if (state?.view === 'explain') revealTabContent(root.querySelector('.mode-content'), `mode:${session()?.id}`, mode(), ['context', 'independent']);
+}
+
+function stopTabMotion() {
+  for (const position of tabPositions.values()) {
+    position.animation?.cancel();
+    position.animation = null; position.transition = null;
+  }
+  for (const transition of contentTransitions.values()) transition.transition = null;
+  for (const node of root.querySelectorAll('.mode-content, [data-settings-section], [data-provider]')) {
+    for (const animation of node.getAnimations()) animation.cancel();
+  }
 }
 
 document.addEventListener('scroll', event => {
@@ -213,6 +275,7 @@ const iconPaths = {
   pause: ['M8 4v16M16 4v16'],
   orb: ['M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M12 7v10M7 12h10'],
   search: ['M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0M15 15l6 6'],
+  globe: ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z', 'M2 12h20', 'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z'],
   edit: ['m15 4 5 5M4 20l4-1L21 6l-4-4L4 15v5Z'],
 };
 
@@ -226,6 +289,21 @@ function icon(name) {
     path.setAttribute('d', d);
     svg.append(path);
   }
+  return svg;
+}
+
+function nativePinFrame() {
+  const node = (tag, attributes = {}) => {
+    const value = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, attribute] of Object.entries(attributes)) value.setAttribute(key, attribute);
+    return value;
+  };
+  const svg = node('svg', { class: 'native-pin-frame', 'aria-hidden': 'true', focusable: 'false' });
+  const definitions = node('defs');
+  const mask = node('mask', { id: 'native-pin-hole', maskUnits: 'userSpaceOnUse', x: '0', y: '0', width: '100%', height: '100%' });
+  mask.append(node('rect', { width: '100%', height: '100%', fill: 'white' }), node('rect', { class: 'native-pin-cutout', fill: 'black' }));
+  definitions.append(mask);
+  svg.append(definitions, node('rect', { width: '100%', height: '100%', fill: 'currentColor', mask: 'url(#native-pin-hole)' }));
   return svg;
 }
 
@@ -247,6 +325,7 @@ const appearanceUI = createAppearanceUI({
   save: appearance => call('save-settings', { prefs: { appearance } }, { scope: 'appearance', render: false }),
   refresh: () => render(),
   onReducedMotion: () => {
+    stopTabMotion();
     if (!state?.status?.windowTransitioning) { transitionAnchor = null; readingAnchor = captureReadingAnchor(); }
   },
 });
@@ -276,6 +355,55 @@ function thread() { return session()?.threads?.[mode()] || { messages: [], draft
 function draftKey() { return `${session()?.id || ''}:${mode()}`; }
 function target() { return { id: session()?.id, mode: mode() }; }
 function draftValue() { return drafts.has(draftKey()) ? drafts.get(draftKey()) : thread().draft || ''; }
+function trackQuestionSubmission(selected, question, version) {
+  const key = `${selected.id}:${selected.mode}`;
+  const submission = { id: selected.id, mode: selected.mode, question, version, recovered: false };
+  const pendingForThread = questionSubmissions.get(key) || [];
+  pendingForThread.push(submission);
+  questionSubmissions.set(key, pendingForThread);
+  return submission;
+}
+
+function forgetQuestionSubmission(submission) {
+  const key = `${submission.id}:${submission.mode}`;
+  const pendingForThread = questionSubmissions.get(key) || [];
+  const remaining = pendingForThread.filter(item => item !== submission);
+  if (remaining.length) questionSubmissions.set(key, remaining);
+  else questionSubmissions.delete(key);
+}
+
+function reconcileQuestionDrafts(next) {
+  const active = next.session;
+  if (!active?.id) return;
+  for (const mode of ['context', 'independent', 'visual']) {
+    const key = `${active.id}:${mode}`;
+    const pendingForThread = questionSubmissions.get(key);
+    if (!pendingForThread?.length) continue;
+    const messages = active.threads?.[mode]?.messages || [];
+    const remaining = [];
+    for (const submission of pendingForThread) {
+      const reply = [...messages].reverse().find(message => message.role === 'assistant' && message.requestQuestion === submission.question);
+      if (!reply || ['streaming', 'loading', 'pending', 'generating', 'running'].includes(reply.status)) {
+        remaining.push(submission);
+        continue;
+      }
+      const failedBeforeOutput = ['error', 'stopped'].includes(reply.status) && !String(reply.content || '').trim();
+      const currentVersion = draftVersions.get(key) || 0;
+      // 只有发送后没有触发过输入事件才恢复；主动清空同样会递增版本。
+      if (failedBeforeOutput && currentVersion === submission.version) {
+        drafts.set(key, submission.question);
+        submission.recovered = true;
+      }
+    }
+    if (remaining.length) questionSubmissions.set(key, remaining);
+    else questionSubmissions.delete(key);
+  }
+}
+
+function webSearchEnabled(active = session()) {
+  if (!active) return false;
+  return webSearchOverrides.has(active.id) ? webSearchOverrides.get(active.id) : active.webSearchEnabled === true;
+}
 function isStreaming() {
   const current = thread();
   const status = current.status || [...(current.messages || [])].reverse().find(message => message.role === 'assistant')?.status;
@@ -320,7 +448,12 @@ function receive(next) {
   const previous = state;
   if (next.status?.windowTransitioning && !previous?.status?.windowTransitioning && !transitionAnchor) transitionAnchor = captureReadingAnchor();
   state = next;
+  reconcileQuestionDrafts(next);
+  if (next.session && webSearchOverrides.has(next.session.id) && webSearchOverrides.get(next.session.id) === (next.session.webSearchEnabled === true)) {
+    webSearchOverrides.delete(next.session.id);
+  }
   document.documentElement.classList.toggle('native-rounded-frame', next.status?.nativeRoundedFrame === true);
+  document.documentElement.classList.toggle('panel-surface', surface === 'panel');
   playPinFeedback(previous, next);
   appearanceUI.receive(next.settings?.prefs?.appearance, next.status || {});
   shortcutsUI.receive(next.settings?.prefs, next.status || {});
@@ -413,7 +546,8 @@ function restore(saved) {
   for (const node of root.querySelectorAll('[data-field]')) {
     const value = saved.fields.get(node.dataset.field);
     if (!value) continue;
-    node.value = value.value;
+    // 失败回推后的本地草稿优先于重绘前快照里的旧输入值。
+    node.value = node.dataset.field === 'question' && drafts.has(draftKey()) ? drafts.get(draftKey()) : value.value;
     if (node.type === 'checkbox') node.checked = value.checked;
     node.scrollTop = value.scrollTop;
     updateField(node);
@@ -451,7 +585,7 @@ function render() {
   const anchor = saved && layoutViewport === `${window.innerWidth}:${window.innerHeight}`
     ? captureReadingAnchor() : transitionAnchor || readingAnchor;
   const panel = el('main', { class: `panel${view === 'explain' && session() ? ' explain-panel' : ''}${renderedKey ? '' : ' is-entering'}` }, header(view));
-  const body = el('section', { class: `panel-body${view === 'paste' ? ' recognition-body' : view === 'preview' ? ' recognition-preview' : ''}`, 'data-scroll': 'body', 'aria-label': view === 'explain' ? '解释会话' : 'PickGloss内容' });
+  const body = el('section', { class: `panel-body${view === 'settings' ? ' settings-body' : ''}${view === 'paste' ? ' recognition-body' : view === 'preview' ? ' recognition-preview' : ''}`, 'data-scroll': 'body', 'aria-label': view === 'explain' ? '解释会话' : 'PickGloss内容' });
   if (view === 'paste') pasteView(body);
   if (view === 'explain') explainView(body);
   if (view === 'preview') previewView(body);
@@ -465,13 +599,17 @@ function render() {
   if (globalError) panel.append(el('div', { class: 'global-error', role: 'alert' },
     el('span', {}, globalError),
     button('关闭提示', () => { errors.delete('global'); dismissedStatusError = statusErrorKey(); render(); }, { icon: 'close', iconOnly: true, class: 'icon-button' })));
+  if (state.status?.nativeRoundedFrame) panel.append(nativePinFrame());
   root.replaceChildren(panel);
   syncWindowLayout();
   renderedKey = key;
   if (saved) restore(saved);
+  syncSelectedProviderDrafts();
+  syncServiceProfileMetadata();
   restoreReadingAnchor(anchor);
   readingAnchor = captureReadingAnchor();
   for (const field of root.querySelectorAll('[data-limit]')) updateField(field);
+  syncContentTransitions();
 }
 
 function header(view) {
@@ -624,6 +762,97 @@ function explanationProgress() {
   return el('div', { class: 'stream-status', role: 'status' }, el('span', { class: 'stream-dot', 'aria-hidden': 'true' }), '正在解释…');
 }
 
+function externalHttpUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : '';
+  } catch { return ''; }
+}
+
+function searchStatusView(message, latest) {
+  if (message.status === 'streaming') return null;
+  const search = message.search;
+  if (!search || typeof search !== 'object') return null;
+  if (search.status === 'failed') {
+    const actions = latest ? [
+      button('重试联网', () => retrySearch(message.id, true), { class: 'secondary', busy: 'retry-search' }),
+      button('不联网继续', () => retrySearch(message.id, false), { class: 'secondary', busy: 'retry-without-search' }),
+    ] : [];
+    return el('div', { class: 'search-failure', role: 'alert' },
+      el('p', {}, '联网搜索失败。', search.error ? ` ${search.error}` : ' 未取得联网资料。'),
+      latest ? el('p', { class: 'search-recovery-hint' }, '可以重试联网，或保留原问题并在不联网的情况下继续。') : null,
+      actions.length ? el('div', { class: 'actions' }, actions) : null);
+  }
+  let label = '';
+  const searchInProgress = ['preparing', 'searching'].includes(search.status);
+  if (searchInProgress && message.status === 'stopped') label = '已停止联网搜索';
+  else if (searchInProgress && message.status === 'error') label = '联网搜索未完成';
+  else if (search.status === 'complete') {
+    label = '已参考联网资料';
+    if (!search.sources?.length) label = '没有找到可用的联网资料';
+  }
+  if (!label) return null;
+  return el('p', { class: 'search-progress', role: 'status' }, label);
+}
+
+function sourceSiteIcon(url) {
+  const origin = url ? new URL(url).origin : '';
+  const data = sourceIconCache.get(origin)?.data;
+  return el('span', { class: 'source-site-icon', 'data-source-icon': origin, 'aria-hidden': 'true' },
+    data ? el('img', { src: data, alt: '', width: 14, height: 14 }) : icon('globe'));
+}
+
+async function loadSourceIcon(url, selected, messageId, sourceId) {
+  if (!url || !selected.id) return;
+  const origin = new URL(url).origin;
+  const previous = sourceIconCache.get(origin);
+  if (previous && (previous.pending || previous.expiresAt > Date.now())) return;
+  if (sourceIconCache.size >= 64) sourceIconCache.delete(sourceIconCache.keys().next().value);
+  const entry = { data: '', pending: true, expiresAt: 0 }; sourceIconCache.set(origin, entry);
+  try {
+    const result = await window.pickgloss.invoke('get-source-icon', { ...selected, messageId, sourceId });
+    if (!result?.ok || typeof result.value !== 'string' || result.value.length > 65536 || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(result.value)) return;
+    entry.data = result.value;
+    for (const node of root.querySelectorAll('[data-source-icon]')) {
+      if (node.dataset.sourceIcon === origin) node.replaceChildren(el('img', { src: entry.data, alt: '', width: 14, height: 14 }));
+    }
+  } catch { /* 图标不可用时保留通用网站标记。 */ }
+  finally { entry.pending = false; entry.expiresAt = Date.now() + (entry.data ? 300000 : 30000); }
+}
+
+function searchSourcesView(message) {
+  if (message.status === 'streaming') return null;
+  const sources = Array.isArray(message.search?.sources) ? message.search.sources.filter(source => source && typeof source === 'object') : [];
+  if (!sources.length) return null;
+  const items = sources.map((source, index) => {
+    const rawId = Number(source.id);
+    const number = Number.isSafeInteger(rawId) && rawId > 0 ? rawId : index + 1;
+    const url = externalHttpUrl(source.url);
+    const title = typeof source.title === 'string' && source.title.trim() ? source.title : (url || '');
+    return el('li', { class: 'search-source' },
+      el('span', { class: 'search-source-number' }, `[${number}]`),
+      url ? el('a', { class: 'search-source-link', href: url, onclick: event => {
+        event.preventDefault();
+        void call('open-link', { url }, { render: false, lock: false });
+      } }, sourceSiteIcon(url), el('span', {}, title || url)) : el('span', { class: 'search-source-title' }, sourceSiteIcon(''), el('span', {}, title || '未提供标题')),
+      source.snippet ? el('details', { class: 'search-source-excerpt', 'data-detail': `excerpt:${message.id || ''}:${number}:${url || source.title || ''}` },
+        el('summary', {}, icon('chevron'), '查看摘录'),
+        el('p', { class: 'search-source-snippet' }, String(source.snippet).replace(/&(?:nbsp|#0*32|#x0*20);/gi, ' ').replace(/\s+/g, ' ').trim())) : null);
+  });
+  const selected = target();
+  return el('details', { class: 'search-sources', 'data-detail': `sources:${message.id || ''}`, ontoggle: event => {
+    if (event.target.open) for (const source of sources) void loadSourceIcon(externalHttpUrl(source.url), selected, message.id, source.id);
+  } },
+    el('summary', {}, icon('chevron'), `联网来源（${sources.length}）`),
+    el('ol', {}, ...items));
+}
+
+async function retrySearch(messageId, useSearch) {
+  const selected = target();
+  const action = useSearch ? 'retry-search' : 'retry-without-search';
+  return call(action, { ...selected, messageId }, { scope: 'explain' });
+}
+
 function explainView(body) {
   const active = session();
   if (!active) { pasteView(body); return; }
@@ -651,20 +880,28 @@ function explainView(body) {
     if (active.context) sourcePane.append(el('section', { class: 'reading-context' },
       el('p', { class: 'reading-label' }, '所在段落'), contextParagraph(active),
       !active.threads?.context?.messages?.length ? button('编辑上下文', () => navigate('context'), { class: 'text-button' }) : null));
+    if (active.contextPending === true) sourcePane.append(el('p', { class: 'context-pending', role: 'status' },
+      el('span', { class: 'stream-dot', 'aria-hidden': 'true' }), '正在获取上下文…'));
   }
   body = answerPane;
   if (!image) {
     body.append(el('div', { class: 'mode-tabs', role: 'tablist', 'aria-label': '解释模式' },
       ...['context', 'independent'].map(value => button(MODE_NAMES[value], () => switchMode(value), { role: 'tab', selected: mode() === value, busy: 'set-mode' }))));
   }
+  const content = el('div', { class: 'mode-content' });
+  body.append(content); body = content;
   const current = thread();
   const messages = current.messages || [];
   const latestAnswer = messages.findLast(message => message.role === 'assistant');
   const generatingAnswer = isStreaming() && messages.at(-1)?.role === 'assistant' ? messages.at(-1) : null;
-  if (!image && mode() === 'context' && !active.context?.trim()) body.append(notice('还没有上下文', active.contextReason ? `${active.contextReason} 也可以先查看独立释义。` : '补充所在段落，可以理解这处用法；也可以先查看独立释义。', [
-    button('补充上下文', () => navigate('context'), { class: 'primary' }),
-    button('独立释义', () => switchMode('independent'), { class: 'secondary', busy: 'set-mode' }),
-  ]));
+  if (!image && mode() === 'context' && (active.contextPending === true || !active.context?.trim())) {
+    const contextPending = active.contextPending === true;
+    const actions = contextPending ? [] : [button('补充上下文', () => navigate('context'), { class: 'primary' })];
+    actions.push(button('独立释义', () => switchMode('independent'), { class: contextPending ? 'primary' : 'secondary', busy: 'set-mode' }));
+    body.append(notice(contextPending ? '正在获取上下文' : '还没有上下文', contextPending
+      ? '语境解释会在上下文就绪后开放；你也可以先查看独立释义。'
+      : active.contextReason ? `${active.contextReason} 也可以先查看独立释义。` : '补充所在段落，可以理解这处用法；也可以先查看独立释义。', actions));
+  }
   if (!hasProvider(image ? 'vision' : 'text')) body.append(notice(`配置${image ? '识图' : '文字'}模型后继续`, '选定内容和会话已经保留。填写服务地址与模型名称后即可开始。', [button('配置 AI 服务', () => openSettings(), { class: 'primary', busy: 'open-settings' })]));
   const conversation = el('div', { class: 'conversation', role: 'log', 'aria-label': MODE_NAMES[mode()], 'aria-live': 'off' });
   for (const message of messages) {
@@ -675,15 +912,17 @@ function explainView(body) {
     conversation.append(el('article', { class: `message ${user ? 'user' : 'assistant'}`, 'data-message': message.id || '' },
       user ? el('div', { class: 'message-label' }, '追问') : null,
       content,
+      !user ? searchStatusView(message, message === latestAnswer && messages.at(-1) === message) : null,
+      !user ? searchSourcesView(message) : null,
       message === generatingAnswer && !message.content ? explanationProgress() : null,
-      !user && ['stopped', 'error'].includes(message.status) ? el('p', { class: 'message-state' }, message.status === 'stopped' ? '未完成 · 已停止' : '未完成 · 请求失败') : null,
+      !user && message.search?.status !== 'failed' && ['stopped', 'error'].includes(message.status) ? el('p', { class: 'message-state' }, message.status === 'stopped' ? '未完成 · 已停止' : '未完成 · 请求失败') : null,
       user || message === generatingAnswer ? null : answerActions(message, message === latestAnswer)));
   }
   body.append(conversation);
   if (isStreaming()) { if (!generatingAnswer) conversation.append(explanationProgress()); }
-  else if (current.error || current.status === 'error' || messages.at(-1)?.status === 'error') body.append(notice('这次请求没有完成', current.error || '请检查服务配置或连接后重试。已有内容与追问草稿会保留。', [button('重试', retryExplanation, { icon: 'retry', class: 'primary', busy: 'start-explanation' }), button('服务设置', () => openSettings(), { class: 'secondary' })], true));
+  else if ((current.error || current.status === 'error' || messages.at(-1)?.status === 'error') && latestAnswer?.search?.status !== 'failed') body.append(notice('这次请求没有完成', current.error || '请检查服务配置或连接后重试。已有内容与追问草稿会保留。', [button('重试', retryExplanation, { icon: 'retry', class: 'primary', busy: 'start-explanation' }), button('服务设置', () => openSettings(), { class: 'secondary' })], true));
   else if (current.status === 'stopped' || messages.at(-1)?.status === 'stopped') body.append(el('div', { class: 'stream-status', role: 'status' }, '已停止，已生成的内容已保留。'));
-  else if (!messages.length && hasProvider(image ? 'vision' : 'text') && (image || mode() === 'independent' || active.context?.trim())) body.append(el('div', { class: 'empty' }, el('p', {}, image ? '解释图像中的内容，也可以围绕细节继续追问。' : mode() === 'independent' ? '查看一般含义和常见用法。这个模式会分别保留回答与追问。' : '结合上下文，理解选定内容在这里的含义。'), button(image ? '解释截图' : '开始释义', () => startExplanation(), { class: 'primary', busy: 'start-explanation' })));
+  else if (!messages.length && hasProvider(image ? 'vision' : 'text') && (image || mode() === 'independent' || active.context?.trim() && active.contextPending !== true)) body.append(el('div', { class: 'empty' }, el('p', {}, image ? '解释图像中的内容，也可以围绕细节继续追问。' : mode() === 'independent' ? '查看一般含义和常见用法。这个模式会分别保留回答与追问。' : '结合上下文，理解选定内容在这里的含义。'), button(image ? '解释截图' : '开始释义', () => startExplanation(), { class: 'primary', busy: 'start-explanation' })));
   body.append(errorNode('explain'));
 }
 
@@ -698,6 +937,10 @@ async function switchMode(next) {
 
 async function startExplanation() {
   const selected=target();
+  if (session()?.kind !== 'image' && mode() === 'context' && session()?.contextPending === true) {
+    setError('explain', '正在获取上下文，请等上下文就绪后再开始语境解释。');
+    return { ok: false, error: '正在获取上下文' };
+  }
   if(!await flushDraft())return;
   return call('start-explanation', selected, { scope: 'explain' });
 }
@@ -710,7 +953,7 @@ async function retryExplanation() {
 function composer() {
   const selected=target();
   const blocked = isStreaming() || pending.has('send-question');
-  const missingContext = session()?.kind !== 'image' && mode() === 'context' && !session()?.context?.trim();
+  const missingContext = session()?.kind !== 'image' && mode() === 'context' && (session()?.contextPending === true || !session()?.context?.trim());
   const configured = hasProvider(session()?.kind === 'image' ? 'vision' : 'text');
   const textarea = el('textarea', {
     'data-field': 'question', 'data-limit': LIMITS.question, 'data-session': selected.id, 'data-mode': selected.mode,
@@ -726,9 +969,35 @@ function composer() {
   });
   const send = isStreaming()
     ? button('停止回答', () => call('stop', selected), { icon: 'stop', iconOnly: true, class: 'send', busy: 'stop' })
-    : button('发送追问', sendQuestion, { icon: 'send', iconOnly: true, class: 'send', disabled: blocked || missingContext || !configured, busy: 'send-question' });
-  return el('section', { class: 'composer-wrap', 'aria-label': '追问' }, el('div', { class: 'composer' }, textarea, send),
-    el('p', { class: 'counter', id: 'question-count', 'data-count': 'question' }), errorNode('question'));
+    : button('发送追问', sendQuestion, { icon: 'send', iconOnly: true, class: 'send', title: session()?.contextPending ? '正在获取上下文，暂时不能发送语境解释' : '发送追问', disabled: blocked || missingContext || !configured, busy: 'send-question' });
+  return el('section', { class: 'composer-wrap', 'aria-label': '追问' }, el('div', { class: 'composer' }, textarea, webSearchButton(), send),
+    el('p', { class: 'counter', id: 'question-count', 'data-count': 'question' }), errorNode('question'), errorNode('web-search'));
+}
+
+function webSearchButton() {
+  const enabled = webSearchEnabled();
+  return button(enabled ? '关闭联网搜索' : '开启联网搜索', toggleWebSearch, {
+    icon: 'globe', iconOnly: true, pressed: enabled,
+    class: `icon-button web-search-toggle${enabled ? ' is-enabled' : ''}`,
+    title: enabled ? '联网搜索已开启；点击关闭' : '联网搜索已关闭；点击开启',
+    busy: 'set-web-search',
+  });
+}
+
+async function toggleWebSearch() {
+  const active = session();
+  if (!active) return { ok: false, error: '当前没有解释会话。' };
+  const id = active.id;
+  const enabled = !webSearchEnabled(active);
+  webSearchOverrides.set(id, enabled);
+  const result = await call('set-web-search', { id, mode: mode(), enabled }, { scope: 'web-search' });
+  if (!result.ok) webSearchOverrides.delete(id);
+  else if (session()?.id === id) {
+    state = { ...state, session: { ...session(), webSearchEnabled: enabled } };
+    webSearchOverrides.delete(id);
+  }
+  render();
+  return result;
 }
 
 function scheduleDraft() {
@@ -739,6 +1008,8 @@ function scheduleDraft() {
 function rememberDraft(input) {
   const item={id:input.dataset.session,mode:input.dataset.mode,draft:input.value};
   const key=`${item.id}:${item.mode}`;
+  // 每次真实输入都递增，包括用户主动清空。
+  draftVersions.set(key, (draftVersions.get(key) || 0) + 1);
   drafts.set(key,item.draft);dirtyDrafts.set(key,item);
 }
 
@@ -771,20 +1042,25 @@ async function sendQuestion() {
   const error = validate(question, LIMITS.question, '追问', true);
   if (error) { setError('question', error); return; }
   if (!hasProvider(session()?.kind === 'image' ? 'vision' : 'text')) { setError('question', '请先配置 AI 服务。'); return; }
+  if (mode() === 'context' && session()?.contextPending === true) { setError('question', '正在获取上下文，请等上下文就绪后再发送语境解释。'); return; }
   if (mode() === 'context' && !session()?.context?.trim()) { setError('question', '请先补充上下文，或切换到独立释义。'); return; }
   const key = draftKey();
   const selected=target();
+  const version = draftVersions.get(key) || 0;
   if(!await flushDraft())return;
+  const submission = trackQuestionSubmission(selected, question.trim(), version);
   const result = await call('send-question', { ...selected, question: question.trim() }, { scope: 'question' });
   if (result.ok) {
-    const unchanged=!drafts.has(key)||drafts.get(key)===question;
-    if(unchanged)drafts.set(key, '');
-    else if(drafts.has(key)){dirtyDrafts.set(key,{...selected,draft:drafts.get(key)});scheduleDraft();}
+    const unchanged = (draftVersions.get(key) || 0) === version && (!drafts.has(key) || drafts.get(key) === question);
+    if (!submission.recovered) {
+      if (unchanged) drafts.set(key, '');
+      else if (drafts.has(key)) { dirtyDrafts.set(key, { ...selected, draft: drafts.get(key) }); scheduleDraft(); }
+    }
     const input = root.querySelector('[data-field="question"]');
-    if (input && key === draftKey() && unchanged) { input.value = ''; updateField(input); input.focus({ preventScroll: true }); }
+    if (input && key === draftKey() && unchanged && !submission.recovered) { input.value = ''; updateField(input); input.focus({ preventScroll: true }); }
     const body = root.querySelector('[data-scroll="body"]');
     if (body) body.scrollTop = body.scrollHeight;
-  }
+  } else forgetQuestionSubmission(submission);
 }
 
 function previewView(body) {
@@ -798,8 +1074,9 @@ function previewView(body) {
   const note = field('截图说明', 'image-note', notes.get(active.id) ?? active.note ?? '', { multiline: true, optional: true, limit: LIMITS.note, placeholder: '例如：解释图中两条曲线有什么区别', oninput:event=>{
     notes.set(active.id,event.target.value);dirtyNotes.set(active.id,{id:active.id,note:event.target.value});scheduleDraft();
   } });
-  body.append(note.wrap, errorNode('preview'), el('div', { class: 'form-actions' },
+  body.append(note.wrap, errorNode('preview'), errorNode('web-search'), el('div', { class: 'form-actions' },
     button('重新框选', () => call('start-capture'), { icon: 'crop', class: 'secondary', busy: 'start-capture' }),
+    webSearchButton(),
     button(pending.has('set-note') || pending.has('start-explanation') ? '正在准备…' : '直接解释', async () => {
       if (pending.has('set-note') || pending.has('start-explanation')) return;
       const value = note.control.value;
@@ -827,62 +1104,218 @@ function contextView(body) {
 }
 
 function settingsView(body) {
+  const general = el('div', { class: 'general-settings', 'data-settings-section': 'general', hidden: settingsSection !== 'general' });
   const service = el('div', { 'data-settings-section': 'service', hidden: settingsSection !== 'service' });
   const appearance = el('div', { 'data-settings-section': 'appearance', hidden: settingsSection !== 'appearance' });
   const shortcuts = el('div', { 'data-settings-section': 'shortcuts', hidden: settingsSection !== 'shortcuts' });
-  const sections = { service, appearance, shortcuts };
-  const entries = [['service', 'AI 服务'], ['appearance', '外观与主题'], ['shortcuts', '快捷键']];
+  const sections = { general, service, appearance, shortcuts };
+  const entries = [['general', '常规设置'], ['service', 'AI 服务'], ['appearance', '外观与主题'], ['shortcuts', '快捷键']];
   const tabs = el('div', { class: 'settings-navigation', role: 'tablist', 'aria-label': '设置分类' });
   for (const [value, label] of entries) tabs.append(button(label, () => {
     if (value !== 'shortcuts') void shortcutsUI.endRecording();
     settingsSection = value;
     for (const [key, node] of Object.entries(sections)) node.hidden = key !== value;
-    [...tabs.children].forEach((tab, i) => tab.setAttribute('aria-selected', String(entries[i][0] === value)));
+    [...tabs.querySelectorAll('[role="tab"]')].forEach((tab, i) => tab.setAttribute('aria-selected', String(entries[i][0] === value)));
+    syncModeIndicator(); syncContentTransitions();
     body.scrollTop = 0;
-    void call(({ appearance: 'open-appearance', shortcuts: 'open-shortcuts' })[value] || 'open-settings', {}, { lock: false, render: false }).then(result => { if (!result.ok) render(); });
+    void call(({ appearance: 'open-appearance', shortcuts: 'open-shortcuts' })[value] || 'open-settings', value === 'general' ? { section: 'general' } : {}, { lock: false, render: false }).then(result => { if (!result.ok) render(); });
   }, { role: 'tab', selected: settingsSection === value }));
+  generalSettingsView(general);
   serviceSettingsView(service);
   appearanceUI.mount(appearance);
-  windowSettingsView(appearance);
   shortcutsUI.mount(shortcuts);
-  body.append(tabs, service, appearance, shortcuts);
+  body.append(tabs, general, service, appearance, shortcuts);
+}
+
+const FALLBACK_SERVICE_CATALOG = {
+  models: [
+    { id: 'custom', name: '自定义', baseUrl: '', model: '', keyUrl: '' },
+    { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', keyUrl: 'https://platform.deepseek.com/api_keys' },
+    { id: 'mimo', name: '小米 MiMo', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.6-pro', keyUrl: 'https://platform.xiaomimimo.com/#/console/api-keys' },
+  ],
+  search: [
+    { id: 'exa', name: 'Exa', baseUrl: 'https://api.exa.ai/search', keyUrl: '' },
+    { id: 'brave', name: 'Brave', baseUrl: 'https://api.search.brave.com/res/v1/llm/context', keyUrl: '' },
+    { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1/tools/search', keyUrl: 'https://platform.deepseek.com/api_keys' },
+    { id: 'custom', name: '自定义', protocol: 'exa', baseUrl: '', keyUrl: '' },
+  ],
+};
+
+function serviceCatalog(kind) {
+  const key = kind === 'search' ? 'search' : 'models';
+  const provided = state?.serviceCatalog?.[key];
+  const items = Array.isArray(provided) ? provided : FALLBACK_SERVICE_CATALOG[key];
+  const options = items.filter(item => item && typeof item.id === 'string').map(item => ({ ...item }));
+  if (!options.some(item => item.id === 'custom')) {
+    if (kind === 'search') options.push(FALLBACK_SERVICE_CATALOG.search.find(item => item.id === 'custom'));
+    else options.unshift(FALLBACK_SERVICE_CATALOG.models[0]);
+  }
+  return options;
+}
+
+function syncSelectedProviderDrafts() {
+  if (state?.view !== 'settings' || settingsSection !== 'service') return;
+  for (const kind of ['text', 'vision', 'search']) {
+    const select = root.querySelector(`[name="${kind}-provider"]`);
+    if (select?.value) selectedProviders[kind] = select.value;
+  }
+}
+
+function syncServiceProfileMetadata() {
+  if (state?.view !== 'settings' || settingsSection !== 'service') return;
+  const form = root.querySelector('[data-settings-section="service"] form');
+  if (!form) return;
+  for (const kind of ['text', 'vision', 'search']) {
+    const providerId = selectedProviderId(form, kind);
+    const config = resolveServiceProfile(kind, providerId);
+    const key = form.querySelector(`[name="${kind}-apiKey"]`);
+    if (kind === 'search') form.querySelector('.search-protocol-select').hidden = providerId !== 'custom';
+    if (key) key.placeholder = config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写';
+    const link = form.querySelector(`[data-key-link="${kind}"]`);
+    if (link) link.hidden = !externalHttpUrl(config.keyUrl);
+  }
+}
+
+function selectedProviderId(form, kind) {
+  return form.querySelector(`[name="${kind}-provider"]`)?.value || state.settings?.[kind]?.providerId || 'custom';
+}
+
+function readServiceDraft(form, kind) {
+  return kind === 'search' ? searchProviderConfig(form) : providerConfig(form, kind);
+}
+
+function captureServiceDraft(form, kind, providerId = selectedProviderId(form, kind)) {
+  const config = readServiceDraft(form, kind);
+  config.providerId = providerId;
+  if (kind === 'search' && providerId === 'custom') config.protocol = form.querySelector('[name="search-protocol"]').value;
+  const saved = state.settings?.serviceProfiles?.[kind]?.[config.providerId] || {};
+  const active = state.settings?.[kind] || {};
+  config.hasKey = saved.hasKey === true || active.providerId === config.providerId && active.hasKey === true || !active.providerId && config.providerId === 'custom' && active.hasKey === true;
+  serviceDrafts[kind].set(config.providerId, config);
+}
+
+function resolveServiceProfile(kind, providerId) {
+  const catalog = serviceCatalog(kind).find(item => item.id === providerId) || {};
+  const profile = state.settings?.serviceProfiles?.[kind]?.[providerId] || {};
+  const active = state.settings?.[kind] || {};
+  const isActive = active.providerId === providerId || (!active.providerId && providerId === 'custom');
+  const merged = { ...catalog, ...profile, ...(isActive ? active : {}) };
+  const draft = serviceDrafts[kind].get(providerId);
+  return draft ? { ...merged, ...draft } : merged;
+}
+
+function applyServiceProfile(form, kind, providerId) {
+  const config = resolveServiceProfile(kind, providerId);
+  const assign = (name, value) => {
+    const control = form.querySelector(`[name="${kind}-${name}"]`);
+    if (control) control.value = value || '';
+  };
+  assign('baseUrl', config.baseUrl);
+  if (kind === 'search') {
+    assign('protocol', config.protocol || 'exa');
+    form.querySelector('.search-protocol-select').hidden = providerId !== 'custom';
+  }
+  if (kind !== 'search') assign('model', config.model);
+  assign('apiKey', config.apiKey);
+  const clearKey = form.querySelector(`[name="${kind}-clearKey"]`);
+  if (clearKey) clearKey.checked = config.clearKey === true;
+  const key = form.querySelector(`[name="${kind}-apiKey"]`);
+  if (key) key.placeholder = config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写';
+  const link = form.querySelector(`[data-key-link="${kind}"]`);
+  if (link) link.hidden = !externalHttpUrl(config.keyUrl);
+}
+
+function providerSelect(form, kind, providerId) {
+  const providers = serviceCatalog(kind);
+  selectedProviders[kind] = providerId;
+  const select = el('select', { id: `field-${kind}-provider`, name: `${kind}-provider`, 'data-field': `${kind}-provider`, 'aria-label': kind === 'search' ? '搜索服务提供商' : '模型服务提供商',
+    onchange: event => {
+      captureServiceDraft(form, kind, selectedProviders[kind] || providerId);
+      selectedProviders[kind] = event.target.value;
+      applyServiceProfile(form, kind, event.target.value);
+    } }, ...providers.map(item => el('option', { value: item.id, selected: item.id === providerId }, item.name)));
+  return el('div', { class: 'field-wrap service-provider-select' },
+    el('label', { class: 'label', for: `field-${kind}-provider` }, kind === 'search' ? '搜索服务提供商' : '模型厂商'),
+    select);
+}
+
+function serviceKeyLink(kind) {
+  const link = button('获取 API Key', () => {
+    const config = resolveServiceProfile(kind, selectedProviderId(root.querySelector('[data-settings-section="service"] form'), kind));
+    const url = externalHttpUrl(config.keyUrl);
+    if (url) void call('open-link', { url }, { scope: 'settings', render: false, lock: false });
+  }, { class: 'text-button', title: '在系统浏览器打开官方密钥页面' });
+  link.dataset.keyLink = kind;
+  return link;
+}
+
+function apiKeyNote() {
+  return el('p', { class: 'hint api-key-note' }, `本机 DPAPI 加密。路径：${state.settingsFilePath || '暂不可用'}`);
+}
+
+function profilePayload(config, kind) {
+  const result = { baseUrl: config.baseUrl || '' };
+  if (kind === 'search' && config.protocol) result.protocol = config.protocol;
+  if (kind !== 'search') result.model = config.model || '';
+  if (config.apiKey) result.apiKey = config.apiKey;
+  if (config.clearKey === true) result.clearKey = true;
+  return result;
+}
+
+function serviceProfilesPayload(form) {
+  const result = { text: {}, vision: {}, search: {} };
+  for (const kind of ['text', 'vision', 'search']) {
+    for (const [id, profile] of Object.entries(state.settings?.serviceProfiles?.[kind] || {})) result[kind][id] = profilePayload(profile, kind);
+    for (const [id, draft] of serviceDrafts[kind]) result[kind][id] = profilePayload(draft, kind);
+    const current = readServiceDraft(form, kind);
+    result[kind][current.providerId] = profilePayload(current, kind);
+  }
+  return result;
 }
 
 function serviceSettingsView(body) {
   body.append(el('h1', {}, 'AI 服务'), el('p', { class: 'hint' }, '识图模型留空时，截图使用文字模型的整套配置。API Key 留空会保留已保存的密钥。'));
+  const kinds = ['text', 'vision', 'search'];
   const tabs = el('div', { class: 'mode-tabs', role: 'tablist', 'aria-label': '服务类型' });
-  for (const kind of ['text', 'vision']) tabs.append(button(kind === 'text' ? '文字模型' : '识图模型', () => {
+  for (const kind of kinds) tabs.append(button(({ text: '文字模型', vision: '识图模型', search: '联网搜索' })[kind], () => {
     settingsTab = kind;
     for (const section of root.querySelectorAll('[data-provider]')) section.hidden = section.dataset.provider !== kind;
-    for (const tab of tabs.children) tab.setAttribute('aria-selected', String(tab.dataset.kind === kind));
+    for (const tab of tabs.querySelectorAll('[role="tab"]')) tab.setAttribute('aria-selected', String(tab.dataset.kind === kind));
+    syncModeIndicator(); syncContentTransitions();
   }, { role: 'tab', selected: settingsTab === kind }));
-  [...tabs.children].forEach((tab, index) => { tab.dataset.kind = ['text', 'vision'][index]; });
+  [...tabs.children].forEach((tab, index) => { tab.dataset.kind = kinds[index]; });
   body.append(tabs);
   const form = el('form', { novalidate: true, onsubmit: async event => {
     event.preventDefault();
+    const text = providerConfig(form, 'text');
+    const vision = providerConfig(form, 'vision');
+    const search = searchProviderConfig(form);
     const payload = {
-      text: providerConfig(form, 'text'), vision: providerConfig(form, 'vision'),
-      prefs: { showOrb: form.querySelector('[name="showOrb"]').checked, selectionEnabled: form.querySelector('[name="selectionEnabled"]').checked, orbAction: form.querySelector('[name="orbAction"]').value },
+      text, vision, search, serviceProfiles: serviceProfilesPayload(form),
     };
     const result = await call('save-settings', payload, { scope: 'settings' });
-    if (result.ok) tests.clear();
+    if (result.ok) { tests.clear(); for (const kind of kinds) serviceDrafts[kind].clear(); }
   } });
   for (const kind of ['text', 'vision']) {
     const config = state.settings?.[kind] || {};
+    const providerId = config.providerId || 'custom';
     const section = el('section', { class: 'settings-section', 'data-provider': kind, hidden: settingsTab !== kind });
-    if(kind==='vision')section.append(el('p',{class:'hint'},'可选：模型名称留空时，使用文字模型的地址、模型和密钥，忽略下面的识图配置。文字模型需要支持图片输入。'));
+    section.append(providerSelect(form, kind, providerId));
+    if (kind === 'vision') section.append(el('p', { class: 'hint' }, '可选：模型名称留空时，使用文字模型的地址、模型和密钥，忽略下面的识图配置。文字模型需要支持图片输入。'));
     section.append(field('服务地址', `${kind}-baseUrl`, config.baseUrl || '', { placeholder: '兼容服务的 API 地址' }).wrap,
       field('模型名称', `${kind}-model`, config.model || '', { optional: kind === 'vision', placeholder: kind === 'vision' ? '留空使用文字模型' : '文字模型名称' }).wrap,
       field('API Key', `${kind}-apiKey`, '', { type: 'password', optional: true, placeholder: config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写' }).wrap,
+      apiKeyNote(),
+      serviceKeyLink(kind),
       el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: `${kind}-clearKey`, 'data-field': `${kind}-clearKey` }), '清除已保存的 API Key'),
-      el('p', { class: 'hint' }, kind==='vision'?'测试连接会向识图模型发送小图片；模型名称留空时使用当前文字配置。可能产生服务费用。':'点击“测试连接”会向上方服务发送测试内容，并可能产生服务费用。'),
+      el('p', { class: 'hint' }, kind === 'vision' ? '测试连接会向识图模型发送小图片；模型名称留空时使用当前文字配置。可能产生服务费用。' : '点击“测试连接”会向上方服务发送测试内容，并可能产生服务费用。'),
       button(pending.has('test-provider') && tests.get(kind)?.pending ? '正在测试…' : '测试连接', async () => {
         if (pending.has('test-provider')) return;
         const config = providerConfig(form, kind);
-        const fallbackConfig = kind==='vision' && !config.model ? providerConfig(form,'text') : undefined;
+        const fallbackConfig = kind === 'vision' && !config.model ? providerConfig(form, 'text') : undefined;
         const selected = fallbackConfig || config;
-        if (!selected.baseUrl || !selected.model) { tests.set(kind, { error: true, message: fallbackConfig?'请先填写文字模型的服务地址和模型名称，或单独配置识图模型。':'请先填写服务地址和模型名称。' }); render(); return; }
-        tests.set(kind, { pending: true, message: fallbackConfig?'正在使用文字模型发送识图测试图片…':'正在向指定服务发送测试内容…' });
+        if (!selected.baseUrl || !selected.model) { tests.set(kind, { error: true, message: fallbackConfig ? '请先填写文字模型的服务地址和模型名称，或单独配置识图模型。' : '请先填写服务地址和模型名称。' }); render(); return; }
+        tests.set(kind, { pending: true, message: fallbackConfig ? '正在使用文字模型发送识图测试图片…' : '正在向指定服务发送测试内容…' });
         const result = await call('test-provider', { kind, config, fallbackConfig }, { scope: `test-${kind}` });
         tests.set(kind, { error: !result.ok, message: result.ok ? (typeof result.value === 'string' ? result.value : result.value?.message || '连接成功，服务已返回测试结果。') : result.error || '测试没有完成，请重试。' });
         render();
@@ -890,17 +1323,66 @@ function serviceSettingsView(body) {
       el('p', { class: `test-result${tests.get(kind)?.error ? ' danger' : ' success'}`, role: 'status' }, tests.get(kind)?.message || ''),
       errorNode(`test-${kind}`));
     form.append(section);
+    applyServiceProfile(form, kind, providerId);
   }
+  {
+    const kind = 'search';
+    const config = state.settings?.search || {};
+    const providerId = config.providerId || 'exa';
+    const section = el('section', { class: 'settings-section', 'data-provider': kind, hidden: settingsTab !== kind });
+    section.append(providerSelect(form, kind, providerId),
+      el('div', { class: 'field-wrap search-protocol-select', hidden: providerId !== 'custom' },
+        el('label', { class: 'label', for: 'search-protocol' }, '接口格式'),
+        el('select', { id: 'search-protocol', name: 'search-protocol', 'data-field': 'search-protocol', 'aria-label': '自定义搜索接口格式' },
+          ...[['exa', 'Exa 兼容'], ['brave', 'Brave 兼容'], ['deepseek', 'DeepSeek 兼容']].map(([value, label]) => el('option', { value }, label))),
+        el('p', { class: 'hint' }, '填写完整搜索地址，接口需兼容所选格式。')),
+      field('搜索服务地址', 'search-baseUrl', config.baseUrl || '', { placeholder: '所选搜索服务的 API 地址' }).wrap,
+      field('API Key', 'search-apiKey', '', { type: 'password', optional: true, placeholder: config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写' }).wrap,
+      apiKeyNote(),
+      serviceKeyLink(kind),
+      el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'search-clearKey', 'data-field': 'search-clearKey' }), '清除已保存的 API Key'),
+      el('p', { class: 'hint' }, '测试会向所选搜索服务发送一次短查询，可能产生服务费用。'),
+      button(pending.has('test-search-provider') && tests.get(kind)?.pending ? '正在测试…' : '测试搜索服务', async () => {
+        if (pending.has('test-search-provider')) return;
+        const config = searchProviderConfig(form);
+        if (!config.baseUrl) { tests.set(kind, { error: true, message: '请先填写搜索服务地址。' }); render(); return; }
+        tests.set(kind, { pending: true, message: '正在向指定搜索服务发送测试查询…' });
+        const result = await call('test-search-provider', { config }, { scope: 'test-search' });
+        tests.set(kind, { error: !result.ok, message: result.ok ? (typeof result.value === 'string' ? result.value : result.value?.message || '搜索服务已返回测试结果。') : result.error || '测试没有完成，请重试。' });
+        render();
+      }, { class: 'secondary', busy: 'test-search-provider' }),
+      el('p', { class: `test-result${tests.get(kind)?.error ? ' danger' : ' success'}`, role: 'status' }, tests.get(kind)?.message || ''),
+      errorNode('test-search'));
+    form.append(section);
+    applyServiceProfile(form, kind, providerId);
+  }
+  form.append(errorNode('settings'),
+    el('div', { class: 'form-actions' }, button('取消', () => navigate(lastContentView), { class: 'secondary' }), button(pending.has('save-settings') ? '正在保存…' : '保存设置', null, { type: 'submit', class: 'primary', busy: 'save-settings' })));
+  body.append(form);
+}
+
+function generalSettingsView(body) {
+  body.append(el('h1', {}, '常规设置'));
+  const form = el('form', { novalidate: true, onsubmit: async event => {
+    event.preventDefault();
+    const checked = name => form.querySelector(`[name="${name}"]`).checked;
+    await call('save-settings', { prefs: { showOrb: checked('showOrb'), selectionEnabled: checked('selectionEnabled'),
+      autoExplainCapture: checked('autoExplainCapture'), pinSound: checked('pinSound'), orbAction: form.querySelector('[name="orbAction"]').value } }, { scope: 'general' });
+  } });
   form.append(el('label', { class: 'label', for: 'orb-action' }, '悬浮球左键功能'),
     el('select', { id: 'orb-action', class: 'orb-action-select', name: 'orbAction', 'data-field': 'orbAction', 'aria-label': '悬浮球左键功能' },
       el('option', { value: 'chat', selected: state.settings?.prefs?.orbAction !== 'capture' }, '打开 / 关闭最新会话（默认）'),
       el('option', { value: 'capture', selected: state.settings?.prefs?.orbAction === 'capture' }, '截图框选')),
     el('p', { class: 'hint' }, '选择会话时，再次点击会关闭窗口；选择截图时，点击直接开始框选。右键始终打开菜单。'),
+    el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'autoExplainCapture', 'data-field': 'autoExplainCapture', checked: state.settings?.prefs?.autoExplainCapture === true }), '截图框选完成后自动解释'),
+    el('p', { class: 'hint' }, '关闭时仍会先显示截图预览，由你确认后再开始解释。联网沿用上次开关。'),
     el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'showOrb', 'data-field': 'showOrb', checked: Boolean(state.settings?.prefs?.showOrb) }), '显示悬浮球'),
     el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'selectionEnabled', 'data-field': 'selectionEnabled', checked: Boolean(state.settings?.prefs?.selectionEnabled) }), '启用划词入口'),
-    errorNode('settings'),
-    el('div', { class: 'form-actions' }, button('取消', () => navigate(lastContentView), { class: 'secondary' }), button(pending.has('save-settings') ? '正在保存…' : '保存设置', null, { type: 'submit', class: 'primary', busy: 'save-settings' })));
+    el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'pinSound', 'data-field': 'pinSound', checked: state.settings?.prefs?.pinSound !== false }), '置顶时播放提示音'),
+    errorNode('general'),
+    el('div', { class: 'form-actions' }, button(pending.has('save-settings') ? '正在保存…' : '保存设置', null, { type: 'submit', class: 'primary', busy: 'save-settings' })));
   body.append(form);
+  windowSettingsView(body);
   const status = state.status || {};
   if (status.selection || status.shortcutErrors?.length) body.append(el('section', { class: 'status-details' }, el('h3', {}, '系统状态'), status.selection ? el('p', {}, status.selection) : null, ...(status.shortcutErrors || []).map(message => el('p', { class: 'danger' }, message))));
 }
@@ -920,7 +1402,17 @@ function windowSettingsView(body) {
 
 function providerConfig(form, kind) {
   const read = name => form.querySelector(`[name="${kind}-${name}"]`);
-  const config = { baseUrl: read('baseUrl').value.trim(), model: read('model').value.trim() };
+  const config = { providerId: selectedProviderId(form, kind), baseUrl: read('baseUrl').value.trim(), model: read('model').value.trim() };
+  const key = read('apiKey').value.trim();
+  if (key) config.apiKey = key;
+  if (read('clearKey').checked) config.clearKey = true;
+  return config;
+}
+
+function searchProviderConfig(form) {
+  const read = name => form.querySelector(`[name="search-${name}"]`);
+  const config = { providerId: selectedProviderId(form, 'search'), baseUrl: read('baseUrl').value.trim() };
+  if (config.providerId === 'custom') config.protocol = read('protocol').value;
   const key = read('apiKey').value.trim();
   if (key) config.apiKey = key;
   if (read('clearKey').checked) config.clearKey = true;

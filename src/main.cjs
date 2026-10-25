@@ -4,10 +4,15 @@ const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
-const { app, ipcMain, globalShortcut, session: electronSession, safeStorage, shell, dialog, net, clipboard } = require('electron');
+const { app, ipcMain, globalShortcut, session: electronSession, safeStorage, shell, dialog, net, clipboard, nativeImage } = require('electron');
 const { createStore } = require('./core/store.cjs');
 const { historyEntry, queryHistory } = require('./core/history.cjs');
 const { buildMessages, streamCompletion, testProvider, resolveProvider } = require('./core/provider.cjs');
+const { streamSearchedAnswer } = require('./core/request-flow.cjs');
+const { searchWeb } = require('./core/search.cjs');
+const { createSourceIcons, decodeSourceIcon } = require('./core/source-icons.cjs');
+const { createSourceIconProxy } = require('./core/source-icon-proxy.cjs');
+const { MODEL_PROVIDERS, SEARCH_PROVIDERS } = require('./core/services.cjs');
 const { createDesktop } = require('./windows/desktop.cjs');
 const { COMMANDS, createShortcutController } = require('./core/shortcuts.cjs');
 
@@ -46,6 +51,8 @@ if (!app.requestSingleInstanceLock()) { app.quit(); } else {
 }
 
 let store, desktop, settings, activeId = null, view = 'paste', settingsReturn = 'paste';
+let searchPreferenceWrite = Promise.resolve();
+let sourceIcons, sourceIconFetch;
 let settingsSection = 'service';
 let shortcuts, pinFeedback = null;
 let orbActivationWork = Promise.resolve();
@@ -53,6 +60,7 @@ let pinned = false, wide = false, quitting = false, readyToExit = false, emitTim
 let historyCache = [], historyDirty = true;
 let historyRevision = 0, historyLoad = null, historyQuery = '', historySavedOnly = false;
 const cache = new Map(), jobs = new Map();
+const selectionSessions = new Map();
 const status = { selection: '正在启动划词入口…', shortcutErrors: [], error: '' };
 if (verificationDirectory) status.selection = '隔离验证模式：划词入口已暂停。';
 const active = () => cache.get(activeId);
@@ -81,6 +89,11 @@ async function persist(value) {
     rememberHistory(saved);
   }
 }
+async function createSession(input) {
+  // 会话创建等候联网偏好写入及对应的会话更新完成，避免读到切换前的默认值。
+  await searchPreferenceWrite;
+  return store.createSession(input);
+}
 function rememberHistory(value) {
   historyRevision++;
   const entry = historyEntry(value), index = historyCache.findIndex(item => item.id === value.id);
@@ -101,7 +114,10 @@ async function loadHistory() {
 async function state() {
   await loadHistory();
   return { view, session: active() || null, history: queryHistory(historyCache, { query: historyQuery, savedOnly: historySavedOnly }),
-    historyQuery, historySavedOnly, settings, settingsSection, pinned, wide, pinFeedback, status, capture: desktop.captureState() };
+    historyQuery, historySavedOnly, settings, settingsSection,
+    serviceCatalog: { models: MODEL_PROVIDERS || [], search: SEARCH_PROVIDERS || [] },
+    settingsFilePath: path.join(app.getPath('userData'), 'data', 'settings.json'),
+    pinned, wide, pinFeedback, status, capture: desktop.captureState() };
 }
 async function emit() {
   if (!desktop || !store || quitting) return;
@@ -113,6 +129,11 @@ async function selectSession(id) {
   const loaded = cache.get(id) || await store.getSession(id);
   if (!loaded) throw new Error('此会话已经移入回收站。');
   cache.set(id, loaded); activeId = id; view = 'explain';
+  if (loaded.contextPending && ![...selectionSessions.values()].includes(id)) {
+    loaded.contextPending = false;
+    loaded.contextReason = '上次上下文读取已经结束，可手动补充或使用独立释义。';
+    await persist(loaded);
+  }
   // 上次进程中断保留部分回答，不在重新打开时偷偷重发请求。
   for (const [mode, thread] of Object.entries(loaded.threads)) {
     if ((thread.status === 'streaming' || thread.messages.some(m=>m.status==='streaming')) && !jobs.has(id + ':' + mode)) {
@@ -121,7 +142,8 @@ async function selectSession(id) {
   }
 }
 
-async function startRequest(target, question = '') {
+async function startRequest(target, question = '', options = {}) {
+  await searchPreferenceWrite;
   if(quitting)throw new Error('正在保存并退出，请稍后再试。');
   const s=requireSession(target.id), mode=requireMode(s,target.mode), key=s.id+':'+mode;
   if(jobs.has(key))throw new Error('当前模式正在生成，请先停止或等待完成。');
@@ -132,11 +154,26 @@ async function startRequest(target, question = '') {
   const {config}=resolveProvider(configs,s.kind==='image'?'vision':'text');
   if(!config?.baseUrl||!config?.model) { settingsReturn=view;settingsSection='service';view='settings';throw new Error('请先配置对应的 AI 服务地址和模型。'); }
   requireVerificationLocalService(config);
-  const messages=buildMessages(s,mode,question);
   const thread=s.threads[mode];
-  if(question)thread.messages.push({id:randomUUID(),role:'user',content:question,status:'complete'});
-  const reply={id:randomUUID(),role:'assistant',content:'',status:'streaming'};
-  thread.messages.push(reply);if(question)thread.draft='';thread.status='streaming';thread.error='';
+  const previous = options.retryReply;
+  let history = thread.messages.slice();
+  if (previous) {
+    if (history.at(-1) !== previous) throw new Error('请重试最新的失败回答，或重新提出问题。');
+    history = history.slice(0, -1);
+    if (question && history.at(-1)?.role === 'user' && history.at(-1).content === question) history.pop();
+  }
+  const snapshot = { ...s, threads: { ...s.threads, [mode]: { ...thread, messages: history } } };
+  const messages=buildMessages(snapshot,mode,question);
+  const useSearch = options.withoutSearch !== true && (options.forceSearch === true || s.webSearchEnabled === true);
+  if (useSearch) requireVerificationLocalService(configs.search);
+  if(question && !previous)thread.messages.push({id:randomUUID(),role:'user',content:question,status:'complete'});
+  const reply=previous || {id:randomUUID(),role:'assistant'};
+  Object.assign(reply, { content:'', status:'streaming', requestQuestion:question });
+  delete reply.error;
+  if (useSearch) reply.search = { status:'preparing', providerId:configs.search?.providerId || '', query:'', sources:[] };
+  else delete reply.search;
+  if (!previous) thread.messages.push(reply);
+  if(question)thread.draft='';thread.status='streaming';thread.error='';
   const abort=new AbortController();
   const job={abort,promise:null};jobs.set(key,job);
   scheduleEmit();
@@ -144,15 +181,24 @@ async function startRequest(target, question = '') {
   job.promise=(async()=>{
     try {
       try {await persist(s);} catch {throw new Error('本地保存失败，本次请求尚未发送。');}
-      await streamCompletion({config,messages,signal:abort.signal,fetchImpl:(...args)=>net.fetch(...args),onDelta:delta=>{
+      const request = {config,messages,signal:abort.signal,fetchImpl:(...args)=>net.fetch(...args),onDelta:delta=>{
         if(abort.signal.aborted||cache.get(s.id)!==s)return;
         reply.content+=delta;scheduleEmit();
         if(Date.now()-lastSave>2000){lastSave=Date.now();void persist(s).catch(()=>{status.error='会话暂未写入磁盘，请检查本机剩余空间。';scheduleEmit();});}
-      }});
+      }};
+      if (useSearch) await streamSearchedAnswer({ ...request, session:snapshot,mode,question,searchConfig:configs.search,
+        onSearch: search => { if (!abort.signal.aborted && cache.get(s.id) === s) { reply.search = search; scheduleEmit(); } } });
+      else await streamCompletion(request);
       reply.status=abort.signal.aborted?'stopped':'complete';thread.status=abort.signal.aborted?'stopped':'done';
     } catch(error) {
-      if(abort.signal.aborted){reply.status='stopped';thread.status='stopped';}
-      else {reply.status='error';thread.status='error';thread.error=error.message||'请求失败，请检查服务配置后重试。';}
+      if(abort.signal.aborted){reply.status='stopped';thread.status='stopped';if(question&&!reply.content&&!thread.draft)thread.draft=question;}
+      else {
+        reply.status='error';thread.status='error';thread.error=error.message||'请求失败，请检查服务配置后重试。';reply.error=thread.error;
+        if (useSearch && reply.search?.status !== 'complete') {
+          reply.search = { ...reply.search, status:'failed', error:thread.error };
+          if (question && !thread.draft) thread.draft = question;
+        }
+      }
     } finally {
       jobs.delete(key);
       try {await persist(s);} catch {status.error='会话暂未写入磁盘，当前内容仍在内存中。';}
@@ -182,6 +228,20 @@ async function handle(action,payload={}) {
       return work;
     }
     case 'bootstrap': return { ...await state(), pinFeedback: null, pinFeedbackBaseline: pinFeedback?.id || null };
+    case 'get-source-icon': {
+      if (verificationDirectory) return '';
+      const s = requireSession(payload.id), mode = requireMode(s, payload.mode);
+      const answer = s.threads[mode].messages.find(message => message.id === payload.messageId && message.role === 'assistant');
+      const source = answer?.search?.sources?.find(item => item.id === payload.sourceId);
+      sourceIcons ||= createSourceIcons({
+        decodeImage: buffer => decodeSourceIcon(buffer, nativeImage),
+        proxyFetch: (url, options) => {
+          sourceIconFetch ||= createSourceIconProxy(electronSession.fromPartition('pickgloss-source-icons', { cache: false }));
+          return sourceIconFetch(url, options);
+        },
+      });
+      return source ? sourceIcons.get(source.url) : '';
+    }
     case 'menu-ready': return desktop.menuReady(payload);
     case 'menu-close': return desktop.closeMenu(payload);
     case 'shortcut-recording': {
@@ -207,13 +267,13 @@ async function handle(action,payload={}) {
     case 'new-text': {
       const selected=text(payload.text,12000,'选定文字',false).trim();
       const context=text(payload.context||'',6000,'上下文').trim();
-      const s=await store.createSession({kind:'text',text:selected,context,contextOrigin:context?'手动补充的段落':'',source:{app:'手动粘贴',title:'',method:'用户输入'},activeMode:'context'});
+      const s=await createSession({kind:'text',text:selected,context,contextOrigin:context?'手动补充的段落':'',source:{app:'手动粘贴',title:'',method:'用户输入'},activeMode:'context'});
       cache.set(s.id,s);activeId=s.id;view='explain';rememberHistory(s);result={id:s.id,mode:s.activeMode};break;
     }
     case 'set-context': {
       const s=requireSession(payload.id);if(s.kind!=='text')throw new Error('截图会话请使用截图说明。');
       if(s.threads.context.messages.length)throw new Error('这段上下文已用于解释；修改材料请新建会话。');
-      s.context=text(payload.context,6000,'上下文',false).trim();s.contextOrigin='手动补充的段落';s.contextReason='';s.activeMode='context';await persist(s);if(activeId===s.id)view='explain';break;
+      s.context=text(payload.context,6000,'上下文',false).trim();s.contextOrigin='手动补充的段落';s.contextReason='';s.contextPending=false;s.activeMode='context';await persist(s);if(activeId===s.id)view='explain';break;
     }
     case 'set-note': {
       const s=requireSession(payload.id);if(s.kind!=='image')throw new Error('当前不是截图会话。');
@@ -225,6 +285,33 @@ async function handle(action,payload={}) {
       s.activeMode=payload.mode;if(activeId===s.id)view='explain';await persist(s);break;
     }
     case 'set-draft': {const s=requireSession(payload.id),mode=requireMode(s,payload.mode);s.threads[mode].draft=text(payload.draft||'',4000,'追问');await persist(s);break;}
+    case 'set-web-search': {
+      if (typeof payload.enabled !== 'boolean') throw new Error('联网搜索状态无效。');
+      const s = requireSession(payload.id);
+      const update = searchPreferenceWrite.catch(() => {}).then(async () => {
+        const previousSessionValue = s.webSearchEnabled;
+        const previousDefaultValue = settings.prefs.webSearchEnabled;
+        const savedSettings = await store.saveSettings({prefs:{webSearchEnabled:payload.enabled}});
+        settings = savedSettings;
+        s.webSearchEnabled = payload.enabled;
+        try { await persist(s); }
+        catch (error) {
+          s.webSearchEnabled = previousSessionValue;
+          try { settings = await store.saveSettings({prefs:{webSearchEnabled:previousDefaultValue}}); }
+          catch { settings = savedSettings; throw new Error('会话状态保存失败，且无法恢复全局联网默认值。'); }
+          throw error;
+        }
+      });
+      searchPreferenceWrite = update.catch(() => {});
+      await update;break;
+    }
+    case 'retry-search':
+    case 'retry-without-search': {
+      const s = requireSession(payload.id), mode = requireMode(s,payload.mode);
+      const reply = s.threads[mode].messages.find(item => item.id === payload.messageId && item.role === 'assistant');
+      if (!reply || reply.search?.status !== 'failed') throw new Error('这条回答没有可重试的联网请求。');
+      await startRequest(payload,reply.requestQuestion || '',{retryReply:reply,forceSearch:action==='retry-search',withoutSearch:action==='retry-without-search'});break;
+    }
     case 'start-explanation': if(activeId===payload.id)view='explain';await startRequest(payload);break;
     case 'send-question': {const q=text(payload.question,4000,'追问',false).trim();if(activeId===payload.id)view='explain';await startRequest(payload,q);break;}
     case 'stop': {const s=requireSession(payload.id);jobs.get(s.id+':'+requireMode(s,payload.mode))?.abort.abort();break;}
@@ -269,13 +356,17 @@ async function handle(action,payload={}) {
       historyQuery=text(payload.query ?? '',1000,'搜索关键词');historySavedOnly=payload.savedOnly===true;break;
     case 'delete-session': {
       for(const [key,job]of jobs)if(key.startsWith(payload.id+':')){job.abort.abort();await job.promise;}
-      await store.deleteSession(payload.id);cache.delete(payload.id);if(activeId===payload.id)activeId=null;view='history';invalidateHistory();break;
+      await store.deleteSession(payload.id);cache.delete(payload.id);for(const [ticket,id] of selectionSessions)if(id===payload.id)selectionSessions.delete(ticket);if(activeId===payload.id)activeId=null;view='history';invalidateHistory();break;
     }
-    case 'open-settings': if(view!=='settings')settingsReturn=view;settingsSection='service';view='settings';desktop.openPanel();break;
+    case 'open-settings': if(view!=='settings')settingsReturn=view;settingsSection=payload.section==='general'?'general':'service';view='settings';desktop.openPanel();break;
     case 'open-appearance': if(view!=='settings')settingsReturn=view;settingsSection='appearance';view='settings';desktop.openPanel();break;
     case 'open-shortcuts': if(view!=='settings')settingsReturn=view;settingsSection='shortcuts';view='settings';desktop.openPanel();break;
     case 'save-settings': {
-      if (verificationDirectory) for (const config of [payload.text, payload.vision]) requireVerificationLocalService(config);
+      await searchPreferenceWrite;
+      if (verificationDirectory) {
+        for (const config of [payload.text, payload.vision, payload.search]) requireVerificationLocalService(config);
+        for (const profiles of Object.values(payload.serviceProfiles || {})) for (const config of Object.values(profiles || {})) requireVerificationLocalService(config);
+      }
       let previous;
       const persistSettings = async () => { previous=settings; settings=await store.saveSettings(payload); return settings; };
       if (shortcuts && payload.prefs?.shortcuts !== undefined) await shortcuts.apply(payload.prefs.shortcuts, persistSettings);
@@ -285,7 +376,7 @@ async function handle(action,payload={}) {
       if (previous.prefs.selectionEnabled !== settings.prefs.selectionEnabled) desktop.startSelection(!verificationDirectory && settings.prefs.selectionEnabled!==false);
       if (JSON.stringify(previous.prefs.appearance) !== JSON.stringify(settings.prefs.appearance)) desktop.setAppearance(settings.prefs.appearance);
       // 外观编辑会连续预览与保存，保存后留在当前页面以便继续调整。
-      if (payload.text !== undefined || payload.vision !== undefined || (payload.prefs?.appearance === undefined && payload.prefs?.shortcuts === undefined && payload.prefs?.pinSound === undefined)) view=settingsReturn;
+      if (payload.text !== undefined || payload.vision !== undefined || payload.search !== undefined || (payload.prefs?.appearance === undefined && payload.prefs?.shortcuts === undefined && payload.prefs?.pinSound === undefined)) view=settingsReturn;
       break;
     }
     case 'test-provider': {
@@ -293,7 +384,8 @@ async function handle(action,payload={}) {
       const configs=await store.getSettings({includeSecrets:true});
       const requested=payload.config||{};
       const {source}=resolveProvider({...configs,[payload.kind]:requested},payload.kind);
-      const current=configs[source];
+      const selectedId=(source!==payload.kind ? payload.fallbackConfig : requested)?.providerId;
+      const current=selectedId && selectedId!==configs[source]?.providerId ? configs.serviceProfiles?.[source]?.[selectedId] || {} : configs[source];
       const input=source!==payload.kind ? payload.fallbackConfig||current : requested;
       if(current?.apiKey&&!input.apiKey&&!input.clearKey&&new URL(input.baseUrl).origin!==new URL(current.baseUrl).origin)throw new Error('服务地址已变更，请重新输入密钥或明确清除已有密钥。');
       const config={baseUrl:input.baseUrl,model:input.model,apiKey:input.clearKey?'':input.apiKey||current?.apiKey||''};
@@ -301,12 +393,28 @@ async function handle(action,payload={}) {
       await testProvider({config,vision:payload.kind==='vision',fetchImpl:(...args)=>net.fetch(...args)});
       return {message:source!==payload.kind?'已使用文字模型完成识图测试；截图效果仍需用实际内容体验。':'测试请求成功；具体模型回答质量仍需用实际内容体验。'};
     }
+    case 'test-search-provider': {
+      const input=payload.config || {}, configs=await store.getSettings({includeSecrets:true});
+      const providerId=input.providerId || configs.search?.providerId;
+      const current=providerId && providerId!==configs.search?.providerId ? configs.serviceProfiles?.search?.[providerId] || {} : configs.search || {};
+      const config={providerId,protocol:providerId==='custom'?(input.protocol ?? current.protocol ?? 'exa'):providerId,
+        baseUrl:input.baseUrl ?? current.baseUrl,apiKey:input.clearKey?'':input.apiKey||current.apiKey||''};
+      if(current.apiKey&&!input.apiKey&&!input.clearKey&&new URL(config.baseUrl).origin!==new URL(current.baseUrl).origin)throw new Error('搜索服务地址已变更，请重新输入密钥或明确清除已有密钥。');
+      requireVerificationLocalService(config);
+      const sources=await searchWeb({config,query:'PickGloss 搜索连接测试',fetchImpl:(...args)=>net.fetch(...args)});
+      return {message:`搜索服务已响应，返回 ${sources.length} 条可用来源。`};
+    }
     case 'start-capture': if(verificationDirectory)throw new Error('隔离验证模式不会读取实际屏幕。');await desktop.beginCapture();break;
     case 'capture-ready': return desktop.captureReady(payload);
     case 'capture-done': {
       const imageData=desktop.finishCapture(payload.rect);
-      const s=await store.createSession({kind:'image',text:'截图讲解',imageData,note:'',source:{app:'屏幕框选',title:'',method:'用户框选'},activeMode:'visual'});
-      cache.set(s.id,s);activeId=s.id;view='preview';rememberHistory(s);desktop.openPanel();break;
+      const s=await createSession({kind:'image',text:'截图讲解',imageData,note:'',source:{app:'屏幕框选',title:'',method:'用户框选'},activeMode:'visual'});
+      cache.set(s.id,s);activeId=s.id;view='preview';rememberHistory(s);desktop.openPanel();
+      if (settings.prefs.autoExplainCapture === true) {
+        try { await startRequest({id:s.id,mode:'visual'});view='explain'; }
+        catch (error) { view='preview';status.error=error.message || '截图已保留，请检查识图配置后重试。'; }
+      }
+      break;
     }
     case 'capture-cancel': desktop.cancelCapture();break;
     case 'selection-open': await desktop.acceptSelection();break;
@@ -332,6 +440,32 @@ async function handle(action,payload={}) {
   await emit();return result;
 }
 
+async function acceptCapturedSelection(data) {
+  const s=await createSession({kind:'text',text:data.text,context:data.context || '',contextOrigin:data.contextOrigin || '',
+    contextReason:data.reason || '',contextPending:data.contextPending === true,
+    source:{app:data.app,title:data.title,method:data.method},activeMode:'context'});
+  cache.set(s.id,s);activeId=s.id;view='explain';rememberHistory(s);
+  if (s.contextPending && data.requestId) selectionSessions.set(data.requestId,s.id);
+  if(s.context&&settings.text?.model&&settings.text?.baseUrl)await startRequest({id:s.id,mode:s.activeMode});
+  scheduleEmit();
+}
+
+async function applySelectionContext(data) {
+  const id=selectionSessions.get(data.requestId);
+  if (!id) return;
+  selectionSessions.delete(data.requestId);
+  const s=cache.get(id);
+  if (!s || !s.contextPending) return;
+  s.contextPending=false;
+  // 手动材料和已经用于语境解释的快照优先，迟到段落只属于它原先的会话。
+  if (!s.context && !s.contextOrigin?.includes('手动') && !s.threads.context.messages.length) {
+    s.context=text(data.context || '',6000,'上下文');
+    s.contextOrigin=s.context ? text(data.contextOrigin || 'UIA 所在段落',1000,'上下文来源') : '';
+    s.contextReason=s.context ? '' : text(data.reason || '当前应用未提供可靠的所在段落，可手动补充或使用独立释义。',1000,'上下文说明');
+  }
+  await persist(s);scheduleEmit();
+}
+
 async function start() {
   if(process.platform!=='win32')throw new Error('此版本仅面向 Windows。');
   electronSession.defaultSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
@@ -344,12 +478,7 @@ async function start() {
   desktop=createDesktop({onAction:safeAction,onStatus:patch=>{if(typeof patch.wide==='boolean')wide=patch.wide;Object.assign(status,patch);scheduleEmit();},onWindowState:async geometry=>{
     // 存储队列按最新磁盘设置合并，窗口移动不能覆盖随后保存的服务或外观设置。
     settings=await store.saveSettings({prefs:{windowGeometry:geometry}});
-  },onSelection:async data=>{
-    const s=await store.createSession({kind:'text',text:data.text,context:data.context,contextOrigin:data.contextOrigin,contextReason:data.reason||'',source:{app:data.app,title:data.title,method:data.method},activeMode:'context'});
-    cache.set(s.id,s);activeId=s.id;view='explain';rememberHistory(s);
-    if(s.context&&settings.text?.model&&settings.text?.baseUrl)await startRequest({id:s.id,mode:s.activeMode});
-    scheduleEmit();
-  }});
+  },onSelection:acceptCapturedSelection,onSelectionContext:applySelectionContext});
   ipcMain.handle('pickgloss:action',async(event,action,payload)=>{
     if(!desktop.authorize(event,action))return{ok:false,error:'此窗口不能执行该操作。'};
     if(action==='bootstrap')bridgeReady++;

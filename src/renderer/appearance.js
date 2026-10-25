@@ -286,7 +286,9 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
     root = element('section', 'appearance-page'); refs = {};
     root.setAttribute('aria-label', '外观与主题');
     const heading = element('div', 'appearance-title'); refs.state = element('span');
-    heading.append(element('h2', '', '外观与主题'), refs.state);
+    heading.append(element('h2', '', '外观与主题'));
+    const modeHeading = element('div', 'appearance-mode-heading');
+    modeHeading.append(element('h3', '', '明暗模式'), refs.state);
     const layout = element('div', 'appearance-layout'), base = element('section', 'appearance-base'), custom = element('section', 'appearance-custom');
     const modeGroup = element('div', 'appearance-modes'); modeGroup.setAttribute('role', 'group'); modeGroup.setAttribute('aria-label', '明暗模式');
     refs.mode = [['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']].map(([key, label]) => {
@@ -301,7 +303,7 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
     }); materialGroup.append(...refs.material);
     refs.fallback = element('p', 'appearance-helper appearance-fallback', '此设备暂不支持磨砂，已使用实色。'); refs.fallback.setAttribute('role', 'status');
     refs.presets = element('div', 'appearance-presets'); refs.presets.setAttribute('role', 'group'); refs.presets.setAttribute('aria-label', '已保存的配色');
-    base.append(element('h3', '', '明暗模式'), modeGroup, element('h3', '', '窗口材质'), materialGroup, refs.fallback, element('h3', '', '已保存的配色'), refs.presets);
+    base.append(modeHeading, modeGroup, element('h3', '', '窗口材质'), materialGroup, refs.fallback, element('h3', '', '已保存的配色'), refs.presets);
     const pinGroup = element('div', 'appearance-pin-colors'); pinGroup.setAttribute('role', 'group'); pinGroup.setAttribute('aria-label', '置顶边缘描边');
     refs.pin = Object.entries(PIN_COLORS).map(([key, [label, color]]) => {
       const node = button(label, 'appearance-pin-color', () => saveImmediate('pinOutline', key)); node.dataset.pinOutline = key;

@@ -4,6 +4,7 @@ const allowed = new Set(['bootstrap','new-text','set-context','set-note','set-mo
 allowed.add('reset-window-size');
 allowed.add('open-latest-session');
 allowed.add('orb-activate');
+for (const action of ['set-web-search','retry-search','retry-without-search','test-search-provider','get-source-icon']) allowed.add(action);
 for (const action of ['rename-session', 'search-history', 'refresh-history', 'orb-drag', 'open-appearance', 'toggle-selection', 'open-shortcuts', 'shortcut-command', 'shortcut-recording', 'menu-close', 'menu-ready', 'capture-ready']) allowed.add(action);
 contextBridge.exposeInMainWorld('pickgloss', Object.freeze({
   onLayout(callback) {

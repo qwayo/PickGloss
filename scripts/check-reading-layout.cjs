@@ -66,18 +66,18 @@ app.whenReady().then(async()=>{
       assert.deepEqual(errors,[]);
       await fs.writeFile(path.join(outputRoot,'阅读视图检查.json'),JSON.stringify(report,null,2));
       current.view='settings';
-      current.settingsSection='appearance';
+      current.settingsSection='general';
       await win.loadFile(path.join(sourceRoot,'src/renderer/index.html'));
       for(let attempt=0;attempt<100;attempt++){
         if(await win.webContents.executeJavaScript(`Boolean(document.querySelector('[title="恢复窗口默认大小"]'))`))break;
         await delay(20);
       }
       await size(430,690);
-      assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[aria-label="窗口设置"]').closest('[data-settings-section]').dataset.settingsSection`),'appearance','窗口区域放在外观分类');
-      await win.webContents.executeJavaScript(`document.querySelector('[aria-label="窗口设置"]').scrollIntoView({block:'end'})`);
+      assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[aria-label="窗口设置"]').closest('[data-settings-section]').dataset.settingsSection`),'general','窗口区域放在常规分类');
+      await win.webContents.executeJavaScript(`document.querySelector('[aria-label="窗口设置"]').scrollIntoView({block:'end',container:'nearest'})`);
       await settle();await shot('设置-恢复窗口默认大小.png');
       await size(300,483);
-      await win.webContents.executeJavaScript(`document.querySelector('[aria-label="窗口设置"]').scrollIntoView({block:'end'})`);
+      await win.webContents.executeJavaScript(`document.querySelector('[aria-label="窗口设置"]').scrollIntoView({block:'end',container:'nearest'})`);
       assert.equal(await win.webContents.executeJavaScript(`(()=>{const b=document.querySelector('.window-reset').getBoundingClientRect();return b.height<=30&&b.height>=28&&b.right<=innerWidth-1})()`),true,'默认小窗中恢复按钮紧凑且不越界');
       await settle();await shot('默认小窗-紧凑窗口设置.png');
       console.log('固定字号、自由拉伸、两栏布局、按钮边界、草稿节点保留与不误发送检查通过。');

@@ -5,6 +5,7 @@ const { pathToFileURL } = require('node:url');
 const { BrowserWindow, Menu, Tray, nativeImage, nativeTheme, systemPreferences, desktopCapturer, screen, utilityProcess, app, ipcMain } = require('electron');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
+const PIN_OUTLINE_COLORS = Object.freeze({ orange: '#dc873d', amber: '#cf9f37', blue: '#5095e8', violet: '#a47ee2', mint: '#4db393', silver: '#a8b2c1' });
 // 两种默认尺寸保持独立；用户自定义尺寸与位置由主进程持久化。
 const DEFAULT_PANEL_SIZES = Object.freeze({
   compact: Object.freeze({ width: 300, height: 483 }),
@@ -12,7 +13,7 @@ const DEFAULT_PANEL_SIZES = Object.freeze({
 });
 const { clampWindow, cropPixels, resizePanel, fitWindow, placeMenu, placeSelectionEntry } = require('./geometry.cjs');
 
-function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
+function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, onWindowState }) {
   const windows = new Map();
   const html = path.join(__dirname, '..', 'renderer', 'index.html');
   const htmlUrl = pathToFileURL(html).href;
@@ -22,13 +23,14 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
   let closing = false, capture = null, pinned = false, wide = false, showOrb = true;
   let selectionGeneration = 0, selectionEntry = 0, pausedSelection = false;
   let cancellationId = 0, pendingCancellation = null;
+  const selectionContexts = new Map();
   const panelSizes = { compact: { ...DEFAULT_PANEL_SIZES.compact }, reading: { ...DEFAULT_PANEL_SIZES.reading } };
   let panelTransition = null, animation = null, animationTimer = null, orbDrag = null;
   let panelPosition = null, orbPosition = null, geometryTimer = null;
   let revision = 0, savedRevision = 0, submittedRevision = -1, persistence = Promise.resolve(true);
   let appearance = { current: { mode: 'light', material: 'solid' }, reducedMotion: false };
   let appearanceDark = false, reducedMotion = false, appearanceMaterial = 'solid', lastState = null;
-  let menuGeneration = 0, menuWanted = false, menuLoaded = false, menuHideTimer = null, menuOrigin = 'top-left';
+  let menuGeneration = 0, menuWanted = false, menuLoaded = false, menuHideTimer = null, menuOrigin = 'top-left', menuCloseReason = null;
   let menuAnchor = null, menuHeight = 452;
   const programmedSizes = new WeakMap();
   const windowMaterials = new WeakMap();
@@ -223,6 +225,9 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
     const mono = current.accent === '#000000' && current.tint === '#bfc2c8';
     const paper = !current.tint || mono ? base : '#' + [1,3,5].map(i => Math.round(parseInt(current.tint.slice(i, i + 2), 16) * .06 + parseInt(base.slice(i, i + 2), 16) * .94).toString(16).padStart(2, '0')).join('');
     win.setBackgroundColor?.(nativeRoundedFrame && material === 'solid' ? paper : '#00000000');
+    // 系统边框与自绘光条同色；取消固定或无描边时回到纸面色，避免外露另一圈灰边。
+    const pinColor = PIN_OUTLINE_COLORS[appearance.pinOutline || 'orange'];
+    if (nativeRoundedFrame) win.setAccentColor?.(pinned && pinColor ? pinColor : paper);
     appearanceMaterial = material;
   }
 
@@ -336,7 +341,7 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
     win.on('will-resize', () => { stopAnimation(); programmedSizes.delete(win); panelTransition = null; });
     win.on('close', event => { if (!closing) { event.preventDefault(); win.hide(); } });
     win.on('blur', () => { if (!pinned && !capture && !menuWanted) win.hide(); });
-    win.webContents.on('before-input-event', (event, input) => { if (input.key === 'Escape' && !lastState?.status?.shortcuts?.recording) { event.preventDefault(); win.hide(); } });
+    win.webContents.on('before-input-event', (event, input) => { if (input.type === 'keyDown' && input.key === 'Escape' && !lastState?.status?.shortcuts?.recording) { event.preventDefault(); win.hide(); } });
     return win;
   }
 
@@ -377,11 +382,38 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
   }
 
   function dismiss(cancelWorker = false) {
+    if (pending?.requestId) {
+      const record = selectionContexts.get(pending.requestId);
+      if (record && !record.opened) selectionContexts.delete(pending.requestId);
+    }
     pending = null; windows.get('selection')?.hide();
     if (cancelWorker && worker) {
       pendingCancellation = ++cancellationId;
       worker.postMessage({ type: 'cancel-pending', requestId: pendingCancellation });
     }
+  }
+
+  function selectionWindow() {
+    const existing = windows.get('selection');
+    if (existing && !existing.isDestroyed()) return existing;
+    return windowFor('selection', { width: 34, height: 34, transparent: true, backgroundColor: '#00000000', resizable: false, focusable: false, hasShadow: false });
+  }
+
+  function finishSelectionContext(requestId, patch) {
+    const record = selectionContexts.get(requestId);
+    if (!record) return;
+    selectionContexts.delete(requestId);
+    const context = typeof patch.context === 'string' && patch.context.length <= 6000 ? patch.context : '';
+    const update = { requestId, context, contextOrigin: context ? patch.contextOrigin || 'UIA 所在段落' : '',
+      reason: typeof patch.reason === 'string' ? patch.reason : '', contextPending: false };
+    Object.assign(record.data, update);
+    if (record.opened) void Promise.resolve(record.acceptance).then(() => onSelectionContext?.(update)).catch(() => {
+      onStatus({ error: '上下文暂未保存，已保留选定内容，可手动补充。' });
+    });
+  }
+
+  function endSelectionContexts(reason) {
+    for (const requestId of [...selectionContexts.keys()]) finishSelectionContext(requestId, { context: '', reason });
   }
 
   function showSelection(data) {
@@ -392,9 +424,14 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
       const b = win.getBounds();
       if (point.x >= b.x && point.y >= b.y && point.x <= b.x + b.width && point.y <= b.y + b.height) return;
     }
-    pending = { ...data, dipPoint: point }; selectionEntry++;
-    let win = windows.get('selection');
-    if (!win) win = windowFor('selection', { width: 34, height: 34, transparent: true, backgroundColor: '#00000000', resizable: false, focusable: false, hasShadow: false });
+    dismiss();
+    const requestId = data.requestId === undefined ? undefined : `${selectionGeneration}:${data.requestId}`;
+    pending = { ...data, requestId, dipPoint: point }; selectionEntry++;
+    if (pending.contextPending && requestId) {
+      selectionContexts.set(requestId, { data: pending, opened: false, acceptance: null });
+      while (selectionContexts.size > 32) finishSelectionContext(selectionContexts.keys().next().value, { context: '', reason: '上下文读取已结束，请手动补充或使用独立释义。' });
+    }
+    const win = selectionWindow();
     const expected = pending;
     const show = () => {
       if (pending !== expected) return;
@@ -435,17 +472,18 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
     }
     menuAnchor = anchor;
     const placement = placeMenu(anchor, { width: 240, height: menuHeight }, screen.getDisplayNearestPoint({ x: anchor.x, y: anchor.y }).workArea);
-    menuOrigin = placement.origin; menuWanted = true; menuGeneration++;
+    menuOrigin = placement.origin; menuWanted = true; menuGeneration++; menuCloseReason = null;
     let win = windows.get('menu');
     if (!win || win.isDestroyed()) {
       menuLoaded = false;
       win = windowFor('menu', { ...placement.bounds, transparent: true, backgroundColor: '#00000000', resizable: false, focusable: true, hasShadow: false, webPreferences: { backgroundThrottling: false } });
       win.on('blur', () => {
-        closeMenu();
-        // 点回解释窗口只关闭菜单；点击其他应用时继续遵守未固定窗口的失焦规则。
-        setTimeout(() => { const currentPanel = windows.get('panel'); if (!pinned && !capture && !menuWanted && currentPanel && BrowserWindow.getFocusedWindow?.() !== currentPanel) currentPanel.hide(); }, 0);
+        if (menuWanted) closeMenu({}, 'blur');
+        if (menuCloseReason !== 'blur') return;
+        // 仅真实失焦时，才按未固定窗口规则收起解释窗；显式 X/Esc 关闭不连带处理。
+        setTimeout(() => { const currentPanel = windows.get('panel'); if (!pinned && !capture && !menuWanted && currentPanel && !currentPanel.isFocused()) currentPanel.hide(); }, 0);
       });
-      win.webContents.on('before-input-event', (event, input) => { if (input.key === 'Escape') { event.preventDefault(); closeMenu(); } });
+      win.webContents.on('before-input-event', (event, input) => { if (input.type === 'keyDown' && input.key === 'Escape') { event.preventDefault(); closeMenu(); } });
       win.on('closed', () => { if (windows.get('menu') && windows.get('menu') !== win) return; menuLoaded = false; menuWanted = false; clearTimeout(menuHideTimer); });
     } else win.setBounds(placement.bounds);
     onStatus({ menuOpen: menuLoaded, menuGeneration, menuOrigin });
@@ -471,7 +509,7 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
     return true;
   }
 
-  function closeMenu(payload = {}) {
+  function closeMenu(payload = {}, reason = 'explicit') {
     if (payload.generation !== undefined && payload.generation !== menuGeneration) return false;
     const win = windows.get('menu');
     if (payload.finished === true) {
@@ -479,7 +517,11 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
       clearTimeout(menuHideTimer); menuHideTimer = null; win?.hide(); return true;
     }
     if (!menuWanted) return false;
-    menuWanted = false; onStatus({ menuOpen: false, menuGeneration, menuOrigin });
+    menuWanted = false; menuCloseReason = reason; onStatus({ menuOpen: false, menuGeneration, menuOrigin });
+    // 显式收起菜单后把焦点交回仍可见的解释窗，使下一次外部点击能正常触发失焦隐藏。
+    const currentPanel = windows.get('panel');
+    if (reason === 'explicit' && win?.isFocused() &&
+        currentPanel && !currentPanel.isDestroyed() && currentPanel.isVisible()) currentPanel.focus();
     clearTimeout(menuHideTimer);
     const generation = menuGeneration;
     if (win?.isVisible()) menuHideTimer = setTimeout(() => { if (generation === menuGeneration && !menuWanted) win.hide(); menuHideTimer = null; }, reducedMotion ? 0 : 250);
@@ -493,12 +535,15 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
   }
 
   function startSelection(enabled) {
+    endSelectionContexts('划词监听已重新启动，本次上下文未能取得，请手动补充或使用独立释义。');
     pausedSelection = !enabled; selectionGeneration++; pendingCancellation = null; dismiss();
     if (worker) { worker.postMessage({type:'stop'}); worker.kill(); worker = null; }
     clearInterval(heartbeatTimer);
     if (!enabled) { onStatus({selection:'划词入口已关闭'}); return; }
     const binary = app.isPackaged ? path.join(process.resourcesPath,'native','ContextProbe.exe') : path.join(app.getAppPath(),'build','native','ContextProbe.exe');
     if (!fs.existsSync(binary)) { onStatus({selection:'段落验证助手未构建，可使用粘贴或截图'}); return; }
+    // 隐藏加载入口页面，首次有效选区只需定位并显示。
+    selectionWindow();
     const generation = selectionGeneration;
     const pids = [process.pid, ...BrowserWindow.getAllWindows().map(w=>w.webContents.getOSProcessId())].join(',');
     const child = utilityProcess.fork(path.join(__dirname,'selection-worker.cjs'), [binary,pids], {stdio:'ignore',serviceName:'PickGloss 选区监听'});
@@ -507,6 +552,10 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
       if (generation !== selectionGeneration) return;
       if (data.type === 'pending-cancelled') {
         if (data.requestId === pendingCancellation) pendingCancellation = null;
+        return;
+      }
+      if (data.type === 'selection-context') {
+        finishSelectionContext(`${generation}:${data.requestId}`, data);
         return;
       }
       if (generation !== selectionGeneration || capture) return;
@@ -523,6 +572,7 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
     });
     child.on('exit', () => {
       if (generation !== selectionGeneration || closing) return;
+      endSelectionContexts('划词助手已退出，本次上下文未能取得，请手动补充或使用独立释义。');
       worker=null; onStatus({selection:'选区监听已退出，可从托盘重新开启'});
     });
     heartbeatTimer=setInterval(()=>{
@@ -604,15 +654,22 @@ function createDesktop({ onAction, onSelection, onStatus, onWindowState }) {
   return { initTray, openPanel, startSelection, setOrb, menu, closeMenu, menuReady, beginCapture, cancelCapture, finishCapture, captureReady, authorize, stateFor,
     restoreWindowState, getWindowState, flushWindowState, setAppearance, dragOrb,
     async acceptSelection() {
-      const data=pending;if(!data)throw new Error('选区入口已过期，请重新划词。');dismiss(true);
+      const data=pending;if(!data)throw new Error('选区入口已过期，请重新划词。');
+      const record = data.requestId && selectionContexts.get(data.requestId);
+      if (record) record.opened = true;
+      const acceptance = data.type === 'selection-too-long' ? null : Promise.resolve().then(() => onSelection(data));
+      if (record) record.acceptance = acceptance;
+      dismiss(true);
       if(data.type==='selection-too-long')onStatus({error:'本次读取的文字超过 12000 个字符，请缩短选区后重试，或手动粘贴精简后的内容。',errorId:randomUUID()});
-      else await onSelection(data);
+      else {
+        await acceptance;
+      }
       openPanel(data.dipPoint);
     },
     captureState, broadcast,
     hidePanel() {windows.get('panel')?.hide();},
     isPanelVisible() { const win=windows.get('panel');return Boolean(win&&!win.isDestroyed()&&win.isVisible()); },
-    setPinned(value) { pinned = !!value; windows.get('panel')?.setAlwaysOnTop(true, 'pop-up-menu'); },
+    setPinned(value) { pinned = !!value; const win = windows.get('panel'); if (win) { win.setAlwaysOnTop(true, 'pop-up-menu'); applyWindowAppearance('panel', win); } },
     resetPanelSize() {
       const win = panel(), bounds = win.getBounds();
       stopAnimation();

@@ -26,8 +26,12 @@ function selectionWorker({ autoWarm = true } = {}) {
       spawn(binary, args) {
         const child = Object.assign(new EventEmitter(), {
           standby: args.includes('--standby'),
+          stdinFrames: [],
           stdout: Object.assign(new EventEmitter(), { setEncoding() {} }),
-          stdin: Object.assign(new EventEmitter(), { write(value) { child.input = value; }, end(value) { child.input = value; child.inputEnded = true; } }),
+          stdin: Object.assign(new EventEmitter(), {
+            write(value) { child.input = value; child.stdinFrames.push({ operation: 'write', value }); },
+            end(value) { child.input = value; child.stdinFrames.push({ operation: 'end', value }); child.inputEnded = true; },
+          }),
           kill() { child.killed = true; },
         });
         children.push(child); return child;
@@ -51,6 +55,7 @@ function selectionWorker({ autoWarm = true } = {}) {
 }
 
 function finish(child, result) { child.stdout.emit('data', JSON.stringify(result) + '\n'); child.emit('close'); }
+function frame(child, result) { child.stdout.emit('data', JSON.stringify(result) + '\n'); }
 
 test('监听开启时提前预热，快速拖选复用现成助手并补充待用进程', () => {
   const worker = selectionWorker();
@@ -110,6 +115,22 @@ test('待用进程失败不循环重启，下次手势退回有期限的冷启�
     worker.up();
     assert.equal(worker.allChildren.length, 3);
   }
+});
+
+test('冷启动手势保持助手 stdin 打开，直到松开帧写入后再结束', () => {
+  const worker = selectionWorker(), staleStandby = worker.allChildren[0];
+  staleStandby.emit('error');
+  worker.down();
+  const child = worker.children[0];
+  assert.ok(child && child !== staleStandby, '待用助手失败后应启动冷助手');
+  assert.equal(child.inputEnded, undefined, '手势开始帧不能提前结束 stdin，否则助手读不到松开帧');
+  assert.deepEqual(child.stdinFrames.map(frame => [frame.operation, JSON.parse(frame.value).mode]), [['write', 'gesture']]);
+  child.stdout.emit('data', '{"ready":true}\n');
+  worker.up();
+  assert.equal(child.inputEnded, true, '松开帧发送后结束一次输入流');
+  assert.deepEqual(child.stdinFrames.map(frame => [frame.operation, JSON.parse(frame.value).mode]), [
+    ['write', 'gesture'], ['end', 'gesture-end'],
+  ]);
 });
 
 test('预热超时移除备用槽而不循环重启，迟到握手不影响下一次助手', () => {
@@ -238,6 +259,71 @@ test('段落读取延迟时仍保留松开瞬间的坐标，不使用段落锚�
   worker.children[0].stdout.emit('data', JSON.stringify({ valid: true, text: 'EXA', point: { x: 10, y: 20 }, anchor: { point: { x: 30, y: 40 } } }));
   worker.children[0].emit('close');
   assert.deepEqual(JSON.parse(JSON.stringify(worker.messages.find(message => message.type === 'selection').point)), { x: 700, y: 420 });
+});
+
+test('分阶段复核先发布已验证文字，再按同一 requestId 返回上下文', () => {
+  const worker = selectionWorker();
+  worker.select('正文块。\ngit status --short');
+  const probe = worker.children[0];
+  assert.equal(JSON.parse(probe.input).progressive, true);
+  frame(probe, { valid: true, text: '正文块。\ngit status --short', contextPending: true, app: 'electron', title: '固定材料' });
+  const selected = worker.messages.find(message => message.type === 'selection');
+  assert.equal(typeof selected.requestId, 'number');
+  assert.equal(selected.text, '正文块。\ngit status --short');
+  assert.equal(selected.context, '');
+  assert.equal(selected.contextPending, true);
+  assert.equal(worker.messages.some(message => message.type === 'selection-context'), false);
+  frame(probe, { contextComplete: true, context: '正文块。\n\ngit status --short', contextOrigin: 'UIA 所在段落', reason: '' });
+  probe.emit('close');
+  const context = worker.messages.find(message => message.type === 'selection-context');
+  assert.equal(context.requestId, selected.requestId);
+  assert.equal(context.context, '正文块。\n\ngit status --short');
+  assert.equal(context.contextOrigin, 'UIA 所在段落');
+});
+
+test('入口点击触发取消时保留已发布的上下文读取并返回缺失或完成阶段', () => {
+  const worker = selectionWorker(); worker.select('已验证正文');
+  const probe = worker.children[0];
+  frame(probe, { valid: true, text: '已验证正文', contextPending: true });
+  const selected = worker.messages.find(message => message.type === 'selection');
+  worker.command({ type: 'cancel-pending', requestId: 71 });
+  assert.notEqual(probe.killed, true, '入口点击只取消未发布选区，不应杀掉其上下文 reader');
+  frame(probe, { contextComplete: true, context: '', contextOrigin: '', reason: '当前应用未提供可靠上下文。' });
+  probe.emit('close');
+  const context = worker.messages.find(message => message.type === 'selection-context');
+  assert.equal(context.requestId, selected.requestId);
+  assert.equal(context.context, '');
+  assert.match(context.reason, /可靠上下文/);
+});
+
+test('新划词后旧 requestId 的迟到上下文仍归属原选区，不覆盖新文字', () => {
+  const worker = selectionWorker();
+  worker.select('旧的已发布文字'); const old = worker.children[0];
+  frame(old, { valid: true, text: '旧的已发布文字', contextPending: true });
+  const oldSelection = worker.messages.find(message => message.type === 'selection');
+  worker.select('新的文字'); const current = worker.children[1];
+  assert.notEqual(old.killed, true, '已发布旧选区继续完成自己的上下文读取');
+  frame(current, { valid: true, text: '新的文字', contextPending: true });
+  frame(old, { contextComplete: true, context: '旧段落', contextOrigin: 'UIA 所在段落', reason: '' });
+  frame(current, { contextComplete: true, context: '新段落', contextOrigin: 'UIA 所在段落', reason: '' });
+  old.emit('close'); current.emit('close');
+  assert.deepEqual(worker.messages.filter(message => message.type === 'selection').map(message => message.text), ['旧的已发布文字', '新的文字']);
+  assert.deepEqual(worker.messages.filter(message => message.type === 'selection-context').map(message => [message.requestId, message.context]), [
+    [oldSelection.requestId, '旧段落'], [worker.messages.filter(message => message.type === 'selection')[1].requestId, '新段落'],
+  ]);
+});
+
+test('分阶段文字已发布后 helper 超时也发送上下文缺失帧', () => {
+  const worker = selectionWorker(); worker.select('等待上下文');
+  const probe = worker.children[0];
+  frame(probe, { valid: true, text: '等待上下文', contextPending: true });
+  const selected = worker.messages.find(message => message.type === 'selection');
+  worker.timers.at(-1).fn();
+  const context = worker.messages.find(message => message.type === 'selection-context');
+  assert.equal(context.requestId, selected.requestId);
+  assert.equal(context.contextPending, undefined);
+  assert.match(context.reason, /超时/);
+  assert.equal(probe.killed, true);
 });
 
 test('主动进入其他流程后，旧段落结果失效且后续新划词仍可用', () => {
