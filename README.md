@@ -356,6 +356,8 @@ npm run package
 4. 不为通过测试而降低断言、伪造验收结果或把未执行的检查写成已通过。
 5. 不提交凭据、本机用户数据、未脱敏截图或与变更无关的生成文件。
 
+工程验证入口与证据边界见 [工程验证说明](docs/engineering-verification.md)，包括失败阻断、隐藏界面 CI、冻结便携包和 Windows 实屏边缘检查。
+
 <p align="right">(<a href="#readme-top">回到顶部</a>)</p>
 
 ## 致谢

@@ -5,6 +5,7 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { includePackagePath } = require('./package-files.cjs');
+const { runSteps } = require('./checked-runner.cjs');
 
 async function hashFile(file) {
   const hash = createHash('sha256');
@@ -29,8 +30,7 @@ function fingerprint(entries) {
 
 (async () => {
   const root = path.resolve(__dirname, '..');
-  const built = spawnSync(process.execPath, [path.join(__dirname, 'build-native.cjs')], { stdio: 'inherit', windowsHide: true });
-  if (built.status !== 0) throw new Error('原生助手构建失败。');
+  await runSteps([{ name: '原生助手构建', command: process.execPath, args: [path.join(__dirname, 'build-native.cjs')] }], { cwd: root });
   const { packager } = await import('@electron/packager');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const result = await packager({ dir: root, name: 'PickGloss', platform: 'win32', arch: 'x64',
@@ -102,4 +102,5 @@ function fingerprint(entries) {
   if (verified.status !== 0) throw new Error(`包核对失败：${verified.stderr || verified.stdout}`);
   console.log(verified.stdout.trim());
   console.log(`便携目录：${packageDirectory}\n压缩产物：${archive}\n外部摘要：${path.join(output, 'release-checksum.json')}`);
+  await runSteps([{ name: '冻结便携包验证', command: process.execPath, args: [path.join(__dirname, 'check-portable-suite.cjs'), output], timeoutMs: 240000 }], { cwd: root });
 })().catch(error => { console.error(error.message); process.exitCode = 1; });

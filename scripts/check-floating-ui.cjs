@@ -9,6 +9,7 @@ const path = require('node:path');
 const Module = require('node:module');
 const assert = require('node:assert/strict');
 const { setTimeout: delay } = require('node:timers/promises');
+const { createUiDriver } = require('./ui-driver.cjs');
 const root = path.resolve(process.argv.find(a => a.startsWith('--source-root='))?.slice(14) || path.join(__dirname, '..'));
 const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/floating-20261021') : path.resolve(process.argv[outputIndex + 1]);
@@ -25,12 +26,17 @@ class TestWindow extends electron.BrowserWindow {
 let desktop, panel, store, state, failSave = false;
 const errors = [], checks = [];
 const evaluate = code => panel.webContents.executeJavaScript(code);
+const driver = createUiDriver(evaluate, { timeoutMs: 7000, intervalMs: 10 });
 async function until(predicate, label) {
   const deadline = Date.now() + 7000;
   while (Date.now() < deadline) { if (await predicate()) return; await delay(10); }
-  throw Error(`等待${label}超时`);
+  driver.phase(label);
+  throw await driver.diagnose(label);
 }
-async function click(selector) { await evaluate(`document.querySelector(${quoteJavaScriptString(selector)}).click()`); }
+async function click(selector) {
+  await driver.waitFor(`Boolean(document.querySelector(${quoteJavaScriptString(selector)})?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))`, '切换动画结束且控件可见', { stage: `点击控件 ${selector}`, allowErrors: true });
+  await driver.click(undefined, { selector, stage: `点击控件 ${selector}` });
+}
 async function shot(name, win = panel) {
   await win.webContents.executeJavaScript('Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))');
   await win.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
@@ -222,5 +228,9 @@ app.whenReady().then(async () => {
     await fs.writeFile(path.join(output, '界面检查.json'), JSON.stringify({ 通过: true, 说明: '真实 Electron 隐藏窗口，虚构会话和隔离存储；不代表真实桌面流畅度或系统磨砂观感验收。', checks }, null, 2));
     console.log('悬浮窗检查通过：圆角、主题、置顶、色板指针、识别页和三轮展开采样。');
     clearTimeout(timeout); desktop.dispose(); app.exit(0);
-  } catch (error) { console.error(error); clearTimeout(timeout); desktop?.dispose(); app.exit(1); }
+  } catch (error) {
+    console.error(error.message.startsWith('界面检查失败：') ? error.message : (await driver.diagnose('当前浮窗断言或操作通过', '断言或操作失败').catch(() => new Error('界面检查失败：当前窗口状态不可读取'))).message);
+    console.error(`失败位置：${error.stack?.split('\n').find(line => line.trim().startsWith('at ')) || '未提供位置'}；异常类型：${error.code || error.name}`);
+    clearTimeout(timeout); desktop?.dispose(); app.exit(1);
+  }
 });
