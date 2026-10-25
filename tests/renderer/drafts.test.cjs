@@ -43,6 +43,7 @@ function renderer(invoke = async () => ({ ok: true })) {
     };
     globalThis.audit = {receive, rememberDraft, scheduleDraft, flushDraft, sendQuestion,
       openSettings, previewView, explainView, footer, bootstrap, hasProvider, effectiveProvider, statusErrorKey, getSettingsSection: () => settingsSection, setState: value => state = value};
+    globalThis.audit.draftValue = draftValue;
   `, Object.assign(context, { testFields: fields, testRenders: renders }));
   return { ...context.audit, calls, fields, renders, fireTimer() { const fn = timer; timer = null; fn?.(); }, quit: () => beforeQuit() };
 }
@@ -167,6 +168,34 @@ test('发送等待保存时切换会话，问题仍绑定原会话与模式', as
   assert.equal(sent.payload.id, '会话A');
   assert.equal(sent.payload.mode, 'context');
   assert.equal(sent.payload.question, '只针对 A 的问题');
+});
+
+test('联网失败状态在发送 IPC 返回前到达时，草稿应恢复为本次问题', async () => {
+  let ui;
+  let current = state('会话A');
+  ui = renderer(async (action, payload) => {
+    if (action === 'set-draft') {
+      current = structuredClone(current);
+      current.session.threads[payload.mode].draft = payload.draft;
+      return { ok: true };
+    }
+    if (action === 'send-question') {
+      current = structuredClone(current);
+      const thread = current.session.threads[payload.mode];
+      thread.draft = payload.question;
+      thread.status = 'error';
+      thread.messages = [{ id: '失败回答', role: 'assistant', requestQuestion: payload.question, status: 'error', content: '',
+        search: { status: 'failed', error: '虚构搜索失败' } }];
+      ui.receive(current);
+    }
+    return { ok: true };
+  });
+  ui.setState(current);
+  const question = '需要联网的问题';
+  ui.rememberDraft(input('会话A', question));
+  await ui.sendQuestion();
+  assert.equal(current.session.threads.context.draft, question, '核心已持久化恢复本次问题');
+  assert.equal(ui.draftValue(), question, '界面应在本次操作失败后显示恢复的问题');
 });
 
 test('截图说明先保存再进入服务设置，返回预览保留原输入', async () => {

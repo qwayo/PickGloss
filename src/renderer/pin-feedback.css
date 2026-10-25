@@ -1,9 +1,22 @@
 /* 描边与内侧柔光共用主窗口表面，消除独立透明窗口缩放后的断边。 */
-:root{--panel-radius:13px;--pin-stroke:#dc873d;--pin-glow:218 116 39}
+:root{--panel-radius:16px;--pin-stroke:#dc873d;--pin-glow:218 116 39}
+/* 原生窗口各层跟随系统轮廓，避免页面圆角外露出另一层窗口底板。 */
 .native-rounded-frame{--panel-radius:8px}
+.native-rounded-frame.panel-surface[data-material=solid]{background:var(--paper)}
 .layout-preparing .panel>*{visibility:hidden}
-.panel{position:relative}html:not([data-pin-outline=none]) .panel.is-pinned{border-color:var(--pin-stroke)}
+/* 同色内描边只补齐圆角处两层描边的抗锯齿接缝，不改变原有光条粗细与柔光。 */
+.panel{position:relative;border-color:transparent}html:not([data-pin-outline=none]) .panel.is-pinned{border-color:var(--pin-stroke);box-shadow:inset 0 0 0 1px var(--pin-stroke)}
 html:not([data-pin-outline=none]) .panel.is-pinned::after{content:"";position:absolute;inset:0;z-index:10;border:2px solid var(--pin-stroke);border-radius:calc(var(--panel-radius) - 1px);box-shadow:inset 0 0 4px 1px rgb(var(--pin-glow)/.4),inset 0 0 12px 2px rgb(var(--pin-glow)/.16);box-sizing:border-box;pointer-events:none}
+
+/* 原生路径只由系统裁外圆角；矩形光条挖出透明内孔，避免再次裁切同一外缘。 */
+.native-rounded-frame .panel{border-radius:0;overflow:visible}
+html.native-rounded-frame .panel.is-pinned{border-color:transparent;box-shadow:none}
+html.native-rounded-frame .panel.is-pinned::after{border-color:transparent;border-radius:calc(var(--panel-radius) - var(--actual-panel-border,1px))}
+.native-pin-frame{display:none;--pin-band:calc(2px + var(--actual-panel-border,1px));position:absolute;top:calc(0px - var(--actual-panel-border,1px));left:calc(0px - var(--actual-panel-border,1px));width:calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px));height:calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px));z-index:11;pointer-events:none;color:var(--pin-stroke)}
+html.native-rounded-frame:not([data-pin-outline=none]) .panel.is-pinned>.native-pin-frame{display:block}
+.native-pin-frame mask{mask-type:luminance}
+.native-pin-cutout{x:var(--pin-band);y:var(--pin-band);width:calc(100% - var(--pin-band) - var(--pin-band));height:calc(100% - var(--pin-band) - var(--pin-band));rx:calc(var(--panel-radius) - var(--pin-band));ry:calc(var(--panel-radius) - var(--pin-band))}
+.layout-preparing .panel>.native-pin-frame{visibility:visible}
 
 /* 图标通过填充表达置顶状态，与是否显示边缘描边独立。 */
 .panel-bar .is-pinned .icon path,.quick-menu-item[data-menu-command="toggle-pin"][aria-checked=true]>.icon path{fill:currentColor}

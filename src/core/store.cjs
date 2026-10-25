@@ -8,6 +8,70 @@ const { normalizeConfig } = require('./provider.cjs');
 const { historyEntry } = require('./history.cjs');
 const { defaultAppearance, appearanceShape, defaultWindowGeometry, windowGeometryShape } = require('./appearance.cjs');
 const { DEFAULT_SHORTCUTS, shortcutsShape } = require('./shortcuts.cjs');
+const { MODEL_PROVIDERS, SEARCH_PROVIDERS } = require('./services.cjs');
+
+const MODEL_PROVIDER_IDS = new Set(MODEL_PROVIDERS.map(provider => provider.id));
+const SEARCH_PROVIDER_IDS = new Set(SEARCH_PROVIDERS.map(provider => provider.id));
+const SEARCH_PROTOCOL_IDS = new Set(['exa', 'brave', 'deepseek']);
+const SEARCH_STATUSES = new Set(['preparing', 'searching', 'complete', 'failed']);
+const MAX_SEARCH_SOURCES = 10;
+
+function providerConfigDefaults(name) {
+  const providers = name === 'search' ? SEARCH_PROVIDERS : MODEL_PROVIDERS;
+  return Object.fromEntries(providers.map(provider => [provider.id, {
+    baseUrl: provider.baseUrl,
+    ...(name === 'search' ? { protocol: provider.protocol ?? provider.id } : {}),
+    ...(name === 'search' ? {} : { model: provider.model ?? '' }),
+  }]));
+}
+
+function normalizedSearchProtocol(providerId, value, fallback = providerId) {
+  // 官方预设的协议由厂商决定；仅自定义服务读取并保存可选协议。
+  if (providerId !== 'custom') return providerId;
+  const protocol = value === undefined ? fallback : string(value, '搜索协议', 80);
+  if (!SEARCH_PROTOCOL_IDS.has(protocol)) throw failure('INVALID_INPUT', '自定义搜索协议无效。');
+  return protocol;
+}
+
+function validCiphertext(value) {
+  const ciphertext = string(value, '加密密钥', 65536);
+  if (!ciphertext || Buffer.from(ciphertext, 'base64').toString('base64') !== ciphertext) throw failure('INVALID_INPUT', '加密密钥数据无效。');
+  return ciphertext;
+}
+
+function searchSources(input) {
+  if (!Array.isArray(input) || input.length > MAX_SEARCH_SOURCES) throw failure('INVALID_INPUT', '联网来源列表无效。');
+  const ids = new Set();
+  return input.map((source) => {
+    object(source, '联网来源');
+    if (!Number.isSafeInteger(source.id) || source.id <= 0 || ids.has(source.id)) throw failure('INVALID_INPUT', '联网来源编号无效。');
+    ids.add(source.id);
+    const title = string(source.title, '联网来源标题', 500).trim();
+    const rawUrl = string(source.url, '联网来源地址', 2048).trim();
+    let url;
+    try { url = new URL(rawUrl); } catch { throw failure('INVALID_INPUT', '联网来源地址无效。'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !title) throw failure('INVALID_INPUT', '联网来源必须包含标题和 HTTP/HTTPS 地址。');
+    const result = { id: source.id, title, url: rawUrl };
+    if (source.snippet !== undefined) result.snippet = string(source.snippet, '联网来源摘录', 4000);
+    return result;
+  });
+}
+
+function searchMetadata(input) {
+  object(input, '联网搜索记录');
+  if (!SEARCH_STATUSES.has(input.status)) throw failure('INVALID_INPUT', '联网搜索状态无效。');
+  if (!SEARCH_PROVIDER_IDS.has(input.providerId)) throw failure('INVALID_INPUT', '联网搜索服务无效。');
+  const query = string(input.query, '联网搜索词', 256);
+  if (Array.from(query).length > 128) throw failure('INVALID_INPUT', '联网搜索词超过 128 个 Unicode 字符。');
+  const result = {
+    status: input.status,
+    providerId: input.providerId,
+    query,
+    sources: searchSources(input.sources),
+  };
+  if (input.error !== undefined) result.error = string(input.error, '联网搜索错误说明', 1000);
+  return result;
+}
 
 function object(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure('INVALID_INPUT', `${name}必须是对象。`);
@@ -41,12 +105,14 @@ function sessionShape(input) {
     title: string(input.title ?? '', '会话标题', 200).trim(),
     text: string(input.text, '选定内容', LIMITS.text),
     context: string(input.context, '上下文', LIMITS.context),
+    contextPending: bool(input.contextPending ?? false, '上下文提取状态'),
     contextOrigin: string(input.contextOrigin, '上下文来源', 1000),
     contextReason: string(input.contextReason ?? '', '上下文缺失原因', 1000),
     source: { app: string(source.app, '来源应用', 1000), title: string(source.title, '来源标题', 2000), method: string(source.method, '采集方式', 200) },
     note: string(input.note, '截图说明', 4000),
     createdAt: date(input.createdAt), updatedAt: date(input.updatedAt),
-    saved: bool(input.saved, '收藏状态'), activeMode: input.activeMode, threads: {},
+    saved: bool(input.saved, '收藏状态'), activeMode: input.activeMode,
+    webSearchEnabled: bool(input.webSearchEnabled ?? false, '联网搜索状态'), threads: {},
   };
   for (const mode of MODES) {
     const thread = object(threads[mode], '解释记录');
@@ -59,6 +125,14 @@ function sessionShape(input) {
         if (!item.id) throw failure('INVALID_INPUT', '消息标识不能为空。');
         if (message.status !== undefined) item.status = string(message.status, '消息状态', 100);
         if (message.error !== undefined) item.error = string(message.error, '消息错误说明', 4000);
+        if (message.requestQuestion !== undefined) {
+          if (message.role !== 'assistant') throw failure('INVALID_INPUT', '只有助手消息可以保存本次问题。');
+          item.requestQuestion = string(message.requestQuestion, '本次问题', 4000);
+        }
+        if (message.search !== undefined) {
+          if (message.role !== 'assistant') throw failure('INVALID_INPUT', '只有助手消息可以保存联网搜索记录。');
+          item.search = searchMetadata(message.search);
+        }
         return item;
       }),
       draft: string(thread.draft, '追问草稿', 4000),
@@ -74,29 +148,83 @@ function sessionShape(input) {
 }
 
 function defaults() {
-  return { version: 1, text: { baseUrl: '', model: '' }, vision: { baseUrl: '', model: '' }, prefs: {
-    showOrb: true, selectionEnabled: true, orbAction: 'chat', appearance: defaultAppearance(), windowGeometry: defaultWindowGeometry(), shortcuts: { ...DEFAULT_SHORTCUTS }, pinSound: true } };
+  return {
+    version: 1,
+    text: { providerId: 'custom', baseUrl: '', model: '' },
+    vision: { providerId: 'custom', baseUrl: '', model: '' },
+    search: { providerId: 'exa', baseUrl: SEARCH_PROVIDERS.find(provider => provider.id === 'exa').baseUrl },
+    serviceProfiles: { text: providerConfigDefaults('text'), vision: providerConfigDefaults('vision'), search: providerConfigDefaults('search') },
+    prefs: {
+      showOrb: true, selectionEnabled: true, orbAction: 'chat', autoExplainCapture: false,
+      webSearchEnabled: false, appearance: defaultAppearance(), windowGeometry: defaultWindowGeometry(), shortcuts: { ...DEFAULT_SHORTCUTS }, pinSound: true,
+    },
+  };
 }
 
 function settingsShape(input) {
   object(input, '设置');
   if (input.version !== 1) throw failure('INVALID_INPUT', '设置版本不受支持。');
-  const result = { version: 1, prefs: {} };
+  const result = { version: 1, prefs: {}, serviceProfiles: {} };
   for (const name of ['text', 'vision']) {
     const config = object(input[name], '接口设置');
-    result[name] = { baseUrl: string(config.baseUrl, '接口地址', 2048), model: string(config.model, '模型名称', 300) };
+    const providerId = config.providerId === undefined ? 'custom' : string(config.providerId, '模型服务', 80);
+    if (!MODEL_PROVIDER_IDS.has(providerId)) throw failure('INVALID_INPUT', '模型服务无效。');
+    result[name] = { providerId, baseUrl: string(config.baseUrl, '接口地址', 2048), model: string(config.model, '模型名称', 300) };
     if (config.keyCiphertext !== undefined) {
-      const ciphertext = string(config.keyCiphertext, '加密密钥', 65536);
-      if (!ciphertext || Buffer.from(ciphertext, 'base64').toString('base64') !== ciphertext) throw failure('INVALID_INPUT', '加密密钥数据无效。');
-      result[name].keyCiphertext = ciphertext;
+      result[name].keyCiphertext = validCiphertext(config.keyCiphertext);
     }
     // 明文密钥不能作为合法的磁盘格式读取或再次写入。
     if ('apiKey' in config) throw failure('INVALID_INPUT', '检测到不受支持的明文密钥设置。');
+  }
+  const suppliedProfiles = input.serviceProfiles === undefined ? {} : object(input.serviceProfiles, '服务配置草稿');
+  const oldSearch = input.search === undefined ? {} : object(input.search, '联网搜索设置');
+  const searchProviderId = oldSearch.providerId === undefined ? 'exa' : string(oldSearch.providerId, '搜索服务', 80);
+  if (!SEARCH_PROVIDER_IDS.has(searchProviderId)) throw failure('INVALID_INPUT', '搜索服务无效。');
+  const searchProvider = SEARCH_PROVIDERS.find(provider => provider.id === searchProviderId);
+  const defaultSearchUrl = searchProvider.baseUrl;
+  const searchProfilesInput = suppliedProfiles.search === undefined ? {} : object(suppliedProfiles.search, '服务配置草稿');
+  const activeSearchProfileInput = searchProfilesInput[searchProviderId] === undefined ? {} : object(searchProfilesInput[searchProviderId], '厂商配置');
+  result.search = {
+    providerId: searchProviderId,
+    protocol: normalizedSearchProtocol(searchProviderId, oldSearch.protocol, activeSearchProfileInput.protocol ?? searchProvider.protocol ?? searchProviderId),
+    baseUrl: string(oldSearch.baseUrl ?? defaultSearchUrl, '搜索接口地址', 2048),
+  };
+  if (oldSearch.keyCiphertext !== undefined) result.search.keyCiphertext = validCiphertext(oldSearch.keyCiphertext);
+  if ('apiKey' in oldSearch) throw failure('INVALID_INPUT', '检测到不受支持的明文搜索密钥设置。');
+
+  for (const name of ['text', 'vision', 'search']) {
+    const providers = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
+    const profiles = providerConfigDefaults(name);
+    if (suppliedProfiles[name] !== undefined) {
+      const source = object(suppliedProfiles[name], '服务配置草稿');
+      for (const [providerId, value] of Object.entries(source)) {
+        if (!providers.has(providerId)) throw failure('INVALID_INPUT', '服务配置草稿中的厂商无效。');
+        const config = object(value, '厂商配置');
+        if (config.providerId !== undefined && config.providerId !== providerId) throw failure('INVALID_INPUT', '厂商配置标识不匹配。');
+        profiles[providerId].baseUrl = string(config.baseUrl ?? profiles[providerId].baseUrl, '接口地址', 2048);
+        if (name === 'search') profiles[providerId].protocol = normalizedSearchProtocol(providerId, config.protocol, profiles[providerId].protocol);
+        else profiles[providerId].model = string(config.model ?? profiles[providerId].model, '模型名称', 300);
+        if (config.keyCiphertext !== undefined) profiles[providerId].keyCiphertext = validCiphertext(config.keyCiphertext);
+        if ('apiKey' in config) throw failure('INVALID_INPUT', '检测到不受支持的明文密钥设置。');
+      }
+    }
+    result.serviceProfiles[name] = profiles;
+    // 平面配置是当前选中配置的兼容视图。旧 version 1 数据没有 profiles 时，
+    // 把原地址、模型和密钥放入 custom 草稿，之后切换厂商不会借用旧密钥。
+    const active = result[name];
+    const profile = profiles[active.providerId];
+    profile.baseUrl = active.baseUrl;
+    if (name === 'search') profile.protocol = active.protocol;
+    else profile.model = active.model;
+    if (active.keyCiphertext !== undefined) profile.keyCiphertext = active.keyCiphertext;
+    else delete profile.keyCiphertext;
   }
   const prefs = object(input.prefs, '偏好设置');
   result.prefs.showOrb = bool(prefs.showOrb, '悬浮球显示状态');
   result.prefs.selectionEnabled = bool(prefs.selectionEnabled, '划词状态');
   result.prefs.orbAction = orbAction(prefs.orbAction === undefined ? 'chat' : prefs.orbAction);
+  result.prefs.autoExplainCapture = prefs.autoExplainCapture === undefined ? false : bool(prefs.autoExplainCapture, '截图后自动解释状态');
+  result.prefs.webSearchEnabled = prefs.webSearchEnabled === undefined ? false : bool(prefs.webSearchEnabled, '默认联网搜索状态');
   // 旧版没有这些字段时只补齐默认值，仍保留原服务配置与加密密钥。
   result.prefs.appearance = prefs.appearance === undefined ? defaultAppearance() : appearanceShape(prefs.appearance);
   result.prefs.windowGeometry = prefs.windowGeometry === undefined ? defaultWindowGeometry() : windowGeometryShape(prefs.windowGeometry);
@@ -147,17 +275,31 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
   }
 
   async function publicSettings(settings, includeSecrets) {
-    const result = { prefs: { ...settings.prefs } };
-    for (const name of ['text', 'vision']) {
+    const result = { prefs: { ...settings.prefs }, serviceProfiles: {} };
+    const decryptKey = async (ciphertext) => {
+      if (!ciphertext) return '';
+      if (typeof decrypt !== 'function') throw failure('ENCRYPTION_UNAVAILABLE', '当前环境无法解密已保存的接口密钥。');
+      try { return string(await decrypt(Buffer.from(ciphertext, 'base64')), '接口密钥', 8192); }
+      catch { throw failure('DECRYPTION_FAILED', '无法解密已保存的接口密钥，请重新填写接口密钥。'); }
+    };
+    for (const name of ['text', 'vision', 'search']) {
       const config = settings[name];
-      result[name] = { baseUrl: config.baseUrl, model: config.model, hasKey: Boolean(config.keyCiphertext) };
+      result[name] = { providerId: config.providerId, baseUrl: config.baseUrl, hasKey: Boolean(config.keyCiphertext) };
+      if (name === 'search') result[name].protocol = config.protocol;
+      if (name !== 'search') result[name].model = config.model;
       if (includeSecrets) {
-        result[name].apiKey = '';
-        if (config.keyCiphertext) {
-          if (typeof decrypt !== 'function') throw failure('ENCRYPTION_UNAVAILABLE', '当前环境无法解密已保存的接口密钥。');
-          try { result[name].apiKey = string(await decrypt(Buffer.from(config.keyCiphertext, 'base64')), '接口密钥', 8192); }
-          catch { throw failure('DECRYPTION_FAILED', '无法解密已保存的接口密钥，请重新填写接口密钥。'); }
-        }
+        result[name].apiKey = await decryptKey(config.keyCiphertext);
+      }
+      result.serviceProfiles[name] = {};
+      for (const [providerId, profile] of Object.entries(settings.serviceProfiles[name])) {
+        const visible = {
+          baseUrl: profile.baseUrl,
+          ...(name === 'search' ? { protocol: profile.protocol } : {}),
+          ...(name === 'search' ? {} : { model: profile.model }),
+          hasKey: Boolean(profile.keyCiphertext),
+        };
+        if (includeSecrets) visible.apiKey = await decryptKey(profile.keyCiphertext);
+        result.serviceProfiles[name][providerId] = visible;
       }
     }
     return result;
@@ -194,6 +336,84 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
     }
   }
 
+  async function applyServiceChange(config, change, name, providerId = config.providerId) {
+    const previousBaseUrl = config.baseUrl;
+    if (change.baseUrl !== undefined) config.baseUrl = string(change.baseUrl, '接口地址', 2048).trim();
+    if (name === 'search') config.protocol = normalizedSearchProtocol(providerId, change.protocol, config.protocol ?? providerId);
+    else if (change.model !== undefined) config.model = string(change.model, '模型名称', 300).trim();
+    if (config.baseUrl) {
+      if (name === 'search') {
+        let url;
+        try { url = new URL(config.baseUrl); } catch { throw failure('INVALID_CONFIG', '搜索接口地址必须是有效的 HTTP 或 HTTPS 地址。'); }
+        if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
+            (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase()))) {
+          throw failure('INVALID_CONFIG', '搜索接口地址只允许 HTTPS；HTTP 仅允许本机地址，且不能包含凭据、查询参数或片段。');
+        }
+        config.baseUrl = url.toString().replace(/\/+$/, '');
+      } else config.baseUrl = normalizeConfig({ ...config, model: config.model || '待配置' }).baseUrl;
+    }
+    const key = change.clearKey === true || change.apiKey === undefined ? '' : string(change.apiKey, '接口密钥', 8192).trim();
+    if (/[\r\n]/.test(key)) throw failure('INVALID_CONFIG', '接口密钥格式无效。');
+    if (config.keyCiphertext && change.baseUrl !== undefined && change.clearKey !== true && !key) {
+      const origin = (address) => { try { return new URL(address).origin; } catch { return null; } };
+      if (origin(previousBaseUrl) !== origin(config.baseUrl)) {
+        throw failure('KEY_ORIGIN_CHANGED', '服务地址已跨主机、协议或端口更改，请重新输入该服务的密钥或明确清除原密钥。');
+      }
+    }
+    if (change.clearKey === true) delete config.keyCiphertext;
+    else if (change.apiKey !== undefined && key) {
+      if (typeof encrypt !== 'function') throw failure('ENCRYPTION_UNAVAILABLE', 'Windows 加密存储不可用，无法保存接口密钥。');
+      let encrypted;
+      try { encrypted = await encrypt(key); } catch { throw failure('ENCRYPTION_FAILED', '接口密钥加密失败，设置未保存。'); }
+      if (!(encrypted instanceof Uint8Array) || !encrypted.length) throw failure('ENCRYPTION_FAILED', '接口密钥加密失败，设置未保存。');
+      config.keyCiphertext = Buffer.from(encrypted).toString('base64');
+    }
+  }
+
+  async function applyProfileChanges(settings, changes) {
+    if (changes === undefined) return;
+    const profileChanges = object(changes, '服务配置草稿');
+    for (const name of ['text', 'vision', 'search']) {
+      if (profileChanges[name] === undefined) continue;
+      const profiles = object(profileChanges[name], '服务配置草稿');
+      const known = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
+      for (const [providerId, rawChange] of Object.entries(profiles)) {
+        if (!known.has(providerId)) throw failure('INVALID_INPUT', '服务配置草稿中的厂商无效。');
+        const change = object(rawChange, '厂商配置');
+        if (change.providerId !== undefined && change.providerId !== providerId) throw failure('INVALID_INPUT', '厂商配置标识不匹配。');
+        await applyServiceChange(settings.serviceProfiles[name][providerId], change, name, providerId);
+      }
+    }
+  }
+
+  async function applyActiveConfigChanges(settings, changes) {
+    for (const name of ['text', 'vision', 'search']) {
+      if (changes[name] === undefined) continue;
+      const change = object(changes[name], name === 'search' ? '联网搜索设置' : '接口设置');
+      const ids = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
+      const providerId = change.providerId === undefined ? settings[name].providerId : string(change.providerId, '服务提供商', 80);
+      if (!ids.has(providerId)) throw failure('INVALID_INPUT', '服务提供商无效。');
+      if (providerId !== settings[name].providerId) {
+        const profile = settings.serviceProfiles[name][providerId];
+        settings[name] = { providerId, ...structuredClone(profile) };
+      }
+      await applyServiceChange(settings[name], change, name, providerId);
+      settings[name].providerId = providerId;
+      settings.serviceProfiles[name][providerId] = structuredClone(Object.fromEntries(
+        Object.entries(settings[name]).filter(([key]) => key !== 'providerId'),
+      ));
+    }
+  }
+
+  function synchronizeActiveProfiles(settings) {
+    for (const name of ['text', 'vision', 'search']) {
+      const providerId = settings[name].providerId;
+      settings.serviceProfiles[name][providerId] = structuredClone(Object.fromEntries(
+        Object.entries(settings[name]).filter(([key]) => key !== 'providerId'),
+      ));
+    }
+  }
+
   function run(action) {
     const next = queue.then(async () => {
       if (!initialized) throw failure('NOT_INITIALIZED', '本地存储尚未初始化。');
@@ -222,10 +442,11 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
         object(input, '解释会话');
         const id = randomUUID();
         const now = new Date().toISOString();
+        const webSearchEnabled = input.webSearchEnabled ?? (await diskSettings()).prefs.webSearchEnabled;
         const emptyThreads = Object.fromEntries(MODES.map((mode) => [mode, { messages: [], draft: '' }]));
-        const session = sessionShape({ id, kind: input.kind ?? 'text', title: input.title ?? '', text: input.text ?? '', context: input.context ?? '', contextOrigin: input.contextOrigin ?? '', contextReason: input.contextReason ?? '',
+        const session = sessionShape({ id, kind: input.kind ?? 'text', title: input.title ?? '', text: input.text ?? '', context: input.context ?? '', contextPending: input.contextPending ?? false, contextOrigin: input.contextOrigin ?? '', contextReason: input.contextReason ?? '',
           source: { app: '', title: '', method: '', ...input.source }, note: input.note ?? '', createdAt: now, updatedAt: now,
-          saved: input.saved ?? false, activeMode: input.activeMode ?? (input.kind === 'image' ? 'visual' : 'context'), threads: input.threads ?? emptyThreads });
+          saved: input.saved ?? false, activeMode: input.activeMode ?? (input.kind === 'image' ? 'visual' : 'context'), webSearchEnabled, threads: input.threads ?? emptyThreads });
         const image = session.kind === 'image' ? png(input.imageData) : null;
         const folder = path.join(sessionsRoot, id);
         await fs.mkdir(folder);
@@ -258,7 +479,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
         object(changes, '会话更新');
         const old = await readSession(id);
         const merged = { ...old, source: { ...old.source }, threads: structuredClone(old.threads) };
-        for (const key of ['title', 'text', 'context', 'contextOrigin', 'contextReason', 'note', 'saved', 'activeMode']) if (changes[key] !== undefined) merged[key] = changes[key];
+        for (const key of ['title', 'text', 'context', 'contextPending', 'contextOrigin', 'contextReason', 'note', 'saved', 'activeMode', 'webSearchEnabled']) if (changes[key] !== undefined) merged[key] = changes[key];
         if (changes.source !== undefined) merged.source = { ...old.source, ...object(changes.source, '来源') };
         if (changes.threads !== undefined) {
           object(changes.threads, '解释记录');
@@ -299,38 +520,16 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
       return run(async () => {
         object(changes, '设置');
         const settings = await diskSettings();
-        for (const name of ['text', 'vision']) {
-          if (changes[name] === undefined) continue;
-          const change = object(changes[name], '接口设置');
-          const config = settings[name];
-          const previousBaseUrl = config.baseUrl;
-          if (change.baseUrl !== undefined) config.baseUrl = string(change.baseUrl, '接口地址', 2048).trim();
-          if (change.model !== undefined) config.model = string(change.model, '模型名称', 300).trim();
-          // 可以先保存不完整草稿；填写了地址时必须满足传输安全要求。
-          if (config.baseUrl) config.baseUrl = normalizeConfig({ ...config, model: config.model || '待配置' }).baseUrl;
-          const key = change.clearKey === true || change.apiKey === undefined ? '' : string(change.apiKey, '接口密钥', 8192).trim();
-          if (/[\r\n]/.test(key)) throw failure('INVALID_CONFIG', '接口密钥格式无效。');
-          if (config.keyCiphertext && change.baseUrl !== undefined && change.clearKey !== true && !key) {
-            const origin = (address) => { try { return new URL(address).origin; } catch { return null; } };
-            if (origin(previousBaseUrl) !== origin(config.baseUrl)) {
-              throw failure('KEY_ORIGIN_CHANGED', '服务地址已跨主机、协议或端口更改，请重新输入该服务的密钥或明确清除原密钥。');
-            }
-          }
-          if (change.clearKey === true) delete config.keyCiphertext;
-          else if (change.apiKey !== undefined) {
-            if (key) {
-              if (typeof encrypt !== 'function') throw failure('ENCRYPTION_UNAVAILABLE', 'Windows 加密存储不可用，无法保存接口密钥。');
-              let encrypted;
-              try { encrypted = await encrypt(key); } catch { throw failure('ENCRYPTION_FAILED', '接口密钥加密失败，设置未保存。'); }
-              if (!(encrypted instanceof Uint8Array) || !encrypted.length) throw failure('ENCRYPTION_FAILED', '接口密钥加密失败，设置未保存。');
-              config.keyCiphertext = Buffer.from(encrypted).toString('base64');
-            }
-          }
-        }
+        await applyProfileChanges(settings, changes.serviceProfiles);
+        for (const name of ['text', 'vision', 'search']) settings[name] = { providerId: settings[name].providerId, ...structuredClone(settings.serviceProfiles[name][settings[name].providerId]) };
+        await applyActiveConfigChanges(settings, changes);
+        synchronizeActiveProfiles(settings);
         if (changes.prefs !== undefined) {
           const prefs = object(changes.prefs, '偏好设置');
           for (const key of ['showOrb', 'selectionEnabled']) if (prefs[key] !== undefined) settings.prefs[key] = bool(prefs[key], '偏好设置');
           if (prefs.orbAction !== undefined) settings.prefs.orbAction = orbAction(prefs.orbAction);
+          if (prefs.autoExplainCapture !== undefined) settings.prefs.autoExplainCapture = bool(prefs.autoExplainCapture, '截图后自动解释状态');
+          if (prefs.webSearchEnabled !== undefined) settings.prefs.webSearchEnabled = bool(prefs.webSearchEnabled, '默认联网搜索状态');
           if (prefs.appearance !== undefined) settings.prefs.appearance = appearanceShape(prefs.appearance);
           if (prefs.windowGeometry !== undefined) settings.prefs.windowGeometry = windowGeometryShape(prefs.windowGeometry);
           if (prefs.shortcuts !== undefined) settings.prefs.shortcuts = shortcutsShape(prefs.shortcuts);

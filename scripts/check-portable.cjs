@@ -123,10 +123,22 @@ async function run(output) {
     assert.equal(requests.length, 0, '无配置时不得发送请求');
     await click('配置 AI 服务');
     await visible(`Boolean(document.querySelector('[data-field="text-baseUrl"]'))`);
+    // 隔离模式也检查未选中的厂商草稿；所有预设仅使用本机测试地址。
+    await ui(`(() => {
+      for (const kind of ['text', 'vision', 'search']) {
+        const select = document.querySelector('[name="' + kind + '-provider"]'), original = select.value;
+        for (const option of [...select.options]) {
+          select.value = option.value; select.dispatchEvent(new Event('change', { bubbles: true }));
+          const input = document.querySelector('[name="' + kind + '-baseUrl"]');
+          input.value = 'http://127.0.0.1:${port}/v1'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        select.value = original; select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`);
     await field('text-baseUrl', `http://127.0.0.1:${port}/v1`);
     await field('text-model', '本机验证模型');
     await field('text-apiKey', fakeKey);
-    await click('保存设置');
+    await click('保存设置', '[data-settings-section="service"] button');
     await visible(`document.body.textContent.includes('开始释义')`);
     await click('开始释义');
     await deadline(() => requests.length === 1, '首轮本机解释请求');

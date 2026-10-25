@@ -32,16 +32,18 @@ html[data-appearance=light] .orb{--orb-finish:radial-gradient(ellipse at 30% 18%
 .quick-menu-item .menu-label{min-width:0;flex:1;white-space:nowrap}.quick-menu-check{font-size:13px;line-height:1;color:var(--accent-ink)}
 .quick-menu-note{padding:5px 8px 1px;color:var(--danger);font-size:13px;overflow-wrap:anywhere}.quick-menu-note:empty{display:none}
 .shortcuts-page{min-width:0;max-width:760px;margin:0 auto}.shortcuts-page h2{margin:0 0 8px;font-size:20px}
-.shortcuts-page>.hint{margin:0 0 24px}.shortcut-group{margin:0 0 24px}.shortcut-group h3{font-size:14px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--line)}
-.shortcut-row{display:grid;grid-template-columns:minmax(0,1fr) auto 28px;column-gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
-.shortcut-copy{min-width:0}.shortcut-name{display:block;font-size:14px}.shortcut-description{display:block;font-size:13px;color:var(--muted);line-height:1.6;margin-top:2px}
-.shortcut-key{padding:7px 10px;min-width:115px;min-height:34px;white-space:nowrap;background:var(--field);border:1px solid var(--line);font-size:13px}
+.shortcuts-page>.hint{margin:0 0 12px}.shortcut-group{margin:0 0 14px}.shortcut-group h3{font-size:13px;color:var(--muted);margin:10px 0 0;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.shortcut-row{display:grid;grid-template-columns:minmax(0,1fr) auto 28px;column-gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
+.shortcut-copy{min-width:0}.shortcut-name{display:block;font-size:13px;line-height:1.5}.shortcut-description{display:block;font-size:13px;color:var(--muted);line-height:1.5;margin-top:0}
+.shortcut-key{padding:4px 7px;min-width:108px;min-height:28px;white-space:nowrap;background:var(--field);border:1px solid var(--line);font-size:13px}
 .shortcut-key[aria-pressed=true]{border-color:var(--accent-ink);box-shadow:0 0 0 1px var(--accent-ink)}
 .shortcut-clear{width:28px;height:28px;font-size:20px;color:var(--muted);display:grid;place-items:center;padding:0}
 .shortcut-status{grid-column:1/-1;color:var(--muted);font-size:13px;line-height:1.6;margin-top:4px;overflow-wrap:anywhere}.shortcut-status:empty{display:none}.shortcut-status.is-error{color:var(--danger)}
 .shortcut-recording,.shortcut-notice{font-size:13px;line-height:1.7;margin:8px 0;overflow-wrap:anywhere;color:var(--muted)}.shortcut-recording:empty,.shortcut-notice:empty{display:none}.shortcut-notice.is-error{color:var(--danger)}
-.shortcut-sound{margin-top:22px}.shortcut-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:18px}.shortcut-actions .text-button{margin-right:auto}
-@media(max-width:420px){.settings-navigation{gap:13px}.settings-navigation button{font-size:13px}.shortcut-row{grid-template-columns:minmax(0,1fr) 28px;row-gap:7px}.shortcut-copy{grid-column:1/-1}.shortcut-key{justify-self:start;max-width:100%}.shortcut-actions{justify-content:stretch}.shortcut-actions .primary{flex:1}.shortcuts-page h2{font-size:18px}}
+.shortcut-actions{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;margin-top:12px}.shortcut-actions button{min-height:28px;padding:4px 8px;font-size:12px;line-height:18px}.shortcut-actions .text-button{margin-right:auto}
+@media(max-width:420px){.settings-navigation{gap:9px}.settings-navigation button{font-size:12px;white-space:nowrap}.shortcut-row{grid-template-columns:minmax(0,1fr) auto 28px;column-gap:5px}.shortcut-description{display:none}.shortcut-key{min-width:0;max-width:100%;font-size:12px;padding:4px 6px}.shortcuts-page h2{font-size:18px}}
+.general-settings .hint{margin:5px 0 10px}.general-settings .status-details h3{font-size:13px;font-weight:500;margin:0 0 5px}
+
 
 /* 会话历史以可回访的阅读列表呈现，操作留在每条记录旁。 */
 .history-page{max-width:760px;margin:0 auto}.history-heading{display:flex;align-items:center;gap:12px;justify-content:space-between;margin:2px 0 12px}.history-heading h1{margin:0;font-size:21px}.history-heading>.secondary{min-height:30px;padding:4px 9px;font-size:13px;gap:6px;display:flex;align-items:center;border-color:var(--line)}

@@ -91,6 +91,53 @@ test('未完成或失败的回答不被作为后续解释依据', () => {
   assert.ok(!messages.includes('中止残留'));
 });
 
+test('联网资料作为独立引用材料传入，保留原上下文并要求依据真实编号引用', () => {
+  const input = session();
+  const sources = [{ id: 1, title: '官方文档', url: 'https://example.com/docs', snippet: '来源中的事实' }];
+  const messages = buildMessages(input, 'context', '追问', { sources });
+  const payload = JSON.stringify(messages);
+  assert.ok(payload.includes(input.context));
+  assert.ok(payload.includes('来源中的事实'));
+  assert.ok(payload.includes('https://example.com/docs'));
+  assert.ok(payload.includes('真实来源编号 [1]'));
+  assert.ok(payload.includes('选定内容及上下文'));
+  assert.equal(messages.filter(message => message.role === 'user').at(-2).content.includes('独立的联网资料'), true);
+  assert.equal(JSON.stringify(buildMessages(input, 'context')).includes('联网资料'), false);
+});
+
+test('联网资料限制数量和 HTTP/HTTPS 来源，拒绝编造或重复引用编号', () => {
+  const input = session();
+  for (const url of ['file:///secret.txt', 'javascript:alert(1)', 'https://user:pass@example.com']) {
+    assert.throws(() => buildMessages(input, 'independent', '', { sources: [{ id: 1, title: '标题', url }] }), { code: 'INVALID_INPUT' });
+  }
+  assert.throws(() => buildMessages(input, 'independent', '', { sources: Array.from({ length: 11 }, (_, i) => ({ id: i + 1, title: '标题', url: `https://example.com/${i}` })) }), { code: 'INVALID_INPUT' });
+  assert.throws(() => buildMessages(input, 'independent', '', { sources: [{ id: 1, title: '一', url: 'https://example.com/1' }, { id: 1, title: '二', url: 'https://example.com/2' }] }), { code: 'INVALID_INPUT' });
+});
+
+test('历史联网引用绑定原回答，本轮来源使用独立编号上下文，旧消息仍不增添引用材料', () => {
+  const input = session();
+  input.threads.independent.messages = [
+    { id: 'old-user', role: 'user', content: '上一个问题' },
+    { id: 'old-answer', role: 'assistant', content: '旧回答 [1]', search: { status: 'complete', providerId: 'exa', query: '历史检索词', sources: [{ id: 1, title: '历史来源', url: 'https://history.example/article', snippet: '只对应旧回答' }] } },
+  ];
+  const messages = buildMessages(input, 'independent', '新问题', { sources: [{ id: 1, title: '本轮来源', url: 'https://current.example/article', snippet: '只对应新回答' }] });
+  const payload = JSON.stringify(messages);
+  assert.ok(payload.includes('旧回答 [1]'));
+  assert.ok(payload.includes('https://history.example/article'));
+  assert.ok(payload.includes('只对应旧回答'));
+  assert.ok(payload.includes('https://current.example/article'));
+  assert.ok(payload.includes('只对应新回答'));
+  assert.ok(payload.includes('old-answer'));
+  assert.ok(payload.includes('历史回答'));
+  assert.ok(payload.includes('本轮回答'));
+  assert.ok(payload.includes('历史编号'));
+
+  input.threads.independent.messages = [{ id: 'legacy-answer', role: 'assistant', content: '旧式回答 [1]' }];
+  const oldBehavior = JSON.stringify(buildMessages(input, 'independent'));
+  assert.ok(oldBehavior.includes('旧式回答 [1]'));
+  assert.equal(oldBehavior.includes('历史联网资料'), false);
+});
+
 test('接口地址限制传输安全，完整端点不会重复拼接', () => {
   for (const baseUrl of ['http://example.com/v1', 'ftp://localhost/v1', 'https://user:password@example.com', 'https://example.com?key=secret', 'https://example.com/#secret', 'https://example.com/?', 'https://example.com/#']) {
     assert.throws(() => normalizeConfig({ ...config, baseUrl }), { code: 'INVALID_CONFIG' });
@@ -264,4 +311,17 @@ test('实际 HTTP 重定向被拒绝，不把授权头发送到重定向目的�
   t.after(() => new Promise((resolve) => server.close(resolve)));
   await assert.rejects(streamCompletion({ config: { ...config, apiKey: 'redirect-test-key', baseUrl: `http://127.0.0.1:${server.address().port}/v1` }, messages: [{ role: 'user', content: '测试' }] }), { code: 'NETWORK_ERROR' });
   assert.deepEqual(paths, ['/v1/chat/completions']);
+});
+
+test('收到完成标记后，不合作的正文取消不能阻塞回答收尾',async()=>{
+  let cancelled=0;
+  const response=new Response(new ReadableStream({
+    start(controller){controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({choices:[{delta:{content:'已完成的固定回答'},finish_reason:'stop'}]})+'\n\n'));},
+    cancel(){cancelled++;return new Promise(()=>{});},
+  }),{headers:{'Content-Type':'text/event-stream'}});
+  const result=await Promise.race([
+    streamCompletion({config,messages:[{role:'user',content:'测试收尾'}],fetchImpl:async()=>response}),
+    new Promise(resolve=>setTimeout(()=>resolve('收尾仍被阻塞'),150)),
+  ]);
+  assert.equal(result,'已完成的固定回答');assert.ok(cancelled>=1);
 });

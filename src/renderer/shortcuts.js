@@ -16,7 +16,7 @@ export function shortcutLabel(value) { return value ? value.replaceAll('Super', 
 
 export function createShortcutsUI({ invoke, save }) {
   const defaults = Object.fromEntries(shortcutDefinitions.map(([id, , , value]) => [id, value]));
-  let saved = { ...defaults }, draft = { ...defaults }, sound = true, savedSound = true;
+  let saved = { ...defaults }, draft = { ...defaults };
   let status = {}, dirty = false, busy = false, recording = null, notice = '', failed = false, root, refs = {};
   let disposed = false, releasePending = false, starting = false, startingId = null, recordingEpoch = 0, recordingTasks = 0, recordingWork = Promise.resolve();
   const element = (tag, className, text) => {
@@ -41,7 +41,6 @@ export function createShortcutsUI({ invoke, save }) {
       if (binding?.error && binding.activeAccelerator) text += `；仍使用 ${shortcutLabel(binding.activeAccelerator)}`;
       row.status.textContent = text; row.status.classList.toggle('is-error', Boolean(binding?.error));
     }
-    refs.sound.checked = sound; refs.sound.disabled = busy;
     refs.save.disabled = busy || !dirty || Boolean(recording) || releasePending || starting || recordingTasks > 0;
     refs.save.textContent = busy ? '正在保存…' : '保存快捷键';
     refs.reset.disabled = busy || Boolean(recording) || releasePending || starting || recordingTasks > 0; refs.revert.disabled = busy || !dirty || starting || recordingTasks > 0;
@@ -51,8 +50,8 @@ export function createShortcutsUI({ invoke, save }) {
     refs.recording.textContent = recording ? '按下 Ctrl、Alt 或 Win 搭配的组合键，Esc 取消。' : recordingTasks > 0 && !starting ? '正在恢复快捷键…' : '';
   }
   function receive(prefs = {}, next = {}) {
-    saved = { ...defaults, ...(prefs.shortcuts || {}) }; savedSound = prefs.pinSound !== false; status = next.shortcuts || {};
-    if (!dirty) { draft = { ...saved }; sound = savedSound; }
+    saved = { ...defaults, ...(prefs.shortcuts || {}) }; status = next.shortcuts || {};
+    if (!dirty) { draft = { ...saved }; }
     if ((recording || releasePending) && status.recording === false) { recording = null; releasePending = false; notice = '录制已结束，原快捷键已恢复。'; }
     sync();
   }
@@ -118,12 +117,12 @@ export function createShortcutsUI({ invoke, save }) {
     busy = true; notice = ''; failed = false; sync();
     try {
       await endRecording(); await recordingWork;
-      const result = await save({ shortcuts: { ...draft }, pinSound: sound });
+      const result = await save({ shortcuts: { ...draft } });
       if (!result?.ok) throw Error(result?.error || '保存失败，请重试。');
       const prefs = result.value?.prefs || result.value?.settings?.prefs;
-      if (prefs) { saved = { ...defaults, ...prefs.shortcuts }; savedSound = prefs.pinSound !== false; }
-      else { saved = { ...draft }; savedSound = sound; }
-      draft = { ...saved }; sound = savedSound; dirty = false; notice = '快捷键已保存';
+      if (prefs) { saved = { ...defaults, ...prefs.shortcuts }; }
+      else { saved = { ...draft }; }
+      draft = { ...saved }; dirty = false; notice = '快捷键已保存';
     } catch (error) { failed = true; notice = error.message; }
     finally { busy = false; sync(); }
   }
@@ -138,24 +137,21 @@ export function createShortcutsUI({ invoke, save }) {
         group.append(element('h3', '', category)); root.append(group);
       }
       const row = element('div', 'shortcut-row'), copy = element('div', 'shortcut-copy');
+      copy.title = description;
       copy.append(element('span', 'shortcut-name', label), element('span', 'shortcut-description', description));
-      const key = button('', 'shortcut-key', () => beginRecording(id)); key.dataset.field = `shortcut-${id}`;
+      const key = button('', 'shortcut-key', () => beginRecording(id)); key.dataset.field = `shortcut-${id}`; key.title = description;
       const clear = button('×', 'shortcut-clear', async () => { await endRecording(); draft[id] = ''; dirty = true; notice = ''; failed = false; sync(); });
       clear.title = `清除${label}快捷键`; clear.setAttribute('aria-label', clear.title);
       const message = element('span', 'shortcut-status'); message.setAttribute('aria-live', 'polite');
       row.append(copy, key, clear, message); group.append(row); refs[id] = { key, clear, status: message };
     }
     refs.recording = element('p', 'shortcut-recording'); refs.recording.setAttribute('role', 'status');
-    const soundLabel = element('label', 'check-label shortcut-sound'); refs.sound = element('input');
-    refs.sound.type = 'checkbox'; refs.sound.dataset.field = 'pin-sound';
-    refs.sound.addEventListener('change', () => { sound = refs.sound.checked; dirty = true; sync(); });
-    soundLabel.append(refs.sound, element('span', '', '置顶时播放清脆提示音'));
     refs.notice = element('p', 'shortcut-notice'); refs.notice.setAttribute('aria-live', 'polite');
     const actions = element('div', 'shortcut-actions');
-    refs.reset = button('恢复默认', 'secondary', () => { draft = { ...defaults }; sound = true; dirty = true; notice = '默认组合键已填入，保存后生效。'; failed = false; sync(); });
-    refs.revert = button('撤销修改', 'text-button', async () => { await endRecording(); draft = { ...saved }; sound = savedSound; dirty = false; failed = false; notice = ''; sync(); });
+    refs.reset = button('恢复默认', 'secondary', () => { draft = { ...defaults }; dirty = true; notice = '默认组合键已填入，保存后生效。'; failed = false; sync(); });
+    refs.revert = button('撤销修改', 'text-button', async () => { await endRecording(); draft = { ...saved }; dirty = false; failed = false; notice = ''; sync(); });
     refs.save = button('保存快捷键', 'primary', persist);
-    actions.append(refs.reset, refs.revert, refs.save); root.append(refs.recording, soundLabel, refs.notice, actions); container.append(root); sync();
+    actions.append(refs.reset, refs.revert, refs.save); root.append(refs.recording, refs.notice, actions); container.append(root); sync();
   }
   function dispose() { void endRecording(); disposed = true; document.removeEventListener('keydown', onKey, true); document.removeEventListener('keyup', onKeyUp, true); window.removeEventListener('blur', onBlur); }
   return { receive, mount, dispose, endRecording };

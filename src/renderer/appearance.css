@@ -1,9 +1,10 @@
 /* 主题设置组件；全局颜色由 appearance.js 的语义变量统一提供。 */
 .appearance-page{min-width:0;color:var(--ink);container-type:inline-size}
 .appearance-page *{box-sizing:border-box}
-.appearance-page .appearance-title{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 12px;margin-bottom:18px}
-.appearance-page .appearance-title h2{margin:0;font-size:20px;font-weight:600;line-height:1.4}
-.appearance-page .appearance-title>span{color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+.appearance-page .appearance-title{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+.appearance-page .appearance-mode-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 10px}
+.appearance-page .appearance-mode-heading h3{margin:0}
+.appearance-page .appearance-mode-heading>span{color:var(--muted);font-size:12px;line-height:1.5;max-width:55%;overflow-wrap:anywhere;text-align:right}
 .appearance-page .appearance-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:24px}
 .appearance-page h3{font-size:14px;font-weight:600;margin:0 0 10px;line-height:1.5}
 .appearance-page h3:not(:first-child){margin-top:23px}
@@ -74,7 +75,7 @@
 .appearance-page .appearance-notice:empty{display:none}
 .appearance-page .appearance-notice.is-error{color:var(--danger)}
 .appearance-page [hidden]{display:none!important}
-@container(min-width:600px){.appearance-page .appearance-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px}.appearance-page .appearance-editor{border-top:0;padding-top:0}.appearance-page .appearance-title{margin-bottom:24px}.appearance-pin-colors{grid-template-columns:repeat(4,minmax(0,1fr))}.appearance-page .appearance-pin-color[data-pin-outline=none]{grid-column:span 2}}
-@media(max-width:420px){.settings-navigation{margin-top:0;margin-bottom:12px}.appearance-page .appearance-title{justify-content:flex-end;margin-bottom:8px}.appearance-page .appearance-title h2{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.appearance-page h3:not(:first-child){margin-top:18px}}
+@container(min-width:600px){.appearance-page .appearance-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px}.appearance-page .appearance-editor{border-top:0;padding-top:0}.appearance-pin-colors{grid-template-columns:repeat(4,minmax(0,1fr))}.appearance-page .appearance-pin-color[data-pin-outline=none]{grid-column:span 2}}
+@media(max-width:420px){.settings-navigation{margin-top:0;margin-bottom:12px}.appearance-page h3:not(:first-child){margin-top:18px}}
 .reduced-motion .appearance-page *,.reduced-motion .appearance-page *::before,.reduced-motion .appearance-page *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
 @media(prefers-reduced-motion:reduce){.appearance-page *,.appearance-page *::before,.appearance-page *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

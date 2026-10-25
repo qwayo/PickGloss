@@ -26,8 +26,8 @@ function clock(quantum = 0, timerDelays = []) {
 }
 
 // 使用真实桌面模块和假窗口，不创建 Electron 或访问用户桌面。
-function desktopHarness({ loading = false, animate = false, onWindowState, windowsBuild = 26100, materialError = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, dipScale = 1 } = {}) {
-  const made = [], messages = [], statuses = [], selections = [], commands = [], actions = [], trays = [], menus = [], ipcMain = new EventEmitter(), time = clock(timerQuantum, timerDelays);
+function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, windowsBuild = 26100, materialError = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, dipScale = 1 } = {}) {
+  const made = [], messages = [], statuses = [], selections = [], selectionUpdates = [], commands = [], actions = [], trays = [], menus = [], ipcMain = new EventEmitter(), time = clock(timerQuantum, timerDelays);
   const nativeTheme = Object.assign(new EventEmitter(), { shouldUseDarkColors: false, shouldUseDarkColorsForSystemIntegratedUI: false, themeSource: 'system' });
   const animationSettings = { prefersReducedMotion: !animate, shouldRenderRichAnimation: true };
   let workArea = { x: 0, y: 0, width: 1440, height: 900 }, focused = null;
@@ -52,11 +52,13 @@ function desktopHarness({ loading = false, animate = false, onWindowState, windo
     setOpacity(value) { this.opacity = value; }
     setBackgroundMaterial(value) { if (materialError && value === 'acrylic') throw new Error('测试系统不支持材质'); this.material = value; }
     setBackgroundColor(value) { this.background = value; }
+    setAccentColor(value) { this.accent = value; }
     setShape(rects) { this.shape = rects; }
     setAlwaysOnTop(value, level) { this.alwaysOnTop = value; this.alwaysOnTopLevel = level; }
     setIgnoreMouseEvents(value) { this.ignoresMouse = value; }
-    show() { const changed = !this.visible; this.visible = true; if (changed) this.emit('show'); } showInactive() { this.show(); } focus() { if (focused !== this) { const previous = focused; focused = this; previous?.emit('blur'); } } hide() { const changed = this.visible; this.visible = false; if (changed) this.emit('hide'); }
+    show() { const changed = !this.visible; this.visible = true; if (changed) this.emit('show'); } showInactive() { this.show(); } focus() { if (focused !== this) { const previous = focused; focused = this; previous?.emit('blur'); } } hide() { const changed = this.visible; this.visible = false; if (changed) this.emit('hide'); if (blurOnHide && focused === this) { focused = null; this.emit('blur'); } }
     isVisible() { return Boolean(this.visible); }
+    isFocused() { return focused === this; }
     destroy() { this.destroyed = true; this.emit('closed'); }
   }
   class FakeTray extends EventEmitter {
@@ -80,9 +82,11 @@ function desktopHarness({ loading = false, animate = false, onWindowState, windo
     process: { pid: 1, platform: 'win32' }, Date: { now: time.now },
     ...time, clearInterval() {}, setInterval() {},
   });
-  const desktop = mod.exports.createDesktop({ onAction: (...args) => actions.push(args), onSelection: data => selections.push(data), onStatus: value => statuses.push(value), onWindowState });
+  const desktop = mod.exports.createDesktop({ onAction: (...args) => actions.push(args), onSelection: data => { selections.push(data);return onSelection?.(data); },
+    onSelectionContext: data => { selectionUpdates.push(data);return onSelectionContext?.(data); }, onStatus: value => statuses.push(value), onWindowState });
   desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, reducedMotion: false }); statuses.length = 0;
-  return { desktop, made, messages, statuses, selections, commands, worker, ipcMain, time, nativeTheme, animationSettings, trays, menus, actions,
+  return { desktop, made, messages, statuses, selections, selectionUpdates, commands, worker, ipcMain, time, nativeTheme, animationSettings, trays, menus, actions,
+    focusOutside() { const previous = focused; focused = null; previous?.emit('blur'); },
     changeDisplay(area) { workArea = area; electron.screen.emit('display-metrics-changed'); } };
 }
 
@@ -489,10 +493,75 @@ test('菜单关闭等待动画确认，快速重新打开拒绝旧确认，Esc�
   assert.equal(desktop.closeMenu({ generation: first, finished: true }), false);
   time.advance(300); assert.equal(win.isVisible(), true);
   const event = { prevented: false, preventDefault() { this.prevented = true; } };
-  win.webContents.emit('before-input-event', event, { key: 'Escape' });
+  win.webContents.emit('before-input-event', event, { key: 'Escape', type: 'keyDown' });
   assert.equal(event.prevented, true); assert.equal(statuses.at(-1).menuOpen, false);
   assert.equal(desktop.closeMenu({ generation: second, finished: true }), true); assert.equal(win.isVisible(), false);
   desktop.menu(); win.emit('blur'); time.advance(250); assert.equal(win.isVisible(), false);
+});
+
+test('菜单 X 和 Esc 关闭后窗口失焦，不连带隐藏解释窗', () => {
+  for (const closeBy of ['X', 'Esc']) {
+    const { desktop, made, statuses, time } = desktopHarness({ blurOnHide: true });
+    desktop.openPanel();
+    const panel = made.find(win => win.kind === 'panel');
+    desktop.menu({ source: 'panel' });
+    const menu = made.find(win => win.kind === 'menu'), generation = statuses.at(-1).menuGeneration;
+    desktop.menuReady({ generation });
+    assert.equal(panel.isVisible(), true);
+
+    if (closeBy === 'X') desktop.closeMenu({ generation });
+    else {
+      const event = { prevented: false, preventDefault() { this.prevented = true; } };
+      menu.webContents.emit('before-input-event', event, { key: 'Escape', type: 'keyDown' });
+      assert.equal(event.prevented, true);
+    }
+
+    time.advance(250);
+    assert.equal(menu.isVisible(), false, `${closeBy} 应关闭菜单`);
+    assert.equal(panel.isVisible(), true, `${closeBy} 不应连带隐藏解释窗`);
+  }
+});
+
+test('菜单因点击其他窗口而失焦时，仍按未固定状态隐藏解释窗', () => {
+  const { desktop, made, statuses, time } = desktopHarness();
+  desktop.openPanel();
+  const panel = made.find(win => win.kind === 'panel');
+  desktop.menu({ source: 'panel' });
+  const menu = made.find(win => win.kind === 'menu');
+  desktop.menuReady({ generation: statuses.at(-1).menuGeneration });
+
+  menu.emit('blur');
+  time.advance(0);
+  assert.equal(statuses.at(-1).menuOpen, false);
+  assert.equal(panel.isVisible(), false);
+});
+
+test('显式关闭菜单后仍会响应下一次外部点击，固定窗口继续可见', () => {
+  for (const pinned of [false, true]) for (const closeBy of ['X', 'Esc']) for (const finished of [false, true]) {
+    const { desktop, made, statuses, time, focusOutside } = desktopHarness({ blurOnHide: true, animate: true });
+    desktop.openPanel(); desktop.setPinned(pinned);
+    const panel = made.find(win => win.kind === 'panel');
+    desktop.menu({ source: 'panel' });
+    const menu = made.find(win => win.kind === 'menu'), generation = statuses.at(-1).menuGeneration;
+    desktop.menuReady({ generation });
+    if (closeBy === 'X') desktop.closeMenu({ generation });
+    else menu.webContents.emit('before-input-event', { preventDefault() {} }, { key: 'Escape', type: 'keyDown' });
+    if (finished) { desktop.closeMenu({ generation, finished: true }); time.advance(250); }
+    assert.equal(panel.isVisible(), true, '关闭菜单当下保留解释窗');
+    focusOutside(); time.advance(300);
+    assert.equal(panel.isVisible(), pinned, `${closeBy} 后${finished ? '动画结束' : '动画期间'}点击外部必须遵守固定状态`);
+  }
+});
+
+test('Esc 收起菜单交回焦点后，抬键不能继续关闭解释窗', () => {
+  const { desktop, made, statuses, time } = desktopHarness({ blurOnHide: true });
+  desktop.openPanel(); const panel = made.find(win => win.kind === 'panel');
+  desktop.menu({ source: 'panel' }); const menu = made.find(win => win.kind === 'menu');
+  desktop.menuReady({ generation: statuses.at(-1).menuGeneration });
+  menu.webContents.emit('before-input-event', { preventDefault() {} }, { key: 'Escape', type: 'keyDown' });
+  panel.webContents.emit('before-input-event', { preventDefault() {} }, { key: 'Escape', type: 'keyUp' });
+  time.advance(300);
+  assert.equal(panel.isVisible(), true, '同一次 Esc 的抬键不能穿透关闭解释窗');
 });
 
 test('菜单初次加载期间关闭不会迟到重开，点击回主窗只关闭菜单', () => {
@@ -519,7 +588,7 @@ test('菜单 surface 只授权有限动作，快捷键录制期间主窗 Esc 交
   assert.equal(desktop.authorize(eventFor(panel), 'shortcut-recording'), true);
   desktop.broadcast({ status: { shortcuts: { recording: true } } });
   const event = { prevented: false, preventDefault() { this.prevented = true; } };
-  panel.webContents.emit('before-input-event', event, { key: 'Escape' });
+  panel.webContents.emit('before-input-event', event, { key: 'Escape', type: 'keyDown' });
   assert.equal(event.prevented, false); assert.equal(panel.isVisible(), true);
   desktop.setPinned(false); assert.equal(panel.alwaysOnTop, true);
 });
@@ -707,12 +776,59 @@ test('打开其他流程后迟到的旧选区不重开入口，新划词仍可�
   const cancel = commands.at(-1);
   assert.equal(cancel.type, 'cancel-pending');
   worker.emit('message', { type: 'selection', text: 'compound', point: { x: 150, y: 100 } });
-  assert.equal(made.length, 1, '旧材料不能在面板打开后重新创建划词入口');
+  assert.equal(made.length, 2, '只保留提前加载的入口和面板');
+  assert.equal(made.find(win => win.kind === 'selection').isVisible(), false, '旧材料不能显示提前加载的入口');
   worker.emit('message', { type: 'pending-cancelled', requestId: cancel.requestId });
   worker.emit('message', { type: 'selection', text: 'retain', point: { x: 150, y: 100 } });
   assert.equal(made.length, 2);
   await desktop.acceptSelection();
   assert.deepEqual(selections.map(item => item.text), ['retain']);
+});
+
+test('启用监听时隐藏加载划词入口，连续结果复用同一页面', () => {
+  const {desktop,made,worker}=desktopHarness();
+  desktop.startSelection(true);
+  const entry=made.find(win=>win.kind==='selection');
+  assert.ok(entry);assert.equal(entry.isVisible(),false);assert.equal(entry.loads,1);
+  for(const word of ['第一份文字','第二份文字']) worker.emit('message',{type:'selection',text:word,point:{x:800,y:300}});
+  assert.equal(made.length,1);assert.equal(entry.loads,1);assert.equal(entry.isVisible(),true);
+});
+
+test('点击前取得上下文时，入口提交同一份完整材料', async () => {
+  const {desktop,worker,selections,selectionUpdates}=desktopHarness();desktop.startSelection(true);
+  worker.emit('message',{type:'selection',requestId:1,text:'目标词',context:'',contextPending:true,point:{x:800,y:300}});
+  worker.emit('message',{type:'selection-context',requestId:1,context:'这段包含目标词。',contextOrigin:'UIA 所在段落',reason:''});
+  await desktop.acceptSelection();
+  assert.equal(selections[0].context,'这段包含目标词。');assert.equal(selections[0].contextPending,false);
+  assert.equal(selectionUpdates.length,0,'尚未建立会话时直接补到待提交材料');
+});
+
+test('点击后迟到上下文按请求归属回传，等待会话建立后才应用', async () => {
+  let resolveSelection;
+  const {desktop,worker,selections,selectionUpdates}=desktopHarness({onSelection:()=>new Promise(resolve=>{resolveSelection=resolve;})});
+  desktop.startSelection(true);
+  worker.emit('message',{type:'selection',requestId:4,text:'先确认的文字',context:'',contextPending:true,point:{x:800,y:300}});
+  const accepting=desktop.acceptSelection();await Promise.resolve();
+  worker.emit('message',{type:'selection-context',requestId:4,context:'迟到的原段落',contextOrigin:'UIA 所在段落',reason:''});
+  await Promise.resolve();assert.equal(selectionUpdates.length,0);
+  resolveSelection();await accepting;await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(selectionUpdates.length,1);assert.equal(selectionUpdates[0].requestId,selections[0].requestId);
+  assert.equal(selectionUpdates[0].context,'迟到的原段落');
+});
+
+test('旧上下文不替换新入口，助手退出会结束已提交材料的等待', async () => {
+  const {desktop,worker,commands,selections,selectionUpdates}=desktopHarness();desktop.startSelection(true);
+  worker.emit('message',{type:'selection',requestId:1,text:'旧文字',context:'',contextPending:true,point:{x:800,y:300}});
+  await desktop.acceptSelection();
+  worker.emit('message',{type:'pending-cancelled',requestId:commands.at(-1).requestId});
+  worker.emit('message',{type:'selection',requestId:2,text:'新文字',context:'',contextPending:true,point:{x:900,y:300}});
+  worker.emit('message',{type:'selection-context',requestId:1,context:'旧段落',contextOrigin:'UIA 所在段落'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(selectionUpdates[0].requestId,selections[0].requestId);
+  await desktop.acceptSelection();assert.equal(selections[1].text,'新文字');assert.equal(selections[1].context,'');
+  worker.emit('exit');await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(selectionUpdates.length,2);assert.equal(selectionUpdates[1].requestId,selections[1].requestId);
+  assert.match(selectionUpdates[1].reason,/退出/);assert.equal(selectionUpdates[1].contextPending,false);
 });
 
 test('点击超限划词入口只显示缩短提示，不创建解释会话或发送请求', async () => {
@@ -873,4 +989,28 @@ test('退出仍在等待草稿 ACK 时，重复退出不能绕过保存', async 
   const ready = { prevented: false, preventDefault() { this.prevented = true; } };
   app.events.emit('before-quit', ready);
   assert.equal(ready.prevented, false);
+});
+
+test('Windows 11 原生边色随纸面切换，置顶光条外不保留系统默认暗边', () => {
+  const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
+  for (const mode of ['dark', 'light', 'dark']) {
+    desktop.setAppearance({ current: { mode, material: 'solid', accent: '#000000', tint: '#bfc2c8' } });
+    assert.equal(panel.accent, mode === 'dark' ? '#252525' : '#ffffff');
+    assert.equal(panel.accent, panel.background);
+    assert.equal(panel.shape, undefined, '保留系统抗锯齿边界');
+  }
+});
+
+test('固定窗口的系统边框与光条同色，换色和无描边立即同步，取消固定恢复纸面', () => {
+  const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
+  desktop.setPinned(true);
+  assert.equal(panel.accent, '#dc873d');
+  for (const [pinOutline, expected] of [['blue', '#5095e8'], ['mint', '#4db393'], ['none', '#252525']]) {
+    desktop.setAppearance({ current: { mode: 'dark', material: 'solid' }, pinOutline });
+    assert.equal(panel.accent, expected);
+  }
+  desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, pinOutline: 'orange' });
+  assert.equal(panel.accent, '#dc873d');
+  desktop.setPinned(false);
+  assert.equal(panel.accent, '#ffffff');
 });
