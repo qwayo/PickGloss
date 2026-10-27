@@ -111,8 +111,8 @@ async function run(output) {
     await visible(`Boolean(document.querySelector('[data-field="paste-text"]'))`);
     assert.equal((await ui(`window.pickgloss.invoke('open-latest-session')`)).ok, true);
     await visible(`Boolean(document.querySelector('[data-field="paste-text"]'))`);
-    await click('截图框选');
-    await visible(`document.body.textContent.includes('隔离验证模式不会读取实际屏幕')`);
+    assert.equal(await ui(`['AI 识图','OCR 翻译'].every(label => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === label))`), true,
+      '正式界面应提供 AI 识图和 OCR 翻译入口');
     await field('paste-text', selectedText);
     await field('paste-context', contextText);
     await click('开始解释');
@@ -123,43 +123,58 @@ async function run(output) {
     assert.equal(requests.length, 0, '无配置时不得发送请求');
     await driver.click('配置 AI 服务', { scope: '.panel-footer', stage: '打开 AI 服务设置' });
     await visible(`Boolean(document.querySelector('[data-field="text-baseUrl"]'))`);
-    // 隔离模式也检查未选中的厂商草稿；所有预设仅使用本机测试地址。
-    await ui(`(() => {
-      for (const kind of ['text', 'vision', 'search']) {
-        const select = document.querySelector('[name="' + kind + '-provider"]'), original = select.value;
-        for (const option of [...select.options]) {
-          select.value = option.value; select.dispatchEvent(new Event('change', { bubbles: true }));
-          const input = document.querySelector('[name="' + kind + '-baseUrl"]');
-          input.value = 'http://127.0.0.1:${port}/v1'; input.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        select.value = original; select.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    })()`);
-    await field('text-baseUrl', `http://127.0.0.1:${port}/v1`);
+    const serviceUrl = `http://127.0.0.1:${port}/v1`;
+    const providerId = await ui(`window.pickgloss.invoke('bootstrap').then(result => result.value.settings.text.providerId)`);
+    assert.equal(typeof providerId, 'string', '无法读取隔离界面的文字服务类型');
+    await field('text-baseUrl', serviceUrl);
     await field('text-model', '本机验证模型');
     await field('text-apiKey', fakeKey);
-    // 失败注入走真实 preload 和主进程校验；拒绝非本机地址发生在网络请求之前。
+    const settingsPath = path.join(isolated, 'data', 'settings.json');
+    const persistedSettings = await deadline(async () => {
+      try {
+        const value = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+        const active = value.text;
+        const profile = value.serviceProfiles?.text?.[providerId];
+        const config = active?.providerId === providerId ? active : profile;
+        const address = config?.baseUrl ? new URL(config.baseUrl) : null;
+        return address?.hostname === '127.0.0.1' && address.port === String(port) && address.pathname.replace(/\/$/, '') === '/v1' &&
+          config.model === '本机验证模型' && typeof config.keyCiphertext === 'string' && config.keyCiphertext.length > 0 ? value : null;
+      } catch { return null; }
+    }, '文字服务设置自动保存');
+    assert.equal(JSON.stringify(persistedSettings).includes(fakeKey), false, 'API Key 不得以明文写入隔离设置');
+    // 当前服务设置由正式界面自动保存；失败注入保留先前有效的本机配置，再验证离页会被拒绝。
     const injectedFailure = process.argv.includes('--inject-save-failure');
-    if (injectedFailure) await field('text-baseUrl', 'https://blocked.invalid/v1');
-    await driver.click('保存设置', { scope: '[data-settings-section="service"]', stage: '保存服务设置' });
     if (injectedFailure) {
-      await assert.rejects(driver.waitFor(`document.body.textContent.includes('开始释义')`, '保存成功后返回解释页'), error => {
-        assert.match(error.message, /阶段=保存服务设置.*界面拒绝了操作.*隔离模式拒绝服务地址/);
-        assert.doesNotMatch(error.message, /blocked\.invalid|fake-key|compound/);
-        return true;
-      });
+      await field('text-baseUrl', 'https://blocked.invalid/v1');
+      await driver.click('返回', { stage: '失败设置后尝试返回解释页' });
+      const blocked = await deadline(async () => {
+        const result = await ui(`window.pickgloss.invoke('bootstrap')`);
+        const report = await driver.snapshot();
+        return result.value.view === 'settings' && report.errors.includes('隔离模式拒绝服务地址') ? report : null;
+      }, '自动保存失败应阻止离开设置页');
+      assert.ok(blocked.errors.includes('隔离模式拒绝服务地址'), '保存失败应明确报告隔离地址拒绝，顶部未保存汇总可以同时存在');
+      assert.deepEqual(blocked.sections, ['service'], '失败后仍位于原服务设置分区');
+      assert.doesNotMatch(JSON.stringify(blocked), /blocked\.invalid|fake-key|compound/);
       await wait(250);
-      assert.equal(requests.length, 0, '保存失败后不得发送解释请求');
-      await fs.writeFile(path.join(output, '保存失败注入结果.json'), JSON.stringify({ 通过: true, 阶段: '保存服务设置', 错误: '隔离模式拒绝服务地址', 后续解释请求数: requests.length }, null, 2), 'utf8');
-      console.log('真实便携包保存失败注入通过：定位到保存服务设置阶段，错误已脱敏，后续请求为零。');
+      assert.equal(requests.length, 0, '设置自动保存失败后，不得离页并发送解释请求');
+      await fs.writeFile(path.join(output, '保存失败注入结果.json'), JSON.stringify({ 通过: true, 阶段: '设置自动保存与返回拦截', 错误: '隔离模式拒绝服务地址', 后续解释请求数: requests.length }, null, 2), 'utf8');
+      console.log('真实便携包保存失败注入通过：自动保存失败阻止返回解释页，诊断已脱敏，后续请求为零。');
       return;
     }
-    await driver.waitFor(`document.body.textContent.includes('开始释义')`, '保存成功后返回解释页', { stage: '保存服务设置' });
+    await driver.click('返回', { stage: '设置自动保存后返回解释页' });
+    await visible(`document.body.textContent.includes('开始释义')`, '设置自动保存后返回解释页');
+    const activeTextConfig = await ui(`window.pickgloss.invoke('bootstrap').then(result => result.value.settings.text)`);
+    assert.equal(activeTextConfig.providerId, providerId);
+    assert.equal(activeTextConfig.model, '本机验证模型');
+    assert.equal(new URL(activeTextConfig.baseUrl).hostname, '127.0.0.1');
+    assert.equal(activeTextConfig.hasKey, true, '自动保存后正式界面应读回已加密密钥状态');
     await click('开始释义');
     await deadline(() => requests.length === 1, '首轮本机解释请求');
     await visible(`document.body.textContent.includes(${quoteJavaScriptString(answers[0])}) && !document.body.textContent.includes('正在解释…')`);
     await click('会话历史');
     await visible(`Boolean(document.querySelector('.history-item'))`);
+    assert.equal(await ui(`Boolean(document.querySelector('.history-heading-actions button.icon-button[aria-label="新建"]'))`), true,
+      '历史页应提供图标式新建入口');
     await click('新建');
     await visible(`Boolean(document.querySelector('[data-field="paste-text"]'))`);
     await field('paste-text', '第二条隔离会话');
@@ -205,15 +220,17 @@ async function run(output) {
     assert.equal(stored.text, selectedText);
     assert.equal(stored.context, contextText);
     assert.deepEqual(stored.threads.context.messages.map(item => item.content), [answers[0], questionText, answers[1]]);
-    const settings = await fs.readFile(path.join(isolated, 'data', 'settings.json'), 'utf8');
-    assert.equal(settings.includes(fakeKey), false, '虚构 Key 也应加密落盘');
+    assert.equal(JSON.stringify(persistedSettings).includes(fakeKey), false, '虚构 Key 也应加密落盘');
+    assert.ok(persistedSettings.text?.keyCiphertext || persistedSettings.serviceProfiles?.text?.[providerId]?.keyCiphertext,
+      '隔离设置应包含 Windows 加密后的 API Key');
     const report = { candidateId: manifest.candidateId, sourceFingerprint: manifest.sourceFingerprint,
       packageFingerprint: manifest.packageFingerprint, runAt: new Date().toISOString(), isolatedDirectory: isolated,
-      executable, checked: ['隔离模式阻止读取实际屏幕', '正式界面接纳材料并保存', '无配置时不发送请求', '正式界面设置本机服务与虚构密钥',
+      executable, checked: ['正式界面提供 AI 识图与 OCR 翻译入口', '正式界面接纳文字材料并保存', '无配置时不发送请求', '自动保存并读回本机服务与虚构密钥',
         'preload 与主进程发出解释及追问请求', '关闭窗口后由第二次启动唤回', '历史重开保留材料及回答且不自动请求',
-        '包内改名、完整搜索和刷新入口可达', '新增问答后按活动时间排序', '最新会话入口忽略筛选、不重发请求、空历史回到文字识别', '实际隔离存储与界面一致', '虚构密钥未明文落盘'],
+        '历史页图标式新建、改名、完整搜索和刷新入口可达', '新增问答后按活动时间排序', '最新会话入口忽略筛选、不重发模型请求', '实际隔离存储与界面一致', '虚构密钥已加密且未明文落盘'],
       requestCount: requests.length, material: { text: selectedText, context: contextText, question: questionText },
-      answers, realProvider: false, realClipboardAccess: false, realSessionAccess: false, nativeSelectionEnabled: false };
+      answers, realProvider: false, realScreenCapture: false, screenshotTranslationExercised: false,
+      realClipboardAccess: false, realSessionAccess: false, nativeSelectionEnabled: false };
     const reportPath = path.join(output, '隔离贯通结果.json');
     await fs.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf8');
     console.log(`隔离贯通通过：${manifest.candidateId}；本机请求 ${requests.length} 次；报告 ${reportPath}`);
