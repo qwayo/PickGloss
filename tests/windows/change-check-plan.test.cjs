@@ -54,6 +54,8 @@ test('能力边界：隐藏检查不会声称获焦或 OCR 已通过，交互入
   assert.equal(hidden.steps[0].id, 'native-build', '正式桌面专项前必须先准备相同目录的原生助手');
   assert.equal(hidden.uncovered.length, 2);
   assert.ok(hidden.steps.some(step => step.args.includes('--ui-only')));
+  assert.ok(hidden.steps.some(step => step.args.includes('--normal-motion')));
+  assert.ok(hidden.steps.some(step => step.args.includes('--reduced-motion') && step.args.includes('--anchor-only')));
   assert.ok(hidden.steps.every(step => !step.args.includes('--visible') && !step.args.includes('--native-ocr')));
   const local = buildSteps(selected, { output: '隔离报告', interactive: true, ocr: true });
   assert.equal(local.uncovered.length, 0);

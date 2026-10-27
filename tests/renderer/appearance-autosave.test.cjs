@@ -41,7 +41,7 @@ const listen = map => (name, callback) => { const entries = map.get(name) || [];
 const unlisten = map => (name, callback) => map.set(name, (map.get(name) || []).filter(item => item !== callback));
 const media = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 
-function page({ appearance, save, refresh = () => {} } = {}) {
+function page({ appearance, save, refresh = () => {}, onReducedMotion = () => {} } = {}) {
   const documentEvents = new Map(), windowEvents = new Map(), writes = [];
   const documentElement = new Element('html'); documentElement.dataset = {};
   const document = {
@@ -61,7 +61,7 @@ function page({ appearance, save, refresh = () => {} } = {}) {
   const saveFn = save || (async snapshot => ({ ok: true, value: { prefs: { appearance: structuredClone(snapshot) } } }));
   const wrappedSave = async snapshot => { if (!save) writes.push(structuredClone(snapshot)); return saveFn(snapshot); };
   const container = new Element('main');
-  ui = context.createAppearanceUI({ save: wrappedSave, refresh: () => refresh(ui), onReducedMotion() {} });
+  ui = context.createAppearanceUI({ save: wrappedSave, refresh: () => refresh(ui), onReducedMotion });
   ui.receive(appearance || { current: DEFAULT, active: 'default', presets: [], reducedMotion: false, pinOutline: 'orange' }, {});
   ui.mount(container);
   const find = (predicate, node = container) => {
@@ -76,6 +76,21 @@ async function until(predicate, message = '异步保存应在有限时间内完�
   for (let i = 0; i < 100 && !predicate(); i += 1) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(predicate(), message);
 }
+
+test('减少动态效果的状态回声不重复通知宿主，避免在尺寸提交前覆盖阅读锚点', () => {
+  let notified = 0;
+  const appearance = { current: DEFAULT, active: 'default', presets: [], reducedMotion: false, pinOutline: 'orange' };
+  const editor = page({ appearance, onReducedMotion: () => { notified++; } });
+  editor.ui.receive(appearance, { reducedMotion: true });
+  assert.equal(notified, 1);
+  editor.ui.receive(appearance, { reducedMotion: true, windowTransitioning: true });
+  editor.ui.receive(appearance, { reducedMotion: true, windowTransitioning: false });
+  assert.equal(notified, 1, '同一减少动态效果状态的回声不能清除宿主已经捕获的阅读锚点');
+  editor.ui.receive(appearance, { reducedMotion: false });
+  editor.ui.receive(appearance, { reducedMotion: true });
+  assert.equal(notified, 2, '再次进入减少动态效果仍应停止当前动画');
+  editor.ui.dispose();
+});
 
 test('没有待保存更改时，失焦和离页 flush 不重绘或再次进入保存', async () => {
   let refreshed = 0;

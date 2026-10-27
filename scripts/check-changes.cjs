@@ -26,7 +26,8 @@ function buildSteps(selected, { interactive, ocr, output }) {
   if (has('ui') || has('settings')) steps.push({ id: 'native-build', name: '准备隐藏桌面专项所需的原生助手', command: process.execPath, args: [path.join(__dirname, 'build-native.cjs')] });
   if (has('ui')) steps.push({ id: 'ui', name: '基础隐藏界面', command: process.execPath, args: [path.join(__dirname, 'check-ui.cjs'), '--output-dir', path.join(output, 'ui')] });
   if (has('settings')) {
-    steps.push(step('settings-save', '设置真实临时存储、失败草稿与恢复', 'check-ui-appearance.cjs'));
+    steps.push(step('settings-save', '设置真实临时存储、失败草稿与恢复及正常动效阅读位置', 'check-ui-appearance.cjs', ['--normal-motion']));
+    steps.push(step('settings-reading-reduced', '减少动态效果下的阅读位置与草稿', 'check-ui-appearance.cjs', ['--reduced-motion', '--anchor-only']));
     steps.push(step('settings-recovery', '设置恢复与关闭阻断解除', 'check-settings-recovery.cjs'));
     steps.push(step('settings-visual', '设置窄窗及保存状态布局', 'check-settings-visual-repair.cjs'));
     steps.push(step('slider-hidden', '滑块隐藏节点及保存回归', 'check-appearance-slider-save.cjs'));

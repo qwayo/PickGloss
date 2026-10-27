@@ -41,6 +41,7 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
   let data = normalize(), status = {}, editorName = '';
   let root = null, refs = {}, busy = false, notice = '', failed = false, noticeError = false, editorOpen = true, disposed = false;
   let revision = 0, savedRevision = 0, saveTimer = null, drainPromise = null;
+  let appliedReducedMotion = false;
   const afterSave = [];
   const invalidColors = new Map();
   const selectedPresets = new Set();
@@ -108,7 +109,9 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
     html.dataset.pinOutline = data.pinOutline;
     const reduce = data.reducedMotion || motionMedia.matches || status.reducedMotion === true;
     html.classList.toggle('reduced-motion', reduce);
-    if (reduce) onReducedMotion();
+    const enteredReducedMotion = reduce && !appliedReducedMotion;
+    appliedReducedMotion = reduce;
+    if (enteredReducedMotion) onReducedMotion();
     html.style.colorScheme = dark ? 'dark' : 'light';
   }
 
