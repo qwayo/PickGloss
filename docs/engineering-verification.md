@@ -153,6 +153,12 @@ npm run check:merge -- --base origin/main --output-dir output/verification/合�
 
 窄窗导航几何检查等待字体和有限动画就绪，并保存就绪前后几何。图标按按钮内容区中心核对，计入上下不对称内边距；继续保留小于 1 像素的居中精度及文字右侧不溢出断言。旧检查将内容区中心与外框中心混用，静止时恰差 1 像素，未完成的缩放动画反而会误通过。`check-settings-visual-repair.cjs --inject-misaligned-nav` 在隔离夹具中将图标下移 3 像素，必须失败，不修改产品样式。
 
+菜单隐藏检查先确认目标 URL 和初始主帧导航完成，再执行 DOM 断言，避免首次导航替换执行上下文时拒绝脚本。`check-floating-ui.cjs --menu-only --menu-navigation-probe` 用隔离夹具注入 60 毫秒的菜单导航阶段，并让该阶段的脚本调用明确失败；旧入口失败，等待导航后的入口通过。该回归接入 `check:ui`，不吞掉页面就绪之后的脚本错误。浮窗失败另保存当前阶段、原始异常及各窗口加载状态；截图预览采样与菜单初始化故障分开记录。
+
+新增诊断在远端捕获的实际原始异常为 `UnknownVizError`，来自菜单 `capturePage` 的底层画面复制错误，导航就绪补强不能单独视为该故障的修复。[Electron 源码](https://github.com/electron/electron/blob/main/shell/browser/api/electron_api_web_contents.cc)定义了该错误映射。浮窗夹具已使用离屏窗口，截图取证改为监听 `paint`，通过 `invalidate()` 请求并等待一帧真实重绘，保留 PNG、非空断言及取证方式／尺寸记录；不再对离屏窗口调用画面复制截图接口。依据见 [Electron 离屏渲染文档](https://www.electronjs.org/docs/latest/tutorial/offscreen-rendering)和 [`invalidate()` 说明](https://www.electronjs.org/docs/latest/api/web-contents#contentsinvalidate)。菜单回归另用 `--capture-page-failure` 注入相同错误，旧取证失败、新的离屏帧取证通过；超时或空帧仍阻断，不以截图失败重试掩盖结果。
+
+隐藏浮窗夹具通过 `app.disableHardwareAcceleration()` 固定为软件离屏输出设备，避免 CI GPU 初始化差异；该设置仅影响夹具进程，`--preview` 实屏预览保持正常图形路径。软件重绘帧可证明正式渲染器的画面内容和几何，不能证明硬件合成、原生磨砂或实屏性能。
+
 Windows CI 使用 PR 基线或推送前提交自动选择专项，版本或打包改动不再依赖手动勾选。普通 CI 不声明交互桌面或 OCR 能力，报告会列出获焦滑块／本机 OCR 的未覆盖项及本地入口；工作流手动输入 `verify_ocr` 可要求本机 OCR 专项，`verify_package` 可显式增加打包验证。每次运行均上传选择和能力边界报告，失败时也保留已经写出的隔离诊断。CI 通过不替代本地合并前的实际获焦证据。
 
 截图翻译的两类证据可以单独执行：

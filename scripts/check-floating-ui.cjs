@@ -11,37 +11,76 @@ const assert = require('node:assert/strict');
 const { setTimeout: delay } = require('node:timers/promises');
 const { createUiDriver } = require('./ui-driver.cjs');
 const { previewSnapshot } = require('./preview-layout.cjs');
+const { redact } = require('./checked-runner.cjs');
 const root = path.resolve(process.argv.find(a => a.startsWith('--source-root='))?.slice(14) || path.join(__dirname, '..'));
 const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/floating-20261021') : path.resolve(process.argv[outputIndex + 1]);
 const before = process.argv.includes('--before');
 const preview = process.argv.includes('--preview');
+// 隐藏离屏证据使用软件输出设备，避免 CI GPU 合成表面的复制与初始化差异。
+if (!preview) app.disableHardwareAcceleration();
 app.setPath('userData', path.join(os.tmpdir(), `pickgloss-floating-${process.pid}`));
 const windows = [];
 class TestWindow extends electron.BrowserWindow {
-  constructor(options) { super({ ...options, show: false, webPreferences: { ...options.webPreferences, offscreen: !preview, backgroundThrottling: false } }); this.testOptions = options; windows.push(this); }
+  constructor(options) { super({ ...options, show: false, webPreferences: { ...options.webPreferences, offscreen: !preview, backgroundThrottling: false } }); this.testOptions = options; windows.push(this);
+    if (process.argv.includes('--capture-page-failure')) this.webContents.capturePage = async () => { throw Error('UnknownVizError'); };
+  }
   show() {} showInactive() {} focus() {}
   setBounds(bounds) { this.resizeCalls ||= []; this.resizeCalls.push({ width: bounds.width, height: bounds.height }); super.setBounds(bounds); }
   setShape(rects) { this.testShape = rects; super.setShape(rects); }
+  loadFile(file, options) {
+    if (options?.query?.window === 'menu' && process.argv.includes('--menu-navigation-probe')) {
+      let navigating = true;
+      const execute = this.webContents.executeJavaScript.bind(this.webContents);
+      // 隔离夹具模拟初始导航替换执行上下文；页面就绪后不再注入故障。
+      this.webContents.executeJavaScript = (...args) => navigating ? Promise.reject(Error('隔离菜单导航期间执行上下文不可用')) : execute(...args);
+      return delay(60).then(() => super.loadFile(file, options)).finally(() => { navigating = false; });
+    }
+    return super.loadFile(file, options);
+  }
 }
-let desktop, panel, store, state, failSave = false, fixtureReducedMotion = false;
-const errors = [], checks = [];
+let desktop, panel, store, state, failSave = false, fixtureReducedMotion = false, currentPhase = '初始化';
+const errors = [], checks = [], screenshots = [];
 const evaluate = code => panel.webContents.executeJavaScript(code);
 const driver = createUiDriver(evaluate, { timeoutMs: 7000, intervalMs: 10 });
 async function until(predicate, label) {
+  currentPhase = label;
+  driver.phase(label);
   const deadline = Date.now() + 7000;
   while (Date.now() < deadline) { if (await predicate()) return; await delay(10); }
   driver.phase(label);
   throw await driver.diagnose(label);
+}
+async function checkMenu() {
+  desktop.menu({ source: 'panel' });
+  const menu = windows.find(win => win.testOptions.webPreferences && win.webContents.getURL().includes('window=menu')) || windows.at(-1);
+  await until(() => menu.webContents.getURL().includes('window=menu') && !menu.webContents.isLoadingMainFrame(), '菜单初始导航完成');
+  await until(() => menu.webContents.executeJavaScript(`Boolean(document.querySelector('[data-menu-command="general-settings"]'))`), '快捷菜单常规设置入口');
+  assert.notEqual(await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="settings"] .icon').innerHTML`), await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"] .icon').innerHTML`), 'AI 图标与常规齿轮区分');
+  await shot('快捷菜单-常规设置入口', menu);
+  await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"]').click()`);
+  await until(() => evaluate(`document.querySelector('[data-settings-section="general"]')?.hidden === false`), '菜单直达常规设置');
 }
 async function click(selector) {
   await driver.waitFor(`Boolean(document.querySelector(${quoteJavaScriptString(selector)})?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))`, '切换动画结束且控件可见', { stage: `点击控件 ${selector}`, allowErrors: true });
   await driver.click(undefined, { selector, stage: `点击控件 ${selector}` });
 }
 async function shot(name, win = panel) {
+  currentPhase = `截图：${name}`; driver.phase(currentPhase);
   await win.webContents.executeJavaScript('Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))');
   await win.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-  await fs.writeFile(path.join(output, `${before ? '修复前-' : ''}${name}.png`), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
+  const offscreen = win.webContents.isOffscreen();
+  const frame = offscreen ? await new Promise((resolve, reject) => {
+    const finish = (error, bitmap) => { clearTimeout(timer); win.webContents.off('paint', painted); error ? reject(error) : resolve(bitmap); };
+    const painted = (_event, _dirty, bitmap) => finish(bitmap?.isEmpty() === false ? null : Error('离屏绘制返回空画面'), bitmap);
+    const timer = setTimeout(() => finish(Error('离屏重绘帧等待超时')), 5000);
+    win.webContents.once('paint', painted);
+    try { win.webContents.startPainting(); win.webContents.invalidate(); } catch (error) { finish(error); }
+  }) : await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+  assert.equal(frame.isEmpty(), false, '截图证据必须包含真实画面');
+  await fs.writeFile(path.join(output, `${before ? '修复前-' : ''}${name}.png`), frame.toPNG());
+  screenshots.push({ 名称: name, 取证方式: offscreen ? '离屏重绘 paint 帧' : '页面截图', 像素尺寸: frame.getSize() });
+  await fs.writeFile(path.join(output, '截图取证.json'), JSON.stringify(screenshots, null, 2));
 }
 function emit() { desktop.broadcast(state); }
 async function checkPreviewLayouts() {
@@ -159,6 +198,10 @@ app.whenReady().then(async () => {
     }
     if (process.argv.includes('--preview-layout-only')) {
       await checkPreviewLayouts();
+      clearTimeout(timeout); desktop.dispose(); app.exit(0); return;
+    }
+    if (process.argv.includes('--menu-only')) {
+      await checkMenu();
       clearTimeout(timeout); desktop.dispose(); app.exit(0); return;
     }
     await shot('深色小窗');
@@ -282,19 +325,16 @@ app.whenReady().then(async () => {
     await shot('深色悬浮球', orb);
     const ball = await orb.webContents.executeJavaScript('({背景:getComputedStyle(document.querySelector(".orb")).backgroundColor,高光:getComputedStyle(document.querySelector(".orb")).backgroundImage})');
     assert.equal(ball.背景, 'rgb(37, 37, 37)'); assert.ok(ball.高光.includes('radial-gradient'));
-    desktop.menu({ source: 'panel' });
-    const menu = windows.find(win => win.testOptions.webPreferences && win.webContents.getURL().includes('window=menu')) || windows.at(-1);
-    await until(() => menu.webContents.executeJavaScript(`Boolean(document.querySelector('[data-menu-command="general-settings"]'))`), '快捷菜单常规设置入口');
-    assert.notEqual(await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="settings"] .icon').innerHTML`),await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"] .icon').innerHTML`),'AI 图标与常规齿轮区分');
-    await shot('快捷菜单-常规设置入口', menu);
-    await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"]').click()`);
-    await until(() => evaluate(`document.querySelector('[data-settings-section="general"]')?.hidden === false`), '菜单直达常规设置');
+    await checkMenu();
     checks.push({ 检查: '快捷菜单常规设置入口直达对应分类', 通过: true });
     assert.deepEqual(errors, []); assert.ok(windows.every(w => w.isDestroyed() || !w.isVisible()));
     await fs.writeFile(path.join(output, '界面检查.json'), JSON.stringify({ 通过: true, 说明: '真实 Electron 隐藏窗口，虚构会话和隔离存储；不代表真实桌面流畅度或系统磨砂观感验收。', checks }, null, 2));
     console.log('悬浮窗检查通过：圆角、主题、置顶、色板指针、识别页和三轮展开采样。');
     clearTimeout(timeout); desktop.dispose(); app.exit(0);
   } catch (error) {
+    await fs.writeFile(path.join(output, '浮窗失败诊断.json'), redact(JSON.stringify({ 通过: false, 阶段: currentPhase, 类型: error.code || error.name,
+      错误: error.message, 位置: error.stack || '', 窗口: windows.map(win => win.isDestroyed() ? { 已销毁: true } : {
+        页面: new URL(win.webContents.getURL() || 'about:blank').searchParams.get('window'), 主帧加载中: win.webContents.isLoadingMainFrame() }) }, null, 2)));
     console.error(error.message.startsWith('界面检查失败：') ? error.message : (await driver.diagnose('当前浮窗断言或操作通过', '断言或操作失败').catch(() => new Error('界面检查失败：当前窗口状态不可读取'))).message);
     console.error(`失败位置：${error.stack?.split('\n').find(line => line.trim().startsWith('at ')) || '未提供位置'}；异常类型：${error.code || error.name}`);
     clearTimeout(timeout); desktop?.dispose(); app.exit(1);
