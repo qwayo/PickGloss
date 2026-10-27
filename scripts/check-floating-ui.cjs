@@ -17,10 +17,14 @@ const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/floating-20261021') : path.resolve(process.argv[outputIndex + 1]);
 const before = process.argv.includes('--before');
 const preview = process.argv.includes('--preview');
+// 隐藏离屏证据使用软件输出设备，避免 CI GPU 合成表面的复制与初始化差异。
+if (!preview) app.disableHardwareAcceleration();
 app.setPath('userData', path.join(os.tmpdir(), `pickgloss-floating-${process.pid}`));
 const windows = [];
 class TestWindow extends electron.BrowserWindow {
-  constructor(options) { super({ ...options, show: false, webPreferences: { ...options.webPreferences, offscreen: !preview, backgroundThrottling: false } }); this.testOptions = options; windows.push(this); }
+  constructor(options) { super({ ...options, show: false, webPreferences: { ...options.webPreferences, offscreen: !preview, backgroundThrottling: false } }); this.testOptions = options; windows.push(this);
+    if (process.argv.includes('--capture-page-failure')) this.webContents.capturePage = async () => { throw Error('UnknownVizError'); };
+  }
   show() {} showInactive() {} focus() {}
   setBounds(bounds) { this.resizeCalls ||= []; this.resizeCalls.push({ width: bounds.width, height: bounds.height }); super.setBounds(bounds); }
   setShape(rects) { this.testShape = rects; super.setShape(rects); }
@@ -36,7 +40,7 @@ class TestWindow extends electron.BrowserWindow {
   }
 }
 let desktop, panel, store, state, failSave = false, fixtureReducedMotion = false, currentPhase = '初始化';
-const errors = [], checks = [];
+const errors = [], checks = [], screenshots = [];
 const evaluate = code => panel.webContents.executeJavaScript(code);
 const driver = createUiDriver(evaluate, { timeoutMs: 7000, intervalMs: 10 });
 async function until(predicate, label) {
@@ -62,9 +66,21 @@ async function click(selector) {
   await driver.click(undefined, { selector, stage: `点击控件 ${selector}` });
 }
 async function shot(name, win = panel) {
+  currentPhase = `截图：${name}`; driver.phase(currentPhase);
   await win.webContents.executeJavaScript('Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))');
   await win.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-  await fs.writeFile(path.join(output, `${before ? '修复前-' : ''}${name}.png`), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
+  const offscreen = win.webContents.isOffscreen();
+  const frame = offscreen ? await new Promise((resolve, reject) => {
+    const finish = (error, bitmap) => { clearTimeout(timer); win.webContents.off('paint', painted); error ? reject(error) : resolve(bitmap); };
+    const painted = (_event, _dirty, bitmap) => finish(bitmap?.isEmpty() === false ? null : Error('离屏绘制返回空画面'), bitmap);
+    const timer = setTimeout(() => finish(Error('离屏重绘帧等待超时')), 5000);
+    win.webContents.once('paint', painted);
+    try { win.webContents.startPainting(); win.webContents.invalidate(); } catch (error) { finish(error); }
+  }) : await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+  assert.equal(frame.isEmpty(), false, '截图证据必须包含真实画面');
+  await fs.writeFile(path.join(output, `${before ? '修复前-' : ''}${name}.png`), frame.toPNG());
+  screenshots.push({ 名称: name, 取证方式: offscreen ? '离屏重绘 paint 帧' : '页面截图', 像素尺寸: frame.getSize() });
+  await fs.writeFile(path.join(output, '截图取证.json'), JSON.stringify(screenshots, null, 2));
 }
 function emit() { desktop.broadcast(state); }
 async function checkPreviewLayouts() {
