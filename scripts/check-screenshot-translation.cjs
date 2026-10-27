@@ -1,5 +1,5 @@
 'use strict';
-// 实际 Windows OCR、单次本机翻译请求、正式预加载与渲染器；不读取真实屏幕或密钥。
+// 普通 UI 使用固定识别材料；原生专项另用 Windows OCR。两者均不读取真实屏幕或密钥。
 const { app, BrowserWindow, ipcMain, nativeImage } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -16,12 +16,23 @@ const { quoteJavaScriptString } = require('./javascript-string.cjs');
 const { defaultAppearance } = require('../src/core/appearance.cjs');
 const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/2026-10-26-translation-compact') : path.resolve(process.argv[outputIndex + 1]);
+const nativeOcr = !process.argv.includes('--ui-only');
+if (!nativeOcr && process.argv.includes('--native-ocr')) throw Error('普通 UI 与原生 OCR 模式不能同时指定');
 app.setPath('userData', path.join(os.tmpdir(), `pickgloss-translation-ui-${process.pid}`));
 app.on('window-all-closed', () => {});
 let fixture, win, overlay, server, current, copied = '', failure = null, completeSelection, failLanguageSave = false;
 let delayNextPreview = false, delayNextRetry = false;
 const calls = [], requests = [], remote = [], consoleErrors = [];
-const report = { 通过: false, 覆盖: '固定中英文图片实际识别、单次本机翻译、正式预加载及隐藏渲染器', 未覆盖: '真实远端翻译质量、原生实屏和其他机器的语言包' };
+const report = { 通过: false, 模式: nativeOcr ? 'Windows OCR 专项' : '普通 UI 合同',
+  覆盖: nativeOcr ? '固定中英文图片实际识别、单次本机翻译、正式预加载及隐藏渲染器' : '固定识别材料、真实本机翻译请求、正式预加载及隐藏渲染器交互',
+  未覆盖: nativeOcr ? ['真实远端翻译质量', '原生实屏', '其他机器的语言包'] : ['Windows OCR 能力和语言包', 'OCR 覆盖像素识别', '真实远端翻译质量', '原生实屏'] };
+async function recognizeFixture(input, singleWord = false) {
+  if (nativeOcr) return recognizeWindows(input);
+  const { width, height } = nativeImage.createFromDataURL(input.imageData).getSize();
+  return { language: 'en-US', angle: 0, blocks: (singleWord ? ['Desktop'] : ['Hello world.', 'Read and translate.']).map((text, index) => ({
+    text, x: width * .03, y: height * (.1 + index * .36), width: width * .55, height: height * .15,
+  })) };
+}
 const evaluate = code => win.webContents.executeJavaScript(code);
 const driver = createUiDriver(evaluate);
 const overlayDriver = createUiDriver(code => overlay.webContents.executeJavaScript(code));
@@ -108,12 +119,14 @@ ipcMain.handle('pickgloss:action', async (_event, action, payload) => {
   if (action === 'set-translation-options') {
     current.translation.options = translationOptions({ ...current.translation.options, ...payload.options,
       showOriginal: payload.options.displayMode === 'compare' ? false : payload.options.showOriginal });
-    current.translation.layout = translationLayout(current.translation.placement, current.translation.options.displayMode);
+    current.translation.layout = translationLayout(current.translation.placement, current.translation.options.displayMode,
+      { contentHeight: current.translation.options.displayMode === 'compare' ? current.translation.contentHeight : undefined });
     win.setBounds({ ...win.getBounds(), width: current.translation.layout.controlBounds.width, height: current.translation.layout.controlBounds.height });
     emit(); return { ok: true };
   }
   if (action === 'translation-content-height') {
-    if (payload.id !== current.translation?.id) return { ok: true };
+    if (payload.id !== current.translation?.id || current.translation.options.displayMode !== 'compare') return { ok: true };
+    current.translation.contentHeight = payload.contentHeight;
     current.translation.layout = translationLayout(current.translation.placement, current.translation.options.displayMode, { contentHeight: payload.contentHeight });
     win.setBounds({ ...win.getBounds(), height: current.translation.layout.controlBounds.height });
     return { ok: true };
@@ -148,7 +161,7 @@ ipcMain.handle('pickgloss:action', async (_event, action, payload) => {
 });
 
 app.whenReady().then(async () => {
-  const timeout = setTimeout(() => { console.error('截图翻译检查超时'); fixture?.destroy(); win?.destroy(); overlay?.destroy(); server?.close(); app.exit(1); }, 45000);
+  const timeout = setTimeout(() => { console.error('截图翻译检查超时'); fixture?.destroy(); win?.destroy(); overlay?.destroy(); server?.close(); app.exit(1); }, nativeOcr ? 120000 : 45000);
   try {
     await fs.mkdir(output, { recursive: true });
     fixture = new BrowserWindow({ width: 920, height: 300, show: false, webPreferences: { sandbox: true, backgroundThrottling: false } });
@@ -158,11 +171,12 @@ app.whenReady().then(async () => {
     await fixture.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     const imageData = (await fixture.webContents.capturePage()).toDataURL();
     const started = performance.now();
-    const recognized = await recognizeWindows({ imageData, sourceLanguage: 'en' });
-    report.英文识别毫秒 = Math.round(performance.now() - started);
+    const recognized = await recognizeFixture({ imageData, sourceLanguage: 'en' });
+    if (nativeOcr) report.英文识别毫秒 = Math.round(performance.now() - started);
     assert.match(recognized.blocks.map(block => block.text).join(' '), /Hello world/i);
     assert.ok(recognized.blocks.every(block => block.x >= 0 && block.y >= 0 && block.width > 0 && block.height > 0));
     assert.equal(recognized.blocks.length, 2, '真实 OCR 对明显大行距保持两段');
+    if (nativeOcr) {
     const paragraphImage = await changedFixture('document.querySelector("main").style.lineHeight="1.3"', imageData);
     const paragraph = await recognizeWindows({ imageData: paragraphImage, sourceLanguage: 'en' });
     assert.equal(paragraph.blocks.length, 1, '真实 OCR 对相近换行合并为一段');
@@ -174,6 +188,7 @@ app.whenReady().then(async () => {
     const chinese = await recognizeWindows({ imageData: chineseImage, sourceLanguage: 'zh-Hans' });
     assert.match(chinese.blocks.map(block => block.text).join('').replace(/\s/g, ''), /截图翻译测试/);
     report.已验证识别语言 = [recognized.language, chinese.language];
+    }
     server = http.createServer(async (req, res) => {
       try {
         const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -203,7 +218,7 @@ app.whenReady().then(async () => {
       }
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const result = await translateScreenshot({ imageData, recognize: recognizeWindows, options: { sourceLanguage: 'en' },
+    const result = await translateScreenshot({ imageData, recognize: recognizeFixture, options: { sourceLanguage: 'en' },
       configs: { text: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: '隔离翻译模型' } } });
     assert.equal(requests.length, 1, '多行文字只发送一次翻译请求');
     assert.equal(result.blocks[0].translation, '你好，世界。', '按编号恢复服务返回的乱序译文');
@@ -225,9 +240,11 @@ app.whenReady().then(async () => {
     await overlay.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     const painted = await overlay.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
     await fs.writeFile(path.join(output, '截图翻译-覆盖.png'), painted.toPNG());
+    if (nativeOcr) {
     const paintedText = await recognizeWindows({ imageData: painted.toDataURL(), sourceLanguage: 'zh-Hans' });
     assert.match(paintedText.blocks.map(block => block.text).join('').replace(/\s/g, ''), /你好.*世界/, '覆盖区域实际像素呈现译文');
     assert.doesNotMatch(paintedText.blocks.map(block => block.text).join(' '), /Hello world/i, '覆盖区域不再显示原英文');
+    }
     assert.equal(await evaluate('document.querySelector(".translation-warning").hidden'), true, '正常完成不显示常驻帮助小字');
     await fs.writeFile(path.join(output, '截图翻译-紧凑菜单.png'), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
     await clickAction('识图重试', '识图重试操作结束');
@@ -375,6 +392,9 @@ app.whenReady().then(async () => {
     await clickAction('查看完整对照', '打开完整对照操作结束');
     await driver.waitFor('document.querySelector(".translation-target-text").textContent.length===1500', '对照保留完整长译文');
     await waitForContentHeight(height => height === 480, '长文对照应增长至 480 CSS 像素上限', { id: current.translation.id, after: longFeedbackCount });
+    // 正式主进程保留本图测量高度；重复对照回执不能依赖渲染器重复发送相同测量。
+    await evaluate(`window.pickgloss.invoke("set-translation-options",{id:${quoteJavaScriptString(current.translation.id)},options:{displayMode:"compare"}})`);
+    assert.equal(win.getBounds().height, 480, '重复对照回执必须保留已测量的长文高度');
     report.长文对照高度 = win.getBounds().height;
     await fs.writeFile(path.join(output, '截图翻译-长文对照.png'), (await win.webContents.capturePage()).toPNG());
     const longFeedbackBeforeRepaint = calls.filter(call => call.action === 'translation-content-height' && call.payload.id === current.translation.id).length;
@@ -403,7 +423,7 @@ app.whenReady().then(async () => {
     const desktopImage = (await fixture.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toDataURL();
     await fs.writeFile(path.join(output, '截图翻译-Desktop原图.png'), Buffer.from(desktopImage.split(',')[1], 'base64'));
     const desktopResult = await translateScreenshot({ imageData: desktopImage, recognize: async input => {
-      const recognition = await recognizeWindows(input); report.单词识别角度 = recognition.angle; return recognition;
+      const recognition = await recognizeFixture(input, true); report.单词识别角度 = recognition.angle; return recognition;
     }, options: { sourceLanguage: 'en' },
       configs: { text: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: '隔离翻译模型' } } });
     assert.equal(desktopResult.blocks[0].text, 'Desktop'); assert.equal(desktopResult.blocks[0].translation, '桌面');
@@ -418,9 +438,11 @@ app.whenReady().then(async () => {
     await overlay.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     const desktopPaint = await overlay.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
     await fs.writeFile(path.join(output, '截图翻译-Desktop覆盖.png'), desktopPaint.toPNG());
+    if (nativeOcr) {
     const desktopText = (await recognizeWindows({ imageData: desktopPaint.toDataURL(), sourceLanguage: 'zh-Hans' })).blocks.map(block => block.text).join('').replace(/\s/g, '');
     assert.match(desktopText, /桌面/, '覆盖区域可实际识别出中文“桌面”'); assert.doesNotMatch(desktopText, /Desktop/i);
     report.单词覆盖像素检查 = 'Desktop → 桌面';
+    }
     const savedDesktop = current.translation;
     const paragraphBounds = { width: 220, height: 180 };
     const paragraphBlocks = ocrBlocks({ blocks: groupOcrLines(Array.from({ length: 6 }, (_, index) => ({
@@ -437,7 +459,7 @@ app.whenReady().then(async () => {
     await overlay.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     const paragraphPaint = await overlay.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
     await fs.writeFile(path.join(output, '截图翻译-六行段落覆盖.png'), paragraphPaint.toPNG());
-    const paragraphText = (await recognizeWindows({ imageData: paragraphPaint.toDataURL(), sourceLanguage: 'zh-Hans' })).blocks.map(block => block.text).join('').replace(/\s/g, '');
+    const paragraphText = nativeOcr ? (await recognizeWindows({ imageData: paragraphPaint.toDataURL(), sourceLanguage: 'zh-Hans' })).blocks.map(block => block.text).join('').replace(/\s/g, '') : null;
     const paragraphPixels = paragraphPaint.toBitmap(), paragraphSize = paragraphPaint.getSize(), inkBands = [];
     for (let y = 0; y < paragraphSize.height; y++) {
       let ink = 0;
@@ -450,8 +472,8 @@ app.whenReady().then(async () => {
       if (last && y - last.bottom <= 3) last.bottom = y; else inkBands.push({ top: y, bottom: y });
     }
     assert.equal(inkBands.length, 6, '白底实际像素应有六行文字，不能只剩一个箭头');
-    assert.match(paragraphText, /第六行译文/, '末行译文完整显示');
-    report.段落覆盖像素检查 = { 文字行数: inkBands.length, 墨迹范围: inkBands, 原生OCR末行: '第六行译文' };
+    if (nativeOcr) assert.match(paragraphText, /第六行译文/, '末行译文完整显示');
+    report.段落覆盖像素检查 = { 文字行数: inkBands.length, 墨迹范围: inkBands, 原生OCR末行: nativeOcr ? '第六行译文' : '未验证' };
     current.translation = savedDesktop; overlay.setBounds(savedDesktop.layout.bounds); emit();
     await overlayDriver.waitFor(`document.querySelector('.translation-image img')?.src === ${quoteJavaScriptString(desktopImage)}`, '恢复单词场景');
     report.显示选中态 = [];
@@ -584,9 +606,9 @@ app.whenReady().then(async () => {
     assert.equal(remote.length, 0, '正式渲染器不请求外网');
     assert.equal(consoleErrors.length, 0, '正式渲染器没有脚本错误');
     report.翻译请求数 = requests.length; report.通过 = true;
-    console.log(`截图翻译检查通过：真实中英文 OCR、单次批量翻译、覆盖像素 Desktop→桌面、双模式与按住原图预览/松开/快速输入/失焦/键盘/busy锁、语言保存/失败恢复/连续框选、常规/深度快捷切换、联网来源与深浅选中态、对照/复制/重试/长文；英文 OCR ${report.英文识别毫秒} 毫秒；报告 ${output}`);
+    console.log(`截图翻译检查通过：${report.模式}；单次批量翻译、双模式与原图预览、语言保存失败恢复、常规/深度切换、联网来源、对照/复制/重试/长文；报告 ${output}`);
   } catch (error) {
-    failure = error; report.错误 = error.message;
+    failure = error; report.错误 = error.message; report.错误码 = error.code;
     if (win && !win.isDestroyed()) {
       report.界面诊断 = await evaluate('({image:document.querySelector(".translation-image img")?{complete:document.querySelector(".translation-image img").complete,width:document.querySelector(".translation-image img").naturalWidth}:null,warning:document.querySelector(".translation-warning")?.textContent,status:document.querySelector(".translation-status")?.textContent,canvas:Boolean(document.querySelector("canvas"))})').catch(() => null);
     }

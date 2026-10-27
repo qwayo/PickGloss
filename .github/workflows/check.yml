@@ -11,6 +11,10 @@ on:
         description: '另外执行打包与真实 EXE 本机服务贯通（不发布）'
         type: boolean
         default: false
+      verify_ocr:
+        description: '另外验证 Windows OCR 与中英文语言能力；缺失时专项失败'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +26,8 @@ jobs:
     steps:
       - name: 检出源码
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: 安装 Node.js
         uses: actions/setup-node@v7
         with:
@@ -40,13 +46,25 @@ jobs:
         run: npm run check:publication
       - name: 自动化测试
         run: npm test -- --test-concurrency=1
-      - name: 隐藏界面检查（不代表原生实屏验收）
-        run: npm run check:ui
-      - name: 打包与冻结便携包验证
-        if: github.event_name == 'workflow_dispatch' && inputs.verify_package
-        run: npm run package
-      - name: 保留隔离界面失败证据
-        if: failure()
+      - name: 根据改动执行专项并记录未覆盖能力
+        shell: pwsh
+        env:
+          CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
+          CHECK_EVENT: ${{ github.event_name }}
+          VERIFY_PACKAGE: ${{ inputs.verify_package }}
+          VERIFY_OCR: ${{ inputs.verify_ocr }}
+        run: |
+          $checkArgs = @('scripts/check-changes.cjs', '--output-dir', 'output/verification/changes-ci')
+          if ($env:CHECK_BASE -match '^0+$') {
+            $checkArgs += @('--base', 'HEAD', '--all')
+          }
+          if ($env:CHECK_EVENT -eq 'workflow_dispatch') { $checkArgs += '--ui-all' }
+          if ($env:VERIFY_PACKAGE -eq 'true') { $checkArgs += '--package' }
+          if ($env:VERIFY_OCR -eq 'true') { $checkArgs += '--ocr' }
+          & node @checkArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 保留检查选择、能力边界与隔离证据
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: 界面失败诊断

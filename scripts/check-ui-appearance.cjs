@@ -7,6 +7,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { setTimeout: delay } = require('node:timers/promises');
+const { createUiDriver } = require('./ui-driver.cjs');
 const rootIndex = process.argv.indexOf('--app-root');
 const sourceRoot = rootIndex >= 0 ? path.resolve(process.argv[rootIndex + 1]) : path.resolve(__dirname, '..');
 const { createStore } = require(path.join(sourceRoot, 'src/core/store.cjs'));
@@ -24,8 +25,12 @@ async function waitFor(predicate, label) {
   throw Error(`等待${label}超时：${await evaluate('document.body.innerText')}`);
 }
 const ready = () => waitFor(() => evaluate(`Boolean(document.querySelector('.panel'))`), '正式界面');
-async function click(selector) { await evaluate(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]')||node.disabled)throw Error('操作目标不可见或禁用');node.click();})()`); }
-async function input(selector, value) { await evaluate(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]'))throw Error('输入目标不可见');node.focus();node.value=${quoteJavaScriptString(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`); }
+const driver = createUiDriver(evaluate);
+async function readyControl(selector) {
+  await driver.waitFor(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});return Boolean(node?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})&&!node.disabled)})()`, '控件可见、启用且进入动画结束', { allowErrors: true });
+}
+async function click(selector) { await readyControl(selector); await driver.click(undefined, { selector, allowErrors: true }); }
+async function input(selector, value) { await readyControl(selector); await evaluate(`(()=>{const nodes=document.querySelectorAll(${quoteJavaScriptString(selector)});const node=nodes[0];if(nodes.length!==1||!node.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})||node.disabled)throw Error('输入目标必须唯一、可见且启用');node.focus();node.value=${quoteJavaScriptString(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`); }
 async function shot(name) {
   await evaluate(`Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished.catch(()=>{})))`);
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
@@ -181,13 +186,22 @@ app.whenReady().then(async () => {
     await shot('后台服务保存失败-可定位.png');
     await click('[data-settings-save-issues] button:first-of-type');
     await waitFor(() => evaluate(`document.querySelector('[name="text-provider"]').value==='custom' && document.querySelector('[name="text-baseUrl"]').value==='invalid-host'`), '定位失败厂商并保留原输入');
+    const beforeLeave = calls.length;
+    await click('.panel-bar button[title="返回"]');
+    await waitFor(() => evaluate(`document.querySelector('.panel-bar button[title="返回"]')?.disabled===false`), '保存失败后的返回动作结束');
+    assert.equal(fixture.view, 'settings', '设置保存失败必须阻止离页');
+    assert.equal(calls.slice(beforeLeave).includes('navigate'), false, '保存失败不能发送后续导航');
+    await click('.panel-bar button[title="关闭窗口"]');
+    await waitFor(() => evaluate(`document.querySelector('.panel-bar button[title="关闭窗口"]')?.disabled===false`), '保存失败后的关闭动作结束');
+    assert.equal(calls.slice(beforeLeave).includes('close'), false, '保存失败不能发送关闭');
+    assert.equal(await evaluate(`document.querySelector('[name="text-baseUrl"]').value`), 'invalid-host', '离页及关闭被阻断后仍保留失败草稿');
     await click('[data-settings-save-issues] button:nth-of-type(2)');
     await waitFor(() => evaluate(`document.querySelector('[data-settings-save-issues]').hidden && document.querySelector('[name="text-provider"]').value==='mimo'`), '显式恢复后解除保存阻断');
     assert.equal((await store.getSettings()).text.providerId, 'mimo', '放弃未保存修改不改动当前已生效的厂商');
     await input('[name="text-provider"]', 'custom'); await evaluate(`document.querySelector('[name="text-provider"]').dispatchEvent(new Event('change',{bubbles:true}))`);
     await waitFor(async () => (await store.getSettings()).text.providerId === 'custom', '恢复原服务用于后续检查');
     assert.equal((await store.getSettings()).text.baseUrl, savedText.baseUrl);
-    observations.push({ 检查: '后台厂商失败可定位及显式恢复', 草稿保留: true, 有效配置未被恢复动作改写: true });
+    observations.push({ 检查: '后台厂商失败可定位、离页和关闭阻断及显式恢复', 草稿保留: true, 有效配置未被恢复动作改写: true });
     await input('[data-field="text-model"]', '自动保存的服务草稿');
     await click('.settings-navigation button:nth-child(3)');
     await waitFor(async () => fixture.settingsSection === 'appearance', '设置分类同步');

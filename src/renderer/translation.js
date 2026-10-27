@@ -265,6 +265,8 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
   function render(data, availableLanguages, availablePreferences) {
     rememberComparisonView();
     if (originalHold && (!data || data.id !== originalHold.id || data.status !== 'complete' || data.options.displayMode !== 'overlay')) endOriginalHold();
+    // 切换期间的旧测量可能被主进程忽略；回到对照时必须重新提交，不能被相同高度去重。
+    if (data?.options.displayMode === 'compare' && current?.options.displayMode !== 'compare') measuredHeight = { id: data.id, value: null };
     current = data; languages = availableLanguages || languages;
     if (availablePreferences !== undefined) preferences = availablePreferences;
     const token = ++generation;
