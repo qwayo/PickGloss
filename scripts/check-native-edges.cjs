@@ -14,6 +14,8 @@ const { createUiDriver } = require('./ui-driver.cjs');
 const { sampleEdges } = require('./native-edge-samples.cjs');
 const outputArg = process.argv.indexOf('--output-dir');
 const output = path.resolve(outputArg < 0 ? path.join(__dirname, '../output/verification', `native-${Date.now()}`) : process.argv[outputArg + 1]);
+const replayArg = process.argv.indexOf('--replay-dir');
+const replayDirectory = replayArg < 0 ? null : path.resolve(process.argv[replayArg + 1]);
 app.setPath('userData', path.join(os.tmpdir(), `pickgloss-native-edges-${process.pid}`));
 app.on('window-all-closed', () => {});
 const made = [];
@@ -24,10 +26,15 @@ const state = { view: 'explain', history: [], pinned: false, wide: false, settin
     independent: { draft: '', status: 'idle', messages: [] }, visual: { draft: '', status: 'idle', messages: [] },
   },
 } };
-const report = { 通过: false, 覆盖: 'Windows CopyFromScreen 最终合成；仅自有测试窗及背景', 系统: os.release(), Electron: process.versions.electron, 参数: { 逻辑宽: 300, 逻辑高: 483, 原生圆角DIP: 8, 普通边差阈值: 6, 光条红通道阈值: 200 }, 场景: [], 回归检出: [], 未覆盖: ['其他机器、其他 DPI 和锁屏桌面'] };
+const report = { 通过: false, 覆盖: 'Windows CopyFromScreen 最终合成；仅自有测试窗及背景', 系统: os.release(), Electron: process.versions.electron, 参数: { 逻辑宽: 300, 逻辑高: 483, 调整后逻辑宽: 321, 调整后逻辑高: 487, 原生圆角DIP: 8, 客户区边差阈值: 6, 外缘边差阈值: 8, 光条红通道阈值: 200, 四边厚度最大差物理像素: 1, 柔光允许最大反向跳变: 6, 柔光最小衰减幅度: 10 }, 场景: [], 回归检出: [], 未覆盖: ['其他机器、其他 DPI、真实鼠标拖边和锁屏桌面'] };
 const emit = () => desktop?.broadcast(state);
 const evaluate = code => panel.webContents.executeJavaScript(code);
 const driver = createUiDriver(evaluate);
+function sampleImage(image, { scale, pinned, client, nativeBorder }) {
+  const { width, height } = image.getSize(), bitmap = image.toBitmap();
+  const pixel = (x, y) => { const offset = (y * width + x) * 4; return [bitmap[offset + 2], bitmap[offset + 1], bitmap[offset]]; };
+  return sampleEdges({ width, height, pixel, scale, pinned, client, nativeBorder });
+}
 class TrackedWindow extends BrowserWindow {
   constructor(options) { super({ ...options, webPreferences: { ...options.webPreferences, backgroundThrottling: false } }); made.push(this); }
 }
@@ -38,22 +45,23 @@ ipcMain.handle('pickgloss:action', async (event, action) => {
   return { ok: false, error: '隔离检查未授权此动作' };
 });
 function handle(win) { const bytes = win.getNativeWindowHandle(); return String(bytes.length === 8 ? bytes.readBigUInt64LE() : bytes.readUInt32LE()); }
-async function capture(name, pinned) {
-  panel.moveTop(); panel.focus();
+async function capture(name, pinned, beforeSample) {
+  panel.show(); panel.moveTop(); panel.focus();
   await delay(180);
+  if (beforeSample) { await beforeSample(); await delay(80); }
   const imagePath = path.join(output, `${name}.png`);
   const captured = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'capture-owned-window.ps1'), '-PanelHandle', handle(panel), '-BackgroundHandle', handle(background), '-OwnerPid', String(process.pid), '-OutputPath', imagePath], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
-  if (captured.error || captured.status !== 0) throw Error(`实屏捕获失败：${captured.stderr || captured.error?.code}`);
+  if (captured.error || captured.status !== 0) throw Error(`实屏捕获失败（自有主窗可见=${panel.isVisible()}，背景可见=${background.isVisible()}）：${captured.stderr || captured.error?.code}`);
   const rect = JSON.parse(captured.stdout.trim()), image = nativeImage.createFromPath(imagePath);
   assert.equal(image.isEmpty(), false, '实屏图片必须能解码');
-  const { width, height } = image.getSize(), bitmap = image.toBitmap();
+  const { width, height } = image.getSize();
   assert.equal(width, rect.width, '图片宽度必须匹配实际物理矩形');
   assert.equal(height, rect.height, '图片高度必须匹配实际物理矩形');
   const display = screen.getDisplayMatching(panel.getBounds());
-  const pixel = (x, y) => { const offset = (y * width + x) * 4; return [bitmap[offset + 2], bitmap[offset + 1], bitmap[offset]]; };
-  const result = sampleEdges({ width, height, pixel, scale: display.scaleFactor, pinned, client: rect.client });
-  const layout = await evaluate('({dpr:devicePixelRatio,material:document.documentElement.dataset.material,native:document.documentElement.classList.contains("native-rounded-frame")})');
-  return { 名称: name, 图片: path.basename(imagePath), 实际矩形: rect, 逻辑矩形: panel.getBounds(), DPI: display.scaleFactor * 96, 缩放: display.scaleFactor, 请求材质: state.settings.prefs.appearance.current.material, 实际界面: layout, 原生边色: panel.getAccentColor(), ...result };
+  const layout = await evaluate('({dpr:devicePixelRatio,material:document.documentElement.dataset.material,native:document.documentElement.classList.contains("native-rounded-frame"),borderSuppressed:document.documentElement.style.getPropertyValue("--native-border-suppressed")==="1",frameCss:Object.fromEntries([...document.documentElement.style].filter(key=>key.startsWith("--native-")).map(key=>[key,document.documentElement.style.getPropertyValue(key)])),viewport:{width:innerWidth,height:innerHeight},panel:document.querySelector(".panel")?.getBoundingClientRect().toJSON(),frame:document.querySelector(".native-pin-frame")?.getBoundingClientRect().toJSON()})');
+  if (rect.nativeBorder.suppressed === null) { rect.nativeBorder.suppressed = layout.borderSuppressed; rect.nativeBorder.抑制状态来源 = 'DwmSetWindowAttribute 成功应答；当前系统不支持读回边色，仍以实屏像素检出黑边'; }
+  const result = sampleImage(image, { scale: display.scaleFactor, pinned, client: rect.client, nativeBorder: rect.nativeBorder });
+  return { 名称: name, 图片: path.basename(imagePath), 固定描边: pinned, 实际矩形: rect, 逻辑矩形: panel.getBounds(), DPI: display.scaleFactor * 96, 缩放: display.scaleFactor, 请求材质: state.settings.prefs.appearance.current.material, 实际界面: layout, 原生边色: panel.getAccentColor(), ...result };
 }
 function cleanup() {
   desktop?.dispose();
@@ -64,6 +72,27 @@ app.whenReady().then(async () => {
   const watchdog = setTimeout(() => { cleanup(); console.error('原生实屏检查超时；窗口已关闭'); app.exit(1); }, 240000);
   try {
     await fs.mkdir(output, { recursive: true });
+    if (replayDirectory) {
+      const baseline = JSON.parse(await fs.readFile(path.join(replayDirectory, '原生边缘检查.json'), 'utf8'));
+      for (const scene of baseline.场景) {
+        const image = nativeImage.createFromPath(path.join(replayDirectory, scene.图片));
+        assert.equal(image.isEmpty(), false, `${scene.名称} 基线图片必须能解码`);
+        report.场景.push({ ...scene, ...sampleImage(image, { scale: scene.缩放, pinned: scene.固定描边 ?? scene.名称.endsWith('-orange'), client: scene.实际矩形.client, nativeBorder: scene.实际矩形.nativeBorder }) });
+      }
+      for (const scene of baseline.回归检出 || []) {
+        const image = nativeImage.createFromPath(path.join(replayDirectory, scene.图片));
+        assert.equal(image.isEmpty(), false, `${scene.名称} 受控回归图片必须能解码`);
+        report.回归检出.push({ ...scene, ...sampleImage(image, { scale: scene.缩放, pinned: scene.固定描边 ?? Boolean(scene.corners), client: scene.实际矩形.client, nativeBorder: scene.实际矩形.nativeBorder }) });
+      }
+      report.覆盖 = '重放既有自有测试窗实屏图片；不创建窗口';
+      report.基线目录 = replayDirectory;
+      const failures = report.场景.filter(scene => !scene.passed);
+      assert.equal(failures.length, 0, `边缘症状检出：${failures.map(scene => scene.名称).join('、')}`);
+      assert.equal(report.回归检出.every(scene => !scene.passed), true, '重放必须仍能检出所有受控回归');
+      report.通过 = true;
+      console.log(`原生边缘图片重放通过：${report.场景.length} 个场景、${report.回归检出.length} 类受控回归；报告 ${output}`);
+      return;
+    }
     if (process.platform !== 'win32' || Number(os.release().split('.')[2]) < 22000) throw Error('当前系统不支持待验证的 Windows 11 DWM 路径，原生实屏未覆盖');
     report.材质能力 = { 版本支持磨砂: Number(os.release().split('.')[2]) >= 22621, 减少透明: nativeTheme.prefersReducedTransparency, 高对比: nativeTheme.shouldUseHighContrastColors, 强制颜色: nativeTheme.inForcedColorsMode };
     const area = screen.getPrimaryDisplay().workArea;
@@ -92,22 +121,33 @@ app.whenReady().then(async () => {
       const result = await capture(`${mode}-${material}-${pin}`, pin === 'orange');
       report.场景.push(result);
       if (material !== result.实际界面.material) report.未覆盖.push(`${result.名称} 请求的磨砂回退为 ${result.实际界面.material}，磨砂未覆盖`);
-      assert.equal(result.passed, true, `${result.名称} 边缘采样失败`);
     }
-    // 仅改变自有测试窗的 CSS；正式源码和用户实例保持原状。
-    for (const [name, pinned, css] of [
-      ['普通外缘灰线', false, '.panel{border-color:rgb(85,85,85)!important}'],
-      ['重复裁切与底板凸出', true, '.panel{border-radius:12px!important;overflow:hidden!important}'],
+    panel.setBounds({ ...panel.getBounds(), width: 321, height: 487 });
+    for (const material of ['solid', 'glass']) for (const pin of ['idle', 'orange']) {
+      state.settings.prefs.appearance = { current: { mode: 'dark', material }, pinOutline: 'orange' };
+      state.pinned = pin === 'orange'; desktop.setAppearance(state.settings.prefs.appearance); desktop.setPinned(state.pinned); emit();
+      await delay(220);
+      report.场景.push(await capture(`dark-${material}-${pin}-resized`, state.pinned));
+    }
+    const failures = report.场景.filter(scene => !scene.passed);
+    assert.equal(failures.length, 0, `边缘症状检出：${failures.map(scene => scene.名称).join('、')}`);
+    // 仅改变自有测试窗的 CSS 或原生边色；正式源码和用户实例保持原状。
+    for (const [name, pinned, css, material, beforeSample] of [
+      ['普通外缘灰线', false, '.panel{border-color:rgb(85,85,85)!important}', 'solid'],
+      ['重复裁切与底板凸出', true, '.panel{border-radius:12px!important;overflow:hidden!important}', 'solid'],
+      ['四边光条不等宽', true, '.native-pin-cutout{x:calc(var(--native-pin-left) + 1.2px)!important}', 'solid'],
+      ['内发光与光条留缝', true, 'html.native-rounded-frame .panel.is-pinned::after{left:calc(var(--native-pin-left) - var(--actual-panel-border) + .8px)!important;height:calc(var(--native-client-height) - var(--native-pin-top) - var(--native-pin-bottom) - .4px)!important}', 'solid'],
+      ['磨砂原生实体黑边', false, null, 'glass', () => panel.setAccentColor('#252525')],
     ]) {
-      state.settings.prefs.appearance = { current: { mode: 'dark', material: 'solid' }, pinOutline: 'orange' };
+      state.settings.prefs.appearance = { current: { mode: 'dark', material }, pinOutline: 'orange' };
       state.pinned = pinned; desktop.setAppearance(state.settings.prefs.appearance); desktop.setPinned(pinned); emit();
       await delay(220);
-      const key = await panel.webContents.insertCSS(css);
+      const key = css ? await panel.webContents.insertCSS(css) : null;
       try {
-        const result = await capture(`受控回归-${name}`, pinned);
+        const result = await capture(`受控回归-${name}`, pinned, beforeSample);
         report.回归检出.push(result);
         assert.equal(result.passed, false, `工具没有检出${name}`);
-      } finally { await panel.webContents.removeInsertedCSS(key); }
+      } finally { if (key) await panel.webContents.removeInsertedCSS(key); }
     }
     report.通过 = true;
     console.log(`原生实屏边缘检查通过：${report.场景.length} 个场景、${report.回归检出.length} 类受控回归；DPI ${report.场景[0].DPI}；报告 ${output}`);

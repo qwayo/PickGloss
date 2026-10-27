@@ -327,3 +327,25 @@ test('收到完成标记后，不合作的正文取消不能阻塞回答收尾',
   ]);
   assert.equal(result,'已完成的固定回答');assert.ok(cancelled>=1);
 });
+
+test('流式请求只通过受限generationOptions发送显式思考参数', async () => {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push(JSON.parse(options.body));
+    return Response.json({ choices: [{ message: { content: '完成' } }] });
+  };
+  await streamCompletion({ config, messages: [{ role: 'user', content: '深度任务' }],
+    generationOptions: { thinkingType: 'enabled', reasoningEffort: 'max' }, fetchImpl });
+  await streamCompletion({ config, messages: [{ role: 'user', content: '常规任务' }],
+    generationOptions: { thinkingType: 'disabled' }, fetchImpl });
+  await streamCompletion({ config, messages: [{ role: 'user', content: '既有调用' }], fetchImpl });
+  assert.deepEqual(requests[0].thinking, { type: 'enabled' });
+  assert.equal(requests[0].reasoning_effort, 'max');
+  assert.deepEqual(requests[1].thinking, { type: 'disabled' });
+  assert.equal('reasoning_effort' in requests[1], false);
+  assert.equal('thinking' in requests[2], false);
+  assert.equal('reasoning_effort' in requests[2], false);
+  let sent = false;
+  await assert.rejects(streamCompletion({ config, messages: [], generationOptions: { thinkingType: 'ultra' }, fetchImpl: async () => { sent = true; } }), { code: 'INVALID_INPUT' });
+  assert.equal(sent, false);
+});

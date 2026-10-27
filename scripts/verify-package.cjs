@@ -74,7 +74,14 @@ async function scan(root, relative = '') {
   const source = [];
   for (const item of manifest.source) source.push({ path: item.path, sha256: await digest(path.join(packageDirectory, 'resources', 'app', item.path)) });
   if (fingerprint(source) !== manifest.sourceFingerprint || source.some((item, index) => item.sha256 !== manifest.source[index].sha256)) throw new Error('包内源码指纹不匹配。');
-  if (await digest(path.join(packageDirectory, 'resources', 'native', 'ContextProbe.exe')) !== manifest.nativeSha256) throw new Error('原生助手摘要不匹配。');
+  const nativeFiles = manifest.nativeFiles || [{ path: 'resources/native/ContextProbe.exe', sha256: manifest.nativeSha256 }];
+  for (const [bridge, binary] of [['window-appearance.cjs', 'WindowAppearance.exe'], ['screen-capture.cjs', 'ScreenCapture.exe']]) {
+    if (manifest.source.some(item => item.path === `src/windows/${bridge}`) &&
+        !nativeFiles.some(item => item.path === `resources/native/${binary}`)) throw new Error(`原生助手清单缺少 ${binary}。`);
+  }
+  for (const item of nativeFiles) {
+    if (await digest(path.join(packageDirectory, item.path)) !== item.sha256) throw new Error(`原生助手摘要不匹配：${item.path}`);
+  }
   const archive = path.join(output, `${manifest.candidateId}.zip`);
   const listed = spawnSync('tar', ['-tf', archive], { encoding: 'utf8', windowsHide: true });
   if (listed.status !== 0) throw new Error('压缩包无法读取。');

@@ -21,7 +21,7 @@ async function harness(t, { isolated = false, blocked = [], initial = {} } = {})
     unregister(accelerator) { calls.unregisters.push(accelerator); registered.delete(accelerator); },
     registerAll() { assert.fail('不能批量修改其它模块快捷键'); }, unregisterAll() { assert.fail('不能注销其它模块快捷键'); },
   };
-  const desktop = { openPanel() {}, captureState: () => null, broadcast() {}, initTray() {}, setOrb() {}, startSelection() {}, setAppearance() {},
+  const desktop = { openPanel() {}, captureState: () => null, broadcast() {}, initTray() {}, prepareCapture() {}, setOrb() {}, startSelection() {}, setAppearance() {},
     restoreWindowState: () => false, setPinned: value => calls.pin.push(value), setWide: value => calls.wide.push(value), hidePanel: () => calls.hidden++,
     beginCapture: async () => calls.captures++, menu: payload => calls.menu.push(payload), menuReady: payload => payload,
     closeMenu: payload => { calls.menuClosed.push(payload); return true; }, flushDrafts: async () => true, flushWindowState: async () => true, dispose() {},

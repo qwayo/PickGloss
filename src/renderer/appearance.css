@@ -27,6 +27,20 @@
 .appearance-page .appearance-helper{font-size:13px;line-height:1.65;color:var(--muted);margin:9px 0 0;overflow-wrap:anywhere}
 .appearance-page .appearance-fallback{padding:8px 10px;background:var(--warning-bg);border-radius:6px;color:var(--ink)}
 .appearance-page .appearance-presets{display:flex;flex-direction:column;gap:4px}
+.appearance-page .appearance-preset-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:23px;margin-bottom:7px}
+.appearance-page .appearance-preset-heading h3{margin:0}
+.appearance-page .appearance-compact-icon{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;min-height:24px;padding:5px;border:0;border-radius:5px;background:transparent;flex:none}
+.appearance-page .appearance-compact-icon .appearance-icon{width:14px;height:14px}
+.appearance-page .appearance-compact-icon[aria-pressed=true]{background:var(--selected)}
+.appearance-page .appearance-compact-icon:hover,.appearance-page .appearance-preset-selection button:hover{background:var(--soft)}
+.appearance-page .appearance-preset-selection{padding:4px 5px;margin-bottom:5px;border:1px solid var(--line);border-radius:5px;background:var(--surface-secondary)}
+.appearance-page .appearance-preset-toolbar{display:flex;align-items:center;gap:3px}
+.appearance-page .appearance-preset-count{margin-right:auto;font-size:11px;white-space:nowrap}
+.appearance-page .appearance-preset-selection button{min-height:24px;padding:2px 5px;border:0;border-radius:4px;background:transparent;font-size:11px;line-height:1.5}
+.appearance-page .appearance-preset-selection .is-danger{color:var(--danger)}
+.appearance-page .appearance-preset-confirm{margin-top:5px;padding-top:5px;border-top:1px solid var(--line);font-size:11px;line-height:1.5}
+.appearance-page .appearance-preset-confirm p{margin:0 0 4px}
+.appearance-page .appearance-preset-confirm button+button{margin-left:4px}
 .appearance-page .appearance-preset{display:flex;align-items:center;gap:10px;min-height:40px;width:100%;padding:8px 10px;border:1px solid transparent;border-radius:7px;text-align:left;background:transparent;font-size:14px;line-height:1.6}
 .appearance-page .appearance-preset[aria-pressed=true]{border-color:var(--line);background:var(--selected);color:var(--selected-text)}
 .appearance-page .appearance-preset-dot{width:20px;height:20px;flex:none;border-radius:50%;background:var(--preset-color);box-shadow:inset 0 0 0 1px #8885}

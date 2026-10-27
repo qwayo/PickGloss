@@ -6,14 +6,17 @@ const { BrowserWindow, Menu, Tray, nativeImage, nativeTheme, systemPreferences, 
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const PIN_OUTLINE_COLORS = Object.freeze({ orange: '#dc873d', amber: '#cf9f37', blue: '#5095e8', violet: '#a47ee2', mint: '#4db393', silver: '#a8b2c1' });
+const { createWindowAppearance } = require('./window-appearance.cjs');
 // 两种默认尺寸保持独立；用户自定义尺寸与位置由主进程持久化。
 const DEFAULT_PANEL_SIZES = Object.freeze({
   compact: Object.freeze({ width: 300, height: 483 }),
   reading: Object.freeze({ width: 860, height: 690 }),
 });
 const { clampWindow, cropPixels, resizePanel, fitWindow, placeMenu, placeSelectionEntry } = require('./geometry.cjs');
+const { MAX_TRANSLATION_HEIGHT, translationLayout } = require('./translation-layout.cjs');
+const { createScreenCapture } = require('./screen-capture.cjs');
 
-function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, onWindowState }) {
+function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, onWindowState, captureFactory = createScreenCapture }) {
   const windows = new Map();
   const html = path.join(__dirname, '..', 'renderer', 'index.html');
   const htmlUrl = pathToFileURL(html).href;
@@ -34,8 +37,11 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   let menuAnchor = null, menuHeight = 452;
   const programmedSizes = new WeakMap();
   const windowMaterials = new WeakMap();
+  const windowAppearances = new WeakMap(), windowAccentColors = new WeakMap();
   const deliveredCaptureIds = new WeakMap();
   let captureReadyTimer = null;
+  let translationPlacement = null;
+  let captureReader = null;
   // Windows 11 由 DWM 同时裁切背景材质和内容；透明分层窗口、HRGN 都会禁用系统抗锯齿圆角。
   const nativeRoundedFrame = process.platform === 'win32' && Number(os.release().split('.')[2]) >= 22000;
   let layoutSerial = 0;
@@ -44,7 +50,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     if (!capture?.image) return null;
     // 全尺寸 JPEG 仅用于背景预览，编码一次；原始 NativeImage 保留，裁剪仍输出原像素 PNG。
     if (!capture.imageData) capture.imageData = 'data:image/jpeg;base64,' + capture.image.toJPEG(92).toString('base64');
-    return { id: capture.id, imageData: capture.imageData, width: capture.display.bounds.width, height: capture.display.bounds.height };
+    return { id: capture.id, mode: capture.mode, method: capture.method, imageData: capture.imageData, width: capture.display.bounds.width, height: capture.display.bounds.height };
   }
 
   function surfaceFor(event) {
@@ -53,12 +59,16 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   }
 
   function surfaceState(kind, win, state, forceImage = false) {
+    if (kind === 'translation' || kind === 'translation-overlay') return { ...state,
+      status: kind === 'translation' ? { ...state.status, appearanceMaterial: windowMaterials.get(win) || 'solid', nativeRoundedFrame: false } : state.status,
+      session: null, history: [], capture: null };
+    state = { ...state, translation: null };
     if (kind === 'selection') return { ...state, capture: null, selectionEntry };
     if (kind !== 'capture') return { ...state, capture: null };
     const image = captureState();
     if (!image) { deliveredCaptureIds.delete(win.webContents); return { ...state, capture: null }; }
     if (!forceImage && deliveredCaptureIds.get(win.webContents) === image.id) {
-      return { ...state, capture: { id: image.id, width: image.width, height: image.height } };
+      return { ...state, capture: { id: image.id, mode: image.mode, width: image.width, height: image.height } };
     }
     deliveredCaptureIds.set(win.webContents, image.id);
     return { ...state, capture: image };
@@ -71,7 +81,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
 
   function broadcast(state) {
     // 内存中只保留状态元数据，整屏图像仅归本次截图所有。
-    lastState = { ...state, capture: state.capture ? { id: state.capture.id, width: state.capture.width, height: state.capture.height } : null };
+    lastState = { ...state, capture: state.capture ? { id: state.capture.id, mode: state.capture.mode, width: state.capture.width, height: state.capture.height } : null };
     for (const [kind, win] of windows) if (!win.isDestroyed() && !win.webContents.isLoading()) win.webContents.send('pickgloss:state', surfaceState(kind, win, state));
   }
 
@@ -211,8 +221,36 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
 
   function applyWindowAppearance(kind, win) {
     // 悬浮球和划词入口始终使用透明窗口，截图框选保持自己的不透明画布。
+    if (kind === 'translation') {
+      if (!windowAppearances.has(win)) {
+        const frame = createWindowAppearance(win, { clipRadius: 14,
+          onReady() { if (!win.isDestroyed()) { applyWindowAppearance(kind, win); onStatus({ appearanceMaterial }); } },
+          onError() {
+            if (win.isDestroyed()) return;
+            windowAppearances.set(win, null); applyWindowAppearance(kind, win); onStatus({ appearanceMaterial });
+          } });
+        windowAppearances.set(win, frame);
+      }
+      const frame = windowAppearances.get(win), requested = glassSupported();
+      frame?.setBackdrop(requested);
+      windowMaterials.set(win, requested && frame?.isReady ? 'glass' : 'solid');
+      frame?.apply('none');
+      // 透明控件窗保持透明；系统实时背景由助手按同一圆角裁切，备用底色由 CSS 绘制。
+      return;
+    }
     if (kind !== 'panel') return;
+    if (nativeRoundedFrame && !windowAppearances.has(win)) {
+      const frame = createWindowAppearance(win, { onError() {
+        if (win.isDestroyed()) return;
+        windowAppearances.set(win, null);
+        applyWindowAppearance(kind, win);
+        onStatus({ appearanceMaterial });
+      } });
+      windowAppearances.set(win, frame);
+    }
+    const frame = windowAppearances.get(win);
     let material = appearance.current?.material === 'glass' && glassSupported() && typeof win.setBackgroundMaterial === 'function' ? 'glass' : 'solid';
+    if (nativeRoundedFrame && !frame) material = 'solid';
     if (windowMaterials.get(win) !== material) {
       try { win.setBackgroundMaterial?.(material === 'glass' ? 'acrylic' : 'none'); }
       catch { material = 'solid'; try { win.setBackgroundMaterial?.('none'); } catch {} }
@@ -225,9 +263,14 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     const mono = current.accent === '#000000' && current.tint === '#bfc2c8';
     const paper = !current.tint || mono ? base : '#' + [1,3,5].map(i => Math.round(parseInt(current.tint.slice(i, i + 2), 16) * .06 + parseInt(base.slice(i, i + 2), 16) * .94).toString(16).padStart(2, '0')).join('');
     win.setBackgroundColor?.(nativeRoundedFrame && material === 'solid' ? paper : '#00000000');
-    // 系统边框与自绘光条同色；取消固定或无描边时回到纸面色，避免外露另一圈灰边。
+    // 磨砂的颜色来自桌面合成，不能用不透明纸面色模拟；NONE 仅停止画边，不移除缩放与圆角。
     const pinColor = PIN_OUTLINE_COLORS[appearance.pinOutline || 'orange'];
-    if (nativeRoundedFrame) win.setAccentColor?.(pinned && pinColor ? pinColor : paper);
+    if (nativeRoundedFrame) {
+      const border = pinned && pinColor ? pinColor : material === 'glass' ? 'none' : paper;
+      const accent = border === 'none' ? false : border;
+      if (windowAccentColors.get(win) !== accent) { win.setAccentColor?.(accent); windowAccentColors.set(win, accent); }
+      frame?.apply(border);
+    }
     appearanceMaterial = material;
   }
 
@@ -301,6 +344,10 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     win.webContents.on('did-finish-load', () => { if (lastState && !win.isDestroyed()) win.webContents.send('pickgloss:state', surfaceState(kind, win, lastState)); });
     win.webContents.on('render-process-gone', () => {
       if(kind==='capture')cancelCapture();
+      if(kind==='translation' || kind==='translation-overlay') {
+        hideTranslation();
+        if (lastState?.translation) onAction('close-translation', { id: lastState.translation.id });
+      }
       if(!win.isDestroyed())win.destroy();
       onStatus({ error: '界面进程已退出，已保存的会话仍在。请从托盘重新打开 PickGloss。' });
     });
@@ -444,10 +491,12 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   }
 
   function nativeMenu() {
+    const captureShortcut = lastState?.settings?.prefs?.shortcuts?.capture;
     const menu = Menu.buildFromTemplate([
       { label: '粘贴文字', click: () => onAction('navigate', {view:'paste'}) },
-      { label: '截图框选    Alt+Shift+S', click: () => onAction('start-capture') },
+      { label: `截图框选${typeof captureShortcut === 'string' && captureShortcut ? `    ${captureShortcut}` : ''}`, click: () => onAction('start-capture') },
       { label: '会话历史', click: () => onAction('open-history') },
+      { label: '常规设置', click: () => onAction('open-settings', { section: 'general' }) },
       { label: 'AI 服务设置', click: () => onAction('open-settings') },
       { label: '外观与主题', click: () => onAction('open-appearance') },
       { label: '快捷键设置', click: () => onAction('open-shortcuts') },
@@ -585,30 +634,71 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   function captureWindow(display) {
     let win = windows.get('capture');
     if (win && !win.isDestroyed()) { win.setBounds(display.bounds); return win; }
-    win = windowFor('capture', { ...display.bounds, transparent: false, resizable: false, focusable: true, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false } });
+    // 框选层不用系统尺寸框和退隐动画，否则紧接着再截图会采到上一层的淡出残影。
+    win = windowFor('capture', { ...display.bounds, transparent: false, thickFrame: false, roundedCorners: false, hasShadow: false, resizable: false, focusable: true, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false } });
     win.setAlwaysOnTop(true, 'screen-saver');
     win.webContents.on('before-input-event', (event, input) => { if (input.key === 'Escape') { event.preventDefault(); cancelCapture(); } });
     return win;
   }
 
-  async function beginCapture() {
+  function prepareCapture() {
+    // 只预热空界面，不提前截屏或保存用户画面。
+    if (closing || capture) return;
+    captureWindow(screen.getDisplayNearestPoint(screen.getCursorScreenPoint()));
+    const reader = nativeCaptureReader();
+    if (reader) void reader.prepare().catch(() => releaseCaptureReader(reader));
+  }
+
+  function nativeCaptureReader() {
+    if (!captureReader) {
+      try { captureReader = captureFactory(); } catch { captureReader = null; }
+    }
+    return captureReader;
+  }
+
+  function releaseCaptureReader(reader) {
+    if (reader !== captureReader) return;
+    captureReader = null; reader.dispose();
+  }
+
+  async function captureScreen(display, expected) {
+    const reader = nativeCaptureReader();
+    if (reader && typeof screen.dipToScreenRect === 'function') {
+      try {
+        const rect = screen.dipToScreenRect(null, display.bounds);
+        const result = await reader.capture(rect);
+        if (capture !== expected) return null;
+        const image = nativeImage.createFromBitmap(result.bitmap, { width: result.width, height: result.height });
+        if (image.isEmpty()) throw Error('原生取图无效');
+        expected.method = 'native'; return image;
+      } catch { releaseCaptureReader(reader); }
+    }
+    if (capture !== expected) return null;
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: Math.round(display.bounds.width * display.scaleFactor), height: Math.round(display.bounds.height * display.scaleFactor) }, fetchWindowIcons: false });
+    const source = sources.find(value => value.display_id === String(display.id)) || (sources.length === 1 ? sources[0] : null);
+    expected.method = 'electron';
+    return source?.thumbnail || null;
+  }
+
+  async function beginCapture({ mode = 'explain' } = {}) {
     if (capture) return false;
+    const hidingVisibleWindow = [...windows].some(([kind, win]) => kind !== 'capture' && win.isVisible());
     closeMenu(); windows.get('menu')?.hide();
     orbDrag = null;
     const display=screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const previous=[...windows.entries()].filter(([kind,win])=>kind!=='capture' && win.isVisible()).map(([key])=>key);
-    const expected = capture = { id: randomUUID(), previous, display, image: null, imageData: null };
+    const expected = capture = { id: randomUUID(), mode, previous, display, image: null, imageData: null };
     // 空 renderer 的加载与窗口退隐及屏幕读取并行，取消后复用空窗口，不保留旧图。
     try {
       captureWindow(display); dismiss(true);
       for(const win of windows.values()) win.hide();
-      await new Promise(resolve=>setTimeout(resolve,160));
+      // 有窗口退隐时留三帧合成预算；托盘或快捷键唤起且无自有窗口时直接取图。
+      if (hidingVisibleWindow) await new Promise(resolve=>setTimeout(resolve,50));
       if (capture !== expected) return false;
-      const sources=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:Math.round(display.bounds.width*display.scaleFactor),height:Math.round(display.bounds.height*display.scaleFactor)},fetchWindowIcons:false});
+      const image = await captureScreen(display, expected);
       if (capture !== expected) return false;
-      const source=sources.find(s=>s.display_id===String(display.id)) || (sources.length===1?sources[0]:null);
-      if (!source || source.thumbnail.isEmpty()) throw new Error('未能读取当前屏幕，请重试截图。');
-      capture.image=source.thumbnail;
+      if (!image || image.isEmpty()) throw new Error('未能读取当前屏幕，请重试截图。');
+      capture.image=image;
       clearTimeout(captureReadyTimer);
       captureReadyTimer = setTimeout(() => { if (capture === expected) { cancelCapture(); onStatus({ error: '截图预览未能及时准备，请重新截图。' }); } }, 5000);
       if (lastState) broadcast(lastState);
@@ -635,23 +725,75 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     for(const key of previous) { if(key==='selection')continue; const win=windows.get(key); if(win&&!win.isDestroyed()) key==='panel'?win.show():win.showInactive(); }
   }
 
-  function finishCapture(rect) {
+  function finishCaptureWithPlacement(rect) {
     if (!capture?.image) throw new Error('截图已取消，请重新框选。');
-    const pixelRect=cropPixels(rect,capture.display.bounds,capture.image.getSize());
+    const size = capture.image.getSize(), display = capture.display;
+    const pixelRect=cropPixels(rect,display.bounds,size);
     const imageData=capture.image.crop(pixelRect).toDataURL();
+    const placement = { displayId: display.id, displayBounds: { ...display.bounds },
+      region: { x: display.bounds.x + pixelRect.x * display.bounds.width / size.width,
+        y: display.bounds.y + pixelRect.y * display.bounds.height / size.height,
+        width: pixelRect.width * display.bounds.width / size.width, height: pixelRect.height * display.bounds.height / size.height } };
     capture=null; clearCaptureWindow(); if(showOrb) setOrb(true);
-    return imageData;
+    return { imageData, placement };
+  }
+  function finishCapture(rect) { return finishCaptureWithPlacement(rect).imageData; }
+
+  function showTranslation(placement, displayMode, { resetPosition = false, extraHeight = 0, contentHeight, activate = true } = {}) {
+    const workArea = screen.getDisplayMatching(placement.region).workArea;
+    const layout = translationLayout(placement, displayMode, { extraHeight, contentHeight, workArea });
+    let overlay = windows.get('translation-overlay');
+    if (!overlay || overlay.isDestroyed()) {
+      overlay = windowFor('translation-overlay', { ...layout.bounds, transparent: true, backgroundColor: '#00000000', thickFrame: false, resizable: false, movable: false, focusable: false, hasShadow: false, webPreferences: { backgroundThrottling: false } });
+      overlay.setIgnoreMouseEvents(true);
+    } else setWindowBounds(overlay, layout.bounds);
+    let win = windows.get('translation');
+    if (!win || win.isDestroyed()) {
+      win = windowFor('translation', { ...layout.controlBounds, transparent: true, backgroundColor: '#00000000', thickFrame: false, resizable: false, roundedCorners: false, hasShadow: false, webPreferences: { backgroundThrottling: false } });
+      win.on('close', event => { if (!closing) { event.preventDefault(); hideTranslation(); if (lastState?.translation) onAction('close-translation', { id: lastState.translation.id }); } });
+    } else {
+      const bounds = resetPosition || translationPlacement !== placement ? layout.controlBounds : fitWindow({ ...win.getBounds(), width: layout.controlBounds.width, height: layout.controlBounds.height }, screen.getDisplayMatching(win.getBounds()).workArea);
+      setWindowBounds(win, bounds);
+    }
+    translationPlacement = placement;
+    if (activate) for (const value of [overlay, win]) {
+      const show = () => { if (!value.isDestroyed() && translationPlacement === placement) { value === overlay ? value.showInactive() : value.show(); } };
+      if (value.webContents.isLoading()) value.webContents.once('did-finish-load', show); else show();
+    }
+    if (activate) win.focus();
+    const actualControlBounds = win.getBounds();
+    layout.controlBounds = { ...actualControlBounds };
+    layout.controls = { ...layout.controls, width: actualControlBounds.width, height: actualControlBounds.height };
+    return layout;
+  }
+
+  function resizeTranslationHeight(placement, contentHeight) {
+    if (translationPlacement !== placement) return null;
+    const win = windows.get('translation');
+    if (!win || win.isDestroyed()) return null;
+    const current = win.getBounds(), workArea = screen.getDisplayMatching(current).workArea;
+    const height = Math.min(workArea.height, MAX_TRANSLATION_HEIGHT, Math.max(1, Math.ceil(contentHeight)));
+    setWindowBounds(win, fitWindow({ ...current, height }, workArea));
+    return { ...win.getBounds() };
+  }
+
+  function hideTranslation() {
+    translationPlacement = null;
+    windows.get('translation')?.hide(); windows.get('translation-overlay')?.hide();
   }
 
   function authorize(event, action) {
     const kind=surfaceFor(event);
     if (!kind) return false;
-    if(kind==='panel') return !['capture-done','capture-cancel','capture-ready','selection-open','orb-drag','menu-ready','menu-close'].includes(action);
+    if(kind==='panel') return !['capture-done','capture-cancel','capture-ready','selection-open','orb-drag','menu-ready','menu-close','translation-content-height'].includes(action);
+    if(kind==='translation') return ['bootstrap','close-translation','retry-translation','set-translation-options','set-translation-preferences','copy-translation','preview-translation-original','translation-content-height','start-capture','open-settings','open-link'].includes(action);
+    if(kind==='translation-overlay') return action==='bootstrap';
     if(kind==='orb' && action==='orb-activate') return true;
-    return ({orb:['bootstrap','menu','orb-drag','open-latest-session'], menu:['bootstrap','menu-ready','menu-close','navigate','pin','wide','open-history','open-settings','open-appearance','open-shortcuts','shortcut-command','show-orb','toggle-selection','start-capture','quit'], selection:['bootstrap','selection-open'],capture:['bootstrap','capture-ready','capture-done','capture-cancel']}[kind]||[]).includes(action);
+    return ({orb:['bootstrap','menu','orb-drag','open-latest-session'], menu:['bootstrap','menu-ready','menu-close','navigate','pin','wide','open-history','open-settings','open-appearance','open-shortcuts','shortcut-command','show-orb','toggle-selection','start-capture','quit'], selection:['bootstrap','selection-open'],capture:['bootstrap','capture-ready','capture-done','capture-cancel','set-translation-preferences']}[kind]||[]).includes(action);
   }
 
-  return { initTray, openPanel, startSelection, setOrb, menu, closeMenu, menuReady, beginCapture, cancelCapture, finishCapture, captureReady, authorize, stateFor,
+  return { initTray, openPanel, startSelection, setOrb, menu, closeMenu, menuReady, prepareCapture, beginCapture, cancelCapture, finishCapture, finishCaptureWithPlacement, showTranslation, resizeTranslationHeight,
+    hideTranslation, captureReady, authorize, stateFor,
     restoreWindowState, getWindowState, flushWindowState, setAppearance, dragOrb,
     async acceptSelection() {
       const data=pending;if(!data)throw new Error('选区入口已过期，请重新划词。');
@@ -715,7 +857,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       });
     },
     async smoke() {const win=panel();await new Promise(resolve=>{if(win.webContents.isLoading())win.webContents.once('did-finish-load',resolve);else resolve();});return {windows:windows.size,displayCount:screen.getAllDisplays().length,rendererLoaded:!win.webContents.isLoading(),selectionWorker:!!worker};},
-    dispose() {closing=true;selectionGeneration++;capture=null;clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);for(const win of windows.values())win.destroy();}
+    dispose() {closing=true;selectionGeneration++;capture=null;if(captureReader)releaseCaptureReader(captureReader);clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);for(const win of windows.values())win.destroy();}
   };
 }
 module.exports={createDesktop};

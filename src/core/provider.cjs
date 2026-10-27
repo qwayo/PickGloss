@@ -32,11 +32,11 @@ function validateSources(input) {
 }
 
 function resolveProvider(settings, kind) {
-  if (!['text', 'vision'].includes(kind)) throw failure('INVALID_CONFIG', '模型类型无效。');
-  const visionModel = settings?.vision?.model;
-  if (kind === 'vision' && visionModel != null && typeof visionModel !== 'string') throw failure('INVALID_CONFIG', '识图模型名称必须是文字。');
-  // 只根据识图模型是否留空决定沿用；不拼接两套服务的地址和密钥。
-  const source = kind === 'vision' && !visionModel?.trim() ? 'text' : kind;
+  if (!['text', 'vision', 'translation'].includes(kind)) throw failure('INVALID_CONFIG', '模型类型无效。');
+  const model = settings?.[kind]?.model;
+  if (model != null && typeof model !== 'string') throw failure('INVALID_CONFIG', '模型名称必须是文字。');
+  // 留空模型时沿用整套文字配置；独立配置不完整时提示修正，不拼接不同服务的密钥。
+  const source = kind !== 'text' && !model?.trim() ? 'text' : kind;
   return { source, config: settings?.[source] };
 }
 
@@ -139,9 +139,25 @@ function checkFinishReason(reason) {
   return typeof reason === 'string' && Boolean(reason.trim());
 }
 
-async function streamCompletion({ config, messages, signal, onDelta = () => {}, fetchImpl = globalThis.fetch, timeoutMs = 60000 }) {
+function normalizeGenerationOptions(input) {
+  if (input === undefined) return {};
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['thinkingType', 'reasoningEffort'].includes(key))) throw failure('INVALID_INPUT', '模型生成参数无效。');
+  const result = {};
+  if (input.thinkingType !== undefined) {
+    if (!['enabled', 'disabled'].includes(input.thinkingType)) throw failure('INVALID_INPUT', '模型思考开关无效。');
+    result.thinking = { type: input.thinkingType };
+  }
+  if (input.reasoningEffort !== undefined) {
+    if (!['low', 'high', 'max'].includes(input.reasoningEffort) || input.thinkingType !== 'enabled') throw failure('INVALID_INPUT', '模型思考强度无效。');
+    result.reasoning_effort = input.reasoningEffort;
+  }
+  return result;
+}
+
+async function streamCompletion({ config, messages, signal, onDelta = () => {}, fetchImpl = globalThis.fetch, timeoutMs = 60000, generationOptions }) {
   const endpoint = normalizeConfig(config);
   checkBudget(messages);
+  const generationParameters = normalizeGenerationOptions(generationOptions);
   if (typeof fetchImpl !== 'function') throw failure('INVALID_CONFIG', '当前环境不支持网络请求。');
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600000) throw failure('INVALID_CONFIG', '请求超时时间无效。');
   const controller = new AbortController();
@@ -174,7 +190,7 @@ async function streamCompletion({ config, messages, signal, onDelta = () => {}, 
     if (endpoint.apiKey) headers.Authorization = `Bearer ${endpoint.apiKey}`;
     const response = await wait(fetchImpl(`${endpoint.baseUrl}/chat/completions`, {
       method: 'POST', headers, signal: controller.signal,
-      body: JSON.stringify({ model: endpoint.model, messages, stream: true }),
+      body: JSON.stringify({ model: endpoint.model, messages, stream: true, ...generationParameters }),
       redirect: 'error',
     }));
     if (!response.ok) {
@@ -244,11 +260,11 @@ async function streamCompletion({ config, messages, signal, onDelta = () => {}, 
   }
 }
 
-async function testProvider({ config, vision = false, signal, fetchImpl, timeoutMs = 15000 }) {
+async function testProvider({ config, vision = false, translation = false, signal, fetchImpl, timeoutMs = 15000 }) {
   const content = vision ? [
     { type: 'text', text: '请用中文简短描述这张测试图片的可见颜色。' },
     { type: 'image_url', image_url: { url: TINY_PNG } },
-  ] : '请用中文回复：连接正常。';
+  ] : translation ? '请将文件类型标签 TXT 翻译为简体中文，只输出译文。' : '请用中文回复：连接正常。';
   const result = await streamCompletion({ config, messages: [{ role: 'user', content }], signal, fetchImpl, timeoutMs });
   return { ok: true, content: result };
 }

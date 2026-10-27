@@ -10,7 +10,7 @@ const vm = require('node:vm');
 function renderer(invoke = async () => ({ ok: true })) {
   const calls = [], fields = new Map(), renders = [];
   let timer, beforeQuit;
-  const root = { style: {}, querySelector: () => null, setAttribute() {} };
+  const root = { style: {}, querySelector: () => null, querySelectorAll: () => [], setAttribute() {} };
   const context = {
     document: { documentElement: { classList: { toggle() {} } }, getElementById: () => root, addEventListener() {} },
     location: { search: '?window=panel' }, URLSearchParams,
@@ -29,7 +29,8 @@ function renderer(invoke = async () => ({ ok: true })) {
   };
   vm.createContext(context);
   const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/app.js'), 'utf8');
-  vm.runInContext(source.replace(/^import .*;\s*$/gm, '').replace(/void bootstrap\(\);\s*$/, '') + `
+  const autosave = fs.readFileSync(path.join(__dirname, '../../src/renderer/settings-autosave.js'), 'utf8').replace(/^export /gm, '');
+  vm.runInContext(autosave + '\n' + source.replace(/^import .*;\s*$/gm, '').replace(/void bootstrap\(\);\s*$/, '') + `
     render = () => testRenders.push(true);
     el = (tag, attrs, ...children) => ({tag, attrs, children, append(...items) { this.children.push(...items); }});
     icon = name => ({glyph: name});

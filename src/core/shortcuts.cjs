@@ -2,7 +2,7 @@
 
 const { failure } = require('./validation.cjs');
 
-const DEFAULT_SHORTCUTS = Object.freeze({ paste: 'Alt+Shift+G', capture: 'Alt+Shift+S', 'toggle-pin': 'Alt+Shift+P', 'toggle-wide': 'Alt+Shift+W', history: '', appearance: '', 'toggle-orb': '', 'toggle-selection': '', stop: '', 'close-panel': '' });
+const DEFAULT_SHORTCUTS = Object.freeze({ paste: 'Alt+Shift+G', capture: 'Ctrl+Shift+S', 'toggle-pin': 'Alt+Shift+P', 'toggle-wide': 'Alt+Shift+W', history: '', appearance: '', 'toggle-orb': '', 'toggle-selection': '', stop: '', 'close-panel': '' });
 const COMMANDS = Object.freeze(Object.keys(DEFAULT_SHORTCUTS));
 const MODIFIERS = { ctrl: 'Ctrl', control: 'Ctrl', cmdorctrl: 'Ctrl', commandorcontrol: 'Ctrl', alt: 'Alt', option: 'Alt', shift: 'Shift', super: 'Super', win: 'Super', windows: 'Super', meta: 'Super', command: 'Super', cmd: 'Super' };
 const KEYS = Object.fromEntries(['Space', 'Tab', 'Enter', 'Backspace', 'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Up', 'Down', 'Left', 'Right', 'Plus'].map(key => [key.toLowerCase(), key]));
@@ -41,52 +41,88 @@ function shortcutsShape(input) {
 }
 
 function createShortcutController({ globalShortcut, onCommand, onStatus = () => {}, isolated = false, initial = DEFAULT_SHORTCUTS, setTimer = setTimeout, clearTimer = clearTimeout }) {
-  let bindings = {}, committed = shortcutsShape(initial), requested = { ...committed }, owned = new Set(), error = '', failedCommand = '', queue = Promise.resolve();
+  let bindings = {}, committed = shortcutsShape(initial), requested = { ...committed }, owned = new Set(), error = '', failedCommand = '', queue = Promise.resolve(), initialized = false;
   let recording = false, recordingTimer = null, disposed = false;
   function snapshot() {
     return { enabled: !isolated, recording, reason: isolated ? '隔离验证模式：全局快捷键未注册。' : recording ? '正在录制：本应用的全局快捷键已暂停。' : '', error,
       bindings: Object.fromEntries(COMMANDS.map(command => [command, { accelerator: requested[command], registered: !!requested[command] && owned.has(requested[command]) && bindings[requested[command]] === command,
         activeAccelerator: Object.keys(bindings).find(accelerator => bindings[accelerator] === command && owned.has(accelerator)) || '',
-        error: failedCommand === command ? error : requested[command] && !isolated && !recording && bindings[requested[command]] !== command ? '快捷键未注册。' : '' }])) };
+        error: failedCommand === command ? error : requested[command] && !isolated && !recording && (!owned.has(requested[command]) || bindings[requested[command]] !== command) ? '快捷键未注册。' : '' }])) };
   }
   function report() { onStatus(snapshot()); }
   function enqueue(action) {
     if (disposed) return Promise.reject(failure('SHORTCUT_CLOSED', '正在退出，无法修改快捷键。'));
     const task = queue.then(action); queue = task.catch(() => {}); return task;
   }
-  async function perform(input, persist = async () => undefined) {
-      const next = shortcutsShape(typeof input === 'function' ? input() : input), additions = [];
-      requested = next; error = ''; failedCommand = '';
-      try {
-        if (!isolated && !recording) for (const command of COMMANDS) {
+  function register(accelerator) {
+    try {
+      const ok = globalShortcut.register(accelerator, () => { const active = bindings[accelerator]; if (active) onCommand(active); });
+      if (ok) owned.add(accelerator);
+      return ok;
+    } catch { return false; }
+  }
+
+  function restoreBindings(config) {
+    if (isolated) return;
+    for (const command of COMMANDS) {
+      const accelerator = config[command];
+      if (accelerator && !owned.has(accelerator)) register(accelerator);
+    }
+    bindings = Object.fromEntries(COMMANDS.filter(command => config[command]).map(command => [config[command], command]));
+  }
+
+  async function perform(input, persist = async () => undefined, { restoreCommitted = false } = {}) {
+    const next = shortcutsShape(typeof input === 'function' ? input() : input), additions = [];
+    const previous = committed, previousAccelerators = new Set(Object.values(previous).filter(Boolean));
+    const firstApply = !initialized;
+    initialized = true;
+    requested = next; error = ''; failedCommand = '';
+    try {
+      if (!isolated && !recording) {
+        // 只预检首次启动的快捷键和新增组合。已保存的旧组合可能已被另一个实例接管，
+        // 重录或保存其他组合时不应因此阻止用户保存。
+        for (const command of COMMANDS) {
           const accelerator = next[command];
-          if (!accelerator || owned.has(accelerator)) continue;
-          let registered = false;
-          try { registered = globalShortcut.register(accelerator, () => { const active = bindings[accelerator]; if (active) onCommand(active); }); } catch {}
-          if (!registered) { failedCommand = command; throw failure('SHORTCUT_UNAVAILABLE', `${accelerator} 无法注册，可能已被其他程序占用；设置未保存。`); }
+          if (!accelerator || owned.has(accelerator) || (!firstApply && previousAccelerators.has(accelerator))) continue;
+          if (!register(accelerator)) {
+            failedCommand = command;
+            throw failure('SHORTCUT_UNAVAILABLE', `${accelerator} 无法注册，可能已被其他程序占用；设置未保存。`);
+          }
           additions.push(accelerator);
         }
-        const saved = await persist(next);
-        const desired = new Set(Object.values(next).filter(Boolean));
-        for (const accelerator of owned) if (!desired.has(accelerator)) globalShortcut.unregister(accelerator);
-        owned = isolated || recording ? new Set() : desired;
-        bindings = Object.fromEntries(COMMANDS.filter(command => next[command] && !isolated && !recording).map(command => [next[command], command]));
-        committed = next;
-        report(); return saved;
-      } catch (cause) {
-        for (const accelerator of additions) globalShortcut.unregister(accelerator);
-        error = cause.message || '快捷键保存失败，已保留原有注册。';
-        report(); throw cause;
+        // 录制会临时注销本应用的快捷键。结束录制后尽量恢复旧组合，
+        // 但旧组合被其他程序占用时只标示未注册，不阻止新设置保存。
+        if (restoreCommitted) {
+          for (const command of COMMANDS) {
+            const accelerator = next[command];
+            if (!accelerator || owned.has(accelerator) || !previousAccelerators.has(accelerator)) continue;
+            register(accelerator);
+          }
+        }
       }
+      const saved = await persist(next);
+      const desired = new Set(Object.values(next).filter(Boolean));
+      for (const accelerator of [...owned]) if (!desired.has(accelerator)) {
+        globalShortcut.unregister(accelerator); owned.delete(accelerator);
+      }
+      bindings = Object.fromEntries(COMMANDS.filter(command => next[command] && !isolated && !recording).map(command => [next[command], command]));
+      committed = next;
+      report(); return saved;
+    } catch (cause) {
+      for (const accelerator of additions) { globalShortcut.unregister(accelerator); owned.delete(accelerator); }
+      if (restoreCommitted) restoreBindings(previous);
+      error = cause.message || '快捷键保存失败，已保留原有注册。';
+      report(); throw cause;
+    }
   }
+
   function apply(input, persist) {
     return enqueue(async () => {
-      // 保存与结束录制在同一队列任务内完成，不能绕过系统注册预检。
+      const wasRecording = recording;
       if (recording) {
         clearTimer(recordingTimer); recordingTimer = null; recording = false;
-        await perform(committed);
       }
-      return perform(input, persist);
+      return perform(input, persist, { restoreCommitted: wasRecording });
     });
   }
   function save(persist) { return enqueue(persist); }
@@ -103,7 +139,7 @@ function createShortcutController({ globalShortcut, onCommand, onStatus = () => 
       }
       if (!recording) return snapshot();
       recording = false;
-      await perform(committed); return snapshot();
+      await perform(committed, undefined, { restoreCommitted: true }); return snapshot();
     });
   }
   async function dispose() {

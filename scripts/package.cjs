@@ -66,9 +66,13 @@ function fingerprint(entries) {
     if (original !== packaged && relative !== 'package.json') throw new Error(`源码与包内文件不同：${relative}`);
     source.push({ path: relative, sha256: packaged });
   }
-  const nativePath = 'resources/native/ContextProbe.exe';
-  const nativeHash = await hashFile(path.join(packageDirectory, nativePath));
-  if (nativeHash !== await hashFile(path.join(root, 'build', 'native', 'ContextProbe.exe'))) throw new Error('原生助手与本轮构建结果不同。');
+  const nativeFiles = [];
+  for (const name of ['ContextProbe.exe', 'WindowAppearance.exe', 'ScreenCapture.exe']) {
+    const relative = `resources/native/${name}`, sha256 = await hashFile(path.join(packageDirectory, relative));
+    if (sha256 !== await hashFile(path.join(root, 'build', 'native', name))) throw new Error(`原生助手与本轮构建结果不同：${name}`);
+    nativeFiles.push({ path: relative, sha256 });
+  }
+  const nativeHash = nativeFiles[0].sha256;
   const required = ['PickGloss.exe', 'LICENSE', 'LICENSE-PickGloss.txt', 'LICENSES.chromium.html',
     'resources/app/THIRD_PARTY_LICENSES.md',
     'resources/app/node_modules/markdown-it/LICENSE',
@@ -78,7 +82,7 @@ function fingerprint(entries) {
     'resources/app/node_modules/uc.micro/LICENSE.txt',
     'resources/app/src/main.cjs', 'resources/app/src/preload.cjs',
     'resources/app/src/renderer/app.js', 'resources/app/node_modules/markdown-it/dist/browser/markdown-it.umd.min.js',
-    'resources/app/node_modules/selection-hook/package.json', nativePath];
+    'resources/app/node_modules/selection-hook/package.json', ...nativeFiles.map(item => item.path)];
   for (const relative of required) await fs.access(path.join(packageDirectory, relative));
   const packageFiles = [];
   for (const relative of await filesBelow(packageDirectory)) packageFiles.push({ path: relative, sha256: await hashFile(path.join(packageDirectory, relative)) });
@@ -86,7 +90,7 @@ function fingerprint(entries) {
   const candidateId = `PickGloss-${version}-candidate-${fingerprint(source).slice(0, 12)}-${stamp}`;
   const manifest = { candidateId, version, platform: 'win32', arch: 'x64', createdAt: new Date().toISOString(),
     sourceFingerprint: fingerprint(source), source, buildPackageJsonSha256: await hashFile(path.join(root, 'package.json')),
-    dependencyLockSha256: await hashFile(path.join(root, 'package-lock.json')), nativeSha256: nativeHash,
+    dependencyLockSha256: await hashFile(path.join(root, 'package-lock.json')), nativeSha256: nativeHash, nativeFiles,
     packageFingerprint: fingerprint(packageFiles), packageFileCount: packageFiles.length, packageDirectory: packageName,
     files: packageFiles };
   await fs.writeFile(path.join(output, 'candidate-manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');

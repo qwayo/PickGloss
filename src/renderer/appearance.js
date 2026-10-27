@@ -1,5 +1,6 @@
-/* 外观设置只通过宿主提供的安全保存方法持久化，草稿仅用于当前页面预览。 */
+/* 外观设置即时预览，并通过宿主提供的安全保存方法串行自动持久化。 */
 const DEFAULT_VALUES = Object.freeze({ mode: 'dark', material: 'solid', accent: '#000000', tint: '#bfc2c8', opacity: 82, blur: 26 });
+const AUTOSAVE_DELAY_MS = 260;
 const PIN_COLORS = { orange: ['暖橙', '#dc873d'], amber: ['琥珀', '#cf9f37'], blue: ['雾蓝', '#5095e8'], violet: ['淡紫', '#a47ee2'], mint: ['薄荷', '#4db393'], silver: ['银灰', '#a8b2c1'], none: ['无描边', 'transparent'] };
 const copy = value => JSON.parse(JSON.stringify(value));
 const validHex = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
@@ -37,12 +38,36 @@ function readable(color, backgrounds, dark) {
 export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion = () => {} }) {
   const schemeMedia = window.matchMedia('(prefers-color-scheme: dark)');
   const motionMedia = window.matchMedia('(prefers-reduced-motion: reduce)');
-  let data = normalize(), status = {}, draft = {}, editorName = '', nameDirty = false;
-  let root = null, refs = {}, busy = false, notice = '', failed = false, editorOpen = true, disposed = false, receiveVersion = 0;
+  let data = normalize(), status = {}, editorName = '';
+  let root = null, refs = {}, busy = false, notice = '', failed = false, noticeError = false, editorOpen = true, disposed = false;
+  let revision = 0, savedRevision = 0, saveTimer = null, drainPromise = null;
+  const afterSave = [];
   const invalidColors = new Map();
-  const preview = () => ({ ...data.current, ...draft });
+  const selectedPresets = new Set();
+  let selectingPresets = false, confirmPresetDelete = false, pendingDelete = null;
+  const preview = () => data.current;
   const activePreset = () => data.presets.find(preset => preset.id === data.active);
-  const hasDraft = () => Object.keys(draft).length > 0 || invalidColors.size > 0;
+  const hasPendingSave = () => revision > savedRevision;
+  const isDefaultValues = candidate => JSON.stringify(values(candidate)) === JSON.stringify(DEFAULT_VALUES);
+
+  function appearanceFrom(result) {
+    return result?.value?.prefs?.appearance || result?.value?.appearance || (result?.value?.current ? result.value : null);
+  }
+
+  function syncCurrentPreset() {
+    const preset = activePreset();
+    if (preset) preset.values = values(data.current);
+  }
+
+  function snapshotForSave() {
+    const snapshot = copy(data);
+    if (pendingDelete) {
+      const ids = pendingDelete.ids;
+      snapshot.presets = snapshot.presets.filter(preset => !ids.has(preset.id));
+      if (ids.has(snapshot.active)) snapshot.active = 'default';
+    }
+    return snapshot;
+  }
 
   function apply() {
     if (disposed) return;
@@ -107,7 +132,9 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
     const paths = {
       light: 'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
       dark: 'M20 14a8.5 8.5 0 0 1-10-10 8.5 8.5 0 1 0 10 10Z',
-      system: 'M3 4h18v13H3ZM8 21h8m-4-4v4', check: 'm5 12 4 4L19 6', chevron: 'm6 9 6 6 6-6'
+      system: 'M3 4h18v13H3ZM8 21h8m-4-4v4', check: 'm5 12 4 4L19 6', chevron: 'm6 9 6 6 6-6',
+      select: 'M4 5h4v4H4ZM4 15h4v4H4ZM12 7h8M12 17h8', close: 'M5 5l14 14M19 5L5 19',
+      trash: 'M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7'
     };
     const path = document.createElementNS(node.namespaceURI, 'path'); path.setAttribute('d', paths[kind]); node.append(path);
     return node;
@@ -128,24 +155,33 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
   function sync() {
     if (!root) return;
     const current = preview();
-    refs.state.textContent = hasDraft() ? '未保存的配色' : activePreset()?.name || '默认配色';
+    refs.state.textContent = invalidColors.size ? '颜色待修正' : busy ? '正在自动保存…' : failed ? '自动保存失败' : hasPendingSave() ? '等待自动保存' : data.active === 'default' ? (isDefaultValues(current) ? '默认配色' : '自定义配色') : activePreset()?.name || '自定义配色';
     refs.notice.textContent = notice;
-    refs.notice.classList.toggle('is-error', failed);
-    refs.notice.setAttribute('role', failed ? 'alert' : 'status');
+    refs.notice.classList.toggle('is-error', failed || noticeError || invalidColors.size > 0);
+    refs.notice.setAttribute('role', failed || noticeError || invalidColors.size ? 'alert' : 'status');
     root.setAttribute('aria-busy', String(busy));
-    refs.mode.forEach(node => { node.setAttribute('aria-pressed', String(node.dataset.mode === current.mode)); node.disabled = busy; });
-    refs.material.forEach(node => { node.setAttribute('aria-pressed', String(node.dataset.material === current.material)); node.disabled = busy; });
-    refs.presets.querySelectorAll('button').forEach(node => { node.setAttribute('aria-pressed', String(!hasDraft() && node.dataset.preset === data.active)); node.disabled = busy; });
+    refs.mode.forEach(node => { node.setAttribute('aria-pressed', String(node.dataset.mode === current.mode)); });
+    refs.material.forEach(node => { node.setAttribute('aria-pressed', String(node.dataset.material === current.material)); });
+    refs.presets.querySelectorAll('button').forEach(node => {
+      node.setAttribute('aria-pressed', String(selectingPresets ? selectedPresets.has(node.dataset.preset) : node.dataset.preset === data.active && (node.dataset.preset !== 'default' || isDefaultValues(current))));
+      node.disabled = selectingPresets && (busy || node.dataset.preset === 'default');
+    });
+    refs.manage.disabled = busy || !data.presets.length;
+    refs.manage.setAttribute('aria-pressed', String(selectingPresets));
+    const manageLabel = selectingPresets ? '退出配色多选' : '多选删除配色';
+    refs.manage.title = manageLabel; refs.manage.setAttribute('aria-label', manageLabel);
+    refs.manage.replaceChildren(icon(selectingPresets ? 'close' : 'select'));
+    renderPresetSelection();
     refs.opacityOut.value = `${current.opacity}%`;
     refs.blurOut.value = `${current.blur} 像素`;
     refs.glass.hidden = current.material !== 'glass';
     refs.fallback.hidden = current.material !== 'glass' || status.appearanceMaterial === 'glass';
-    refs.update.hidden = !activePreset();
-    refs.save.disabled = busy; refs.update.disabled = busy; refs.reset.disabled = busy || !hasDraft();
-    refs.save.textContent = busy ? '正在保存…' : '保存为新预设';
-    refs.pin.forEach(node => { node.setAttribute('aria-pressed', String(node.dataset.pinOutline === data.pinOutline)); node.disabled = busy; });
+    refs.add.disabled = false;
+    refs.retry.hidden = !failed;
+    refs.retry.disabled = busy;
+    refs.pin.forEach(node => { node.setAttribute('aria-pressed', String(node.dataset.pinOutline === data.pinOutline)); });
     ['accent', 'tint'].forEach(syncPicker);
-    refs.motion.checked = data.reducedMotion; refs.motion.disabled = busy;
+    refs.motion.checked = data.reducedMotion;
     refs.systemMotion.hidden = !motionMedia.matches;
     refs.editor.open = editorOpen;
   }
@@ -153,8 +189,14 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
   function renderPresets() {
     if (!root) return;
     const nodes = [{ id: 'default', name: '默认配色', values: DEFAULT_VALUES }, ...data.presets].map(preset => {
-      const node = button('', 'appearance-preset', () => selectPreset(preset.id));
+      const node = button('', 'appearance-preset', () => {
+        if (!selectingPresets) { selectPreset(preset.id); return; }
+        if (busy || preset.id === 'default') return;
+        if (selectedPresets.has(preset.id)) selectedPresets.delete(preset.id); else selectedPresets.add(preset.id);
+        confirmPresetDelete = false; sync();
+      });
       node.dataset.preset = preset.id;
+      if (selectingPresets) node.setAttribute('aria-label', preset.id === 'default' ? '默认配色不能删除' : `选择配色：${preset.name}`);
       const dot = element('span', 'appearance-preset-dot'); dot.style.setProperty('--preset-color', values(preset.values).accent); dot.setAttribute('aria-hidden', 'true');
       node.append(dot, element('span', 'appearance-preset-name', preset.name), icon('check'));
       return node;
@@ -164,85 +206,163 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
 
   function receive(appearance, nextStatus = {}) {
     if (disposed) return;
-    data = normalize(appearance); status = nextStatus || {}; receiveVersion += 1;
-    if (!nameDirty) editorName = activePreset()?.name || '';
+    status = nextStatus || {};
+    // 保存中的旧状态推送不能覆盖本地尚未落盘的输入；成功后 refresh 再读回主进程快照。
+    if (busy || hasPendingSave()) { apply(); sync(); return; }
+    data = normalize(appearance);
+    for (const id of selectedPresets) if (!data.presets.some(preset => preset.id === id)) selectedPresets.delete(id);
+    if (!data.presets.length) { selectingPresets = false; confirmPresetDelete = false; }
     apply(); renderPresets(); syncFields(); sync();
   }
 
-  async function persist(next, message, onSuccess) {
-    if (busy || disposed) return false;
-    busy = true; failed = false; notice = '正在保存…'; sync();
-    const version = receiveVersion;
-    try {
-      const result = await save(copy(next));
-      if (disposed) return false;
-      if (!result?.ok) throw new Error(typeof result?.error === 'string' ? result.error : result?.error?.message || '暂时无法保存，请重试。');
-      const returned = result.value?.prefs?.appearance || result.value?.appearance || (result.value?.current ? result.value : null);
-      if (returned) data = normalize(returned);
-      else if (receiveVersion === version) data = normalize(next);
-      onSuccess?.();
-      notice = message; failed = false; apply(); renderPresets(); syncFields();
-      return true;
-    } catch (error) {
-      notice = `${error?.message || '暂时无法保存，请重试。'} 当前配色与名称已保留。`; failed = true;
-      return false;
-    } finally {
-      busy = false;
+  function markChanged({ immediate = false, message = '更改将在片刻后自动保存。' } = {}) {
+    if (disposed) return savedRevision;
+    revision += 1; failed = false; noticeError = false; notice = message;
+    if (saveTimer !== null) { clearTimeout(saveTimer); saveTimer = null; }
+    apply(); renderPresets(); syncFields(); sync();
+    if (immediate) void flush();
+    else if (!invalidColors.size) saveTimer = setTimeout(() => { saveTimer = null; void flush(); }, AUTOSAVE_DELAY_MS);
+    return revision;
+  }
+
+  function afterCommit(version, callback) {
+    afterSave.push({ version, callback });
+  }
+
+  /** 立即提交尚未落盘的最新快照；多次调用共享同一串行队列。 */
+  function flush() {
+    if (saveTimer !== null) { clearTimeout(saveTimer); saveTimer = null; }
+    if (invalidColors.size) {
+      notice = '颜色需使用 # 加六位十六进制数字，修正后会自动保存。'; failed = false; noticeError = true; sync();
+      return Promise.resolve({ ok: false, error: notice });
+    }
+    if (drainPromise) return drainPromise;
+    // 移除有焦点的控件会触发 blur；空提交不能再通知宿主重绘，否则会循环失焦。
+    if (!hasPendingSave()) return Promise.resolve({ ok: true });
+    drainPromise = (async () => {
+      let last = { ok: true };
+      while (savedRevision < revision) {
+        if (invalidColors.size) {
+          notice = '颜色需使用 # 加六位十六进制数字，修正后会自动保存。'; failed = false; noticeError = true;
+          last = { ok: false, error: notice }; break;
+        }
+        const version = revision, snapshot = snapshotForSave();
+        busy = true; failed = false; notice = '正在自动保存…'; sync();
+        let returned = null, error = null;
+        try {
+          const result = await save(snapshot);
+          if (!result?.ok) throw new Error(typeof result?.error === 'string' ? result.error : result?.error?.message || '暂时无法保存，请重试。');
+          returned = appearanceFrom(result);
+        } catch (caught) { error = caught; }
+        busy = false;
+        if (error) {
+          notice = `${error?.message || '暂时无法保存，请重试。'} 输入已保留，可重试保存。`; failed = true; noticeError = false;
+          last = { ok: false, error: notice };
+          if (revision === version) { sync(); break; }
+          sync(); continue;
+        }
+        savedRevision = Math.max(savedRevision, version);
+        if (revision === version) data = normalize(returned || snapshot);
+        afterSave.splice(0, afterSave.length, ...afterSave.filter(item => {
+          if (item.version > version) return true;
+          item.callback(); return false;
+        }));
+        failed = false; noticeError = false;
+        notice = revision === version ? '外观设置已自动保存。' : '正在保存最新更改…';
+        last = { ok: true, value: copy(returned || snapshot) };
+        apply(); renderPresets(); syncFields(); sync();
+        if (revision > version && saveTimer !== null) { clearTimeout(saveTimer); saveTimer = null; }
+      }
+      return last;
+    })().finally(() => {
+      busy = false; drainPromise = null;
       if (!disposed) { sync(); refresh(); }
+    });
+    return drainPromise;
+  }
+
+  function renderPresetSelection() {
+    refs.batch.hidden = !selectingPresets;
+    refs.batch.replaceChildren();
+    if (!selectingPresets) return;
+    const tools = element('div', 'appearance-preset-toolbar');
+    const all = button('全选', '', () => { if (busy) return; data.presets.forEach(preset => selectedPresets.add(preset.id)); confirmPresetDelete = false; sync(); });
+    const clear = button('清空', '', () => { if (busy) return; selectedPresets.clear(); confirmPresetDelete = false; sync(); });
+    const remove = button('', 'appearance-compact-icon is-danger', () => { if (busy || !selectedPresets.size) return; confirmPresetDelete = true; sync(); });
+    remove.append(icon('trash')); remove.title = '删除所选配色'; remove.setAttribute('aria-label', '删除所选配色');
+    all.disabled = busy; clear.disabled = remove.disabled = busy || !selectedPresets.size;
+    tools.append(element('span', 'appearance-preset-count', `已选 ${selectedPresets.size}`), all, clear, remove); refs.batch.append(tools);
+    if (confirmPresetDelete) {
+      const confirm = element('div', 'appearance-preset-confirm');
+      confirm.setAttribute('role', 'group'); confirm.setAttribute('aria-label', '确认删除配色');
+      confirm.append(element('p', '', `删除所选 ${selectedPresets.size} 套预设？当前窗口配色会保留。`));
+      const cancel = button('取消', '', () => {
+        if (busy) return;
+        pendingDelete = null; confirmPresetDelete = false; sync();
+      });
+      const submit = button('确认删除', 'is-danger', () => {
+        if (busy || !selectedPresets.size) return;
+        const ids = new Set(selectedPresets), deletedCount = data.presets.filter(preset => ids.has(preset.id)).length;
+        const operation = pendingDelete = { ids };
+        const version = markChanged({ immediate: true, message: `正在删除 ${deletedCount} 套预设…` });
+        afterCommit(version, () => {
+          if (pendingDelete !== operation) return;
+          data.presets = data.presets.filter(preset => !ids.has(preset.id));
+          if (ids.has(data.active)) data.active = 'default';
+          pendingDelete = null;
+          selectedPresets.clear(); selectingPresets = false; confirmPresetDelete = false;
+          notice = `已删除 ${deletedCount} 套预设，当前配色已保留。`;
+          if (!disposed) { renderPresets(); sync(); }
+        });
+      });
+      cancel.disabled = busy; submit.disabled = busy || !selectedPresets.size; confirm.append(cancel, submit); refs.batch.append(confirm);
     }
   }
 
+  function setSetting(key, value, immediate = false) {
+    if (key === 'reducedMotion' || key === 'pinOutline') data[key] = value;
+    else data.current[key] = value;
+    syncCurrentPreset();
+    return markChanged({ immediate });
+  }
+
   function saveImmediate(key, value) {
-    const next = copy(data);
-    if (key === 'reducedMotion' || key === 'pinOutline') next[key] = value;
-    else next.current[key] = value;
-    void persist(next, '外观设置已保存。');
+    setSetting(key, value, true);
   }
 
   function selectPreset(id) {
+    if (invalidColors.size) {
+      notice = '请先修正颜色值，再切换配色。'; failed = false; noticeError = true; sync(); return;
+    }
     const preset = data.presets.find(item => item.id === id);
     if (id !== 'default' && !preset) return;
-    const next = copy(data);
-    next.current = preset ? copy(preset.values) : { ...DEFAULT_VALUES }; next.active = id;
-    const submittedDraft = copy(draft), submittedInvalid = new Map(invalidColors), submittedName = editorName;
-    void persist(next, id === 'default' ? '已切换到默认配色。' : `已切换到「${preset.name}」。`, () => {
-      Object.keys(submittedDraft).forEach(key => { if (draft[key] === submittedDraft[key]) delete draft[key]; });
-      submittedInvalid.forEach((value, key) => { if (invalidColors.get(key) === value) invalidColors.delete(key); });
-      if (editorName === submittedName) { editorName = preset?.name || ''; nameDirty = false; }
-    });
+    data.current = values(preset ? preset.values : DEFAULT_VALUES); data.active = id;
+    markChanged({ immediate: true, message: id === 'default' ? '正在恢复默认配色…' : `正在切换到「${preset.name}」…` });
   }
 
   function edit(key, value) {
-    draft[key] = value; notice = ''; failed = false;
-    apply(); sync();
+    setSetting(key, value, false);
   }
 
-  function savePreset(update) {
+  function addPreset() {
     const name = editorName.trim();
     let error = '';
     if (invalidColors.size) error = '请输入以 # 开头的六位颜色值。';
     else if (!name || [...name].length > 24 || /[\u0000-\u001f\u007f]/.test(name)) error = '预设名称需为 1 至 24 个字符。';
-    else if (data.presets.some(preset => nameKey(preset.name) === nameKey(name) && (!update || preset.id !== data.active))) error = '已有同名预设，请换个名字，或选中它后更新。';
-    else if (!update && data.presets.length >= 50) error = '最多保存 50 套预设，请选择已有预设后更新。';
+    else if (data.presets.some(preset => nameKey(preset.name) === nameKey(name))) error = '已有同名预设，请换个名字。';
+    else if (data.presets.length >= 50) error = '最多添加 50 套预设，请先删除不需要的预设。';
     if (error) {
-      notice = error; failed = true; sync();
+      notice = error; failed = false; noticeError = true; sync();
       if (invalidColors.size) refs[`${invalidColors.keys().next().value}Text`].focus(); else refs.name.focus();
       return;
     }
-    const next = copy(data), submittedDraft = copy(draft), submittedName = editorName;
-    const current = values(preview());
-    if (update) {
-      const preset = next.presets.find(item => item.id === next.active);
-      if (!preset) return;
-      preset.name = name; preset.values = copy(current);
-    } else {
-      const id = window.crypto.randomUUID();
-      next.presets.push({ id, name, values: copy(current) }); next.active = id;
-    }
-    next.current = current;
-    void persist(next, update ? `已更新「${name}」。` : `已保存「${name}」。`, () => {
-      Object.keys(submittedDraft).forEach(key => { if (draft[key] === submittedDraft[key]) delete draft[key]; });
-      if (editorName === submittedName) { editorName = name; nameDirty = false; }
+    const id = window.crypto.randomUUID(), submittedName = editorName;
+    data.presets.push({ id, name, values: values(data.current) }); data.active = id;
+    const version = markChanged({ immediate: true, message: `正在添加「${name}」…` });
+    afterCommit(version, () => {
+      if (editorName === submittedName) { editorName = ''; syncFields(); }
+      notice = `已添加「${name}」。`;
+      if (!disposed) sync();
     });
   }
 
@@ -277,7 +397,9 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
     plane.addEventListener('pointerup', event => { if (plane.hasPointerCapture(event.pointerId)) plane.releasePointerCapture(event.pointerId); });
     plane.addEventListener('keydown', event => { const steps = { ArrowLeft: [-.01,0], ArrowRight: [.01,0], ArrowUp: [0,.01], ArrowDown: [0,-.01] }; if (!steps[event.key]) return; event.preventDefault(); const [s,v] = steps[event.key], hsv = pickerHSV[key]; pickColor(key, { s: Math.max(0,Math.min(1,hsv.s+s)), v: Math.max(0,Math.min(1,hsv.v+v)) }); });
     const hue = element('input', 'color-hue'); hue.type = 'range'; hue.min = 0; hue.max = 359; hue.step = 1; hue.setAttribute('aria-label', `${label}色相`); refs[`${key}Hue`] = hue;
-    hue.addEventListener('input', () => pickColor(key, { h: Number(hue.value) })); picker.append(plane, hue); return picker;
+    hue.addEventListener('input', () => pickColor(key, { h: Number(hue.value) }));
+    hue.addEventListener('change', () => { void flush(); }); hue.addEventListener('blur', () => { void flush(); });
+    picker.append(plane, hue); return picker;
   }
 
   function mount(container) {
@@ -303,7 +425,15 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
     }); materialGroup.append(...refs.material);
     refs.fallback = element('p', 'appearance-helper appearance-fallback', '此设备暂不支持磨砂，已使用实色。'); refs.fallback.setAttribute('role', 'status');
     refs.presets = element('div', 'appearance-presets'); refs.presets.setAttribute('role', 'group'); refs.presets.setAttribute('aria-label', '已保存的配色');
-    base.append(modeHeading, modeGroup, element('h3', '', '窗口材质'), materialGroup, refs.fallback, element('h3', '', '已保存的配色'), refs.presets);
+    const presetsHeading = element('div', 'appearance-preset-heading');
+    refs.manage = button('', 'appearance-compact-icon', () => {
+      if (busy) return;
+      selectingPresets = !selectingPresets; selectedPresets.clear(); confirmPresetDelete = false;
+      renderPresets(); sync();
+    });
+    presetsHeading.append(element('h3', '', '已保存的配色'), refs.manage);
+    refs.batch = element('div', 'appearance-preset-selection'); refs.batch.setAttribute('aria-label', '批量管理配色');
+    base.append(modeHeading, modeGroup, element('h3', '', '窗口材质'), materialGroup, refs.fallback, presetsHeading, refs.batch, refs.presets);
     const pinGroup = element('div', 'appearance-pin-colors'); pinGroup.setAttribute('role', 'group'); pinGroup.setAttribute('aria-label', '置顶边缘描边');
     refs.pin = Object.entries(PIN_COLORS).map(([key, [label, color]]) => {
       const node = button(label, 'appearance-pin-color', () => saveImmediate('pinOutline', key)); node.dataset.pinOutline = key;
@@ -315,9 +445,9 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
     const summary = element('summary', '', '自定义主题'); summary.append(icon('chevron'));
     refs.editor.addEventListener('toggle', () => { if (root?.contains(refs.editor)) editorOpen = refs.editor.open; });
     const fields = element('div', 'appearance-editor-fields');
-    const nameLabel = element('label', 'appearance-name-label', '预设名称');
+    const nameLabel = element('label', 'appearance-name-label', '新预设名称（仅“添加预设”时使用）');
     refs.name = element('input', 'appearance-name'); refs.name.type = 'text'; refs.name.autocomplete = 'off'; refs.name.placeholder = '例如：雨夜银灰'; refs.name.dataset.field = 'appearance-name'; refs.name.setAttribute('aria-label', '预设名称，1 至 24 个字符');
-    refs.name.addEventListener('input', () => { editorName = refs.name.value; nameDirty = true; notice = ''; failed = false; sync(); });
+    refs.name.addEventListener('input', () => { editorName = refs.name.value; if (!failed) { notice = ''; noticeError = false; } sync(); });
     nameLabel.append(refs.name);
     const colors = element('div', 'appearance-colors');
     [['accent', '强调色'], ['tint', '底色倾向']].forEach(([key, label]) => {
@@ -330,8 +460,14 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
         const value = refs[`${key}Text`].value;
         refs[`${key}Text`].setAttribute('aria-invalid', String(!validHex(value)));
         if (validHex(value)) { invalidColors.delete(key); refs[key].value = value; edit(key, value.toLowerCase()); }
-        else { invalidColors.set(key, value); notice = '颜色需使用 # 加六位十六进制数字。'; failed = true; sync(); }
+        else {
+          invalidColors.set(key, value);
+          if (saveTimer !== null) { clearTimeout(saveTimer); saveTimer = null; }
+          notice = '颜色需使用 # 加六位十六进制数字；修正后会自动保存。'; failed = false; noticeError = true; sync();
+        }
       });
+      refs[`${key}Text`].addEventListener('change', () => { void flush(); });
+      refs[`${key}Text`].addEventListener('blur', () => { void flush(); });
       const picker = createPicker(key, label);
       group.append(title, refs[key], refs[`${key}Text`], picker); colors.append(group);
     });
@@ -342,15 +478,17 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
       refs[key] = element('input'); refs[key].type = 'range'; refs[key].min = min; refs[key].max = max; refs[key].step = 1; refs[key].setAttribute('aria-label', label);
       refs[key].dataset.field = `appearance-${key}`;
       refs[key].addEventListener('input', () => edit(key, Number(refs[key].value)));
+      refs[key].addEventListener('change', () => { void flush(); });
+      refs[key].addEventListener('blur', () => { void flush(); });
       row.append(heading, refs[key]); refs.glass.append(row);
     });
     refs.glass.append(element('p', 'appearance-helper', '背景柔化用于页面背景层，窗口磨砂由系统控制。'));
-    const help = element('p', 'appearance-helper', '修改颜色时即时预览，保存后可以随时切换。'); help.id = 'appearance-color-help';
+    const help = element('p', 'appearance-helper', '外观调整会即时预览并自动保存；新预设仅在点击“添加预设”后创建。'); help.id = 'appearance-color-help';
     const actions = element('div', 'appearance-save-actions');
-    refs.save = button('保存为新预设', 'appearance-primary', () => savePreset(false));
-    refs.update = button('更新当前预设', 'appearance-secondary', () => savePreset(true));
-    refs.reset = button('撤销配色修改', 'appearance-reset', () => { draft = {}; invalidColors.clear(); notice = ''; failed = false; apply(); syncFields(); sync(); });
-    actions.append(refs.save, refs.update, refs.reset);
+    refs.add = button('添加预设', 'appearance-primary', addPreset);
+    refs.retry = button('重试自动保存', 'appearance-retry', () => { void flush(); });
+    refs.retry.hidden = true;
+    actions.append(refs.add, refs.retry);
     fields.append(nameLabel, colors, refs.glass, help, actions); refs.editor.append(summary, fields);
     const motion = element('label', 'appearance-motion'); refs.motion = element('input'); refs.motion.type = 'checkbox';
     refs.motion.dataset.field = 'appearance-reduced-motion';
@@ -362,7 +500,19 @@ export function createAppearanceUI({ save, refresh = () => {}, onReducedMotion =
   }
 
   const mediaChanged = () => { apply(); sync(); };
+  const visibilityChanged = () => { if (document.hidden) void flush(); };
+  const pageHidden = () => { void flush(); };
   schemeMedia.addEventListener('change', mediaChanged); motionMedia.addEventListener('change', mediaChanged);
-  function dispose() { disposed = true; schemeMedia.removeEventListener('change', mediaChanged); motionMedia.removeEventListener('change', mediaChanged); root?.remove(); root = null; refs = {}; }
-  return { receive, mount, apply, dispose };
+  document.addEventListener('visibilitychange', visibilityChanged);
+  window.addEventListener('pagehide', pageHidden); window.addEventListener('beforeunload', pageHidden);
+  function dispose() {
+    if (disposed) return;
+    void flush();
+    if (saveTimer !== null) { clearTimeout(saveTimer); saveTimer = null; }
+    disposed = true;
+    schemeMedia.removeEventListener('change', mediaChanged); motionMedia.removeEventListener('change', mediaChanged);
+    document.removeEventListener('visibilitychange', visibilityChanged); window.removeEventListener('pagehide', pageHidden); window.removeEventListener('beforeunload', pageHidden);
+    root?.remove(); root = null; refs = {};
+  }
+  return { receive, mount, apply, flush, dispose };
 }

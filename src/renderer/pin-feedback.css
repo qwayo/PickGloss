@@ -9,13 +9,15 @@
 html:not([data-pin-outline=none]) .panel.is-pinned::after{content:"";position:absolute;inset:0;z-index:10;border:2px solid var(--pin-stroke);border-radius:calc(var(--panel-radius) - 1px);box-shadow:inset 0 0 4px 1px rgb(var(--pin-glow)/.4),inset 0 0 12px 2px rgb(var(--pin-glow)/.16);box-sizing:border-box;pointer-events:none}
 
 /* 原生路径只由系统裁外圆角；矩形光条挖出透明内孔，避免再次裁切同一外缘。 */
-.native-rounded-frame .panel{border-radius:0;overflow:visible}
+.native-rounded-frame .panel{border-radius:0;overflow:visible;--pin-band:var(--native-pin-band,calc(2px + var(--actual-panel-border,1px)))}
 html.native-rounded-frame .panel.is-pinned{border-color:transparent;box-shadow:none}
-html.native-rounded-frame .panel.is-pinned::after{border-color:transparent;border-radius:calc(var(--panel-radius) - var(--actual-panel-border,1px))}
-.native-pin-frame{display:none;--pin-band:calc(2px + var(--actual-panel-border,1px));position:absolute;top:calc(0px - var(--actual-panel-border,1px));left:calc(0px - var(--actual-panel-border,1px));width:calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px));height:calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px));z-index:11;pointer-events:none;color:var(--pin-stroke)}
+/* 柔光从同一个内孔起光；旧的透明边框和页面视口边界会在左侧与底部留下纸面色缝隙。 */
+html.native-rounded-frame .panel.is-pinned::after{inset:auto;left:calc(var(--native-pin-left,var(--pin-band)) - var(--actual-panel-border,1px));top:calc(var(--native-pin-top,var(--pin-band)) - var(--actual-panel-border,1px));width:calc(var(--native-client-width,calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px))) - var(--native-pin-left,var(--pin-band)) - var(--native-pin-right,var(--pin-band)));height:calc(var(--native-client-height,calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px))) - var(--native-pin-top,var(--pin-band)) - var(--native-pin-bottom,var(--pin-band)));border:0;border-radius:var(--native-pin-radius,calc(var(--panel-radius) - var(--pin-band)))}
+.native-pin-frame{display:none;--pin-band:var(--native-pin-band,calc(2px + var(--actual-panel-border,1px)));position:absolute;top:calc(0px - var(--actual-panel-border,1px));left:calc(0px - var(--actual-panel-border,1px));width:var(--native-client-width,calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px)));height:var(--native-client-height,calc(100% + var(--actual-panel-border,1px) + var(--actual-panel-border,1px)));z-index:11;pointer-events:none;color:var(--pin-stroke)}
 html.native-rounded-frame:not([data-pin-outline=none]) .panel.is-pinned>.native-pin-frame{display:block}
 .native-pin-frame mask{mask-type:luminance}
-.native-pin-cutout{x:var(--pin-band);y:var(--pin-band);width:calc(100% - var(--pin-band) - var(--pin-band));height:calc(100% - var(--pin-band) - var(--pin-band));rx:calc(var(--panel-radius) - var(--pin-band));ry:calc(var(--panel-radius) - var(--pin-band))}
+/* 光条总厚度含原生边框；内孔分别扣除四边非客户区，避免整数 DIP 视口裁掉右侧和底部。 */
+.native-pin-cutout{x:var(--native-pin-left,var(--pin-band));y:var(--native-pin-top,var(--pin-band));width:calc(100% - var(--native-pin-left,var(--pin-band)) - var(--native-pin-right,var(--pin-band)));height:calc(100% - var(--native-pin-top,var(--pin-band)) - var(--native-pin-bottom,var(--pin-band)));rx:var(--native-pin-radius,calc(var(--panel-radius) - var(--pin-band)));ry:var(--native-pin-radius,calc(var(--panel-radius) - var(--pin-band)))}
 .layout-preparing .panel>.native-pin-frame{visibility:visible}
 
 /* 图标通过填充表达置顶状态，与是否显示边缘描边独立。 */

@@ -98,8 +98,9 @@ test('会话动作发出的语境、独立和截图请求只携带各自材料�
   const continuedContext = JSON.stringify(server.requests[4].body);
   assert.ok(continuedContext.includes('本机服务回答⟦1⟧') && continuedContext.includes('语境追问⟦CONTEXT-Q⟧'));
   assert.ok(!continuedContext.includes('本机服务回答⟦3⟧') && !continuedContext.includes('独立追问⟦INDEPENDENT-Q⟧'));
-  await actions.handle('capture-done', { rect: { x: 0, y: 0, width: 1, height: 1 } });
-  const captured = (await actions.state()).session;
+  // 带说明的待解释材料从已保留会话打开；新框选现在会立即开始识图。
+  const captured = await actions.store.createSession({ kind: 'image', imageData: IMAGE, activeMode: 'visual' });
+  await actions.handle('open-session', { id: captured.id });
   await actions.handle('set-note', { id: captured.id, note: '截图说明⟦NOTE⟧' });
   await actions.handle('start-explanation', { id: captured.id, mode: 'visual' });
   await settled(actions, 'visual', 'done');
@@ -134,7 +135,6 @@ test('截图动作、追问及连接测试按识图模型名完整沿用或独�
     vision: { baseUrl: visionService.baseUrl, model: ' ', apiKey: 'fictional-vision-key' } });
   await actions.handle('capture-done', { rect: {} });
   const first = (await actions.state()).session;
-  await actions.handle('start-explanation', { id: first.id, mode: 'visual' });
   await settled(actions, 'visual', 'done');
   await actions.handle('send-question', { id: first.id, mode: 'visual', question: '截图追问' });
   await settled(actions, 'visual', 'done');
@@ -147,7 +147,6 @@ test('截图动作、追问及连接测试按识图模型名完整沿用或独�
   await actions.handle('save-settings', { vision: { model: '独立识图模型' } });
   await actions.handle('capture-done', { rect: {} });
   const second = (await actions.state()).session;
-  await actions.handle('start-explanation', { id: second.id, mode: 'visual' });
   await settled(actions, 'visual', 'done');
   assert.equal(visionService.requests[0].body.model, '独立识图模型');
   assert.equal(visionService.requests[0].authorization, 'Bearer fictional-vision-key');
@@ -155,7 +154,6 @@ test('截图动作、追问及连接测试按识图模型名完整沿用或独�
   rejectImages = true;
   await actions.handle('capture-done', { rect: {} });
   const failed = (await actions.state()).session;
-  await actions.handle('start-explanation', { id: failed.id, mode: 'visual' });
   const thread = await settled(actions, 'visual', 'error');
   assert.match(thread.error, /HTTP 400/);
   assert.equal((await actions.store.getSession(failed.id)).imageData, IMAGE);

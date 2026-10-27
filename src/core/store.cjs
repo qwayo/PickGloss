@@ -9,6 +9,7 @@ const { historyEntry } = require('./history.cjs');
 const { defaultAppearance, appearanceShape, defaultWindowGeometry, windowGeometryShape } = require('./appearance.cjs');
 const { DEFAULT_SHORTCUTS, shortcutsShape } = require('./shortcuts.cjs');
 const { MODEL_PROVIDERS, SEARCH_PROVIDERS } = require('./services.cjs');
+const { translationOptions } = require('./translation.cjs');
 
 const MODEL_PROVIDER_IDS = new Set(MODEL_PROVIDERS.map(provider => provider.id));
 const SEARCH_PROVIDER_IDS = new Set(SEARCH_PROVIDERS.map(provider => provider.id));
@@ -147,15 +148,27 @@ function sessionShape(input) {
   return result;
 }
 
+function captureDefaultMode(value) {
+  if (!['explain', 'translate'].includes(value)) throw failure('INVALID_INPUT', '截图默认模式无效。');
+  return value;
+}
+
+function captureExplainMode(value) {
+  if (!['immediate', 'prompt'].includes(value)) throw failure('INVALID_INPUT', '截图解释模式无效。');
+  return value;
+}
+
 function defaults() {
   return {
     version: 1,
     text: { providerId: 'custom', baseUrl: '', model: '' },
     vision: { providerId: 'custom', baseUrl: '', model: '' },
+    translation: { providerId: 'custom', baseUrl: '', model: '' },
     search: { providerId: 'exa', baseUrl: SEARCH_PROVIDERS.find(provider => provider.id === 'exa').baseUrl },
-    serviceProfiles: { text: providerConfigDefaults('text'), vision: providerConfigDefaults('vision'), search: providerConfigDefaults('search') },
+    serviceProfiles: { text: providerConfigDefaults('text'), vision: providerConfigDefaults('vision'), translation: providerConfigDefaults('translation'), search: providerConfigDefaults('search') },
     prefs: {
-      showOrb: true, selectionEnabled: true, orbAction: 'chat', autoExplainCapture: false,
+      showOrb: true, selectionEnabled: true, orbAction: 'chat', autoExplainCapture: false, launchAtLogin: false,
+      screenshotTranslation: translationOptions(), captureDefaultMode: 'explain', captureExplainMode: 'immediate',
       webSearchEnabled: false, appearance: defaultAppearance(), windowGeometry: defaultWindowGeometry(), shortcuts: { ...DEFAULT_SHORTCUTS }, pinSound: true,
     },
   };
@@ -165,8 +178,8 @@ function settingsShape(input) {
   object(input, '设置');
   if (input.version !== 1) throw failure('INVALID_INPUT', '设置版本不受支持。');
   const result = { version: 1, prefs: {}, serviceProfiles: {} };
-  for (const name of ['text', 'vision']) {
-    const config = object(input[name], '接口设置');
+  for (const name of ['text', 'vision', 'translation']) {
+    const config = object(name === 'translation' && input[name] === undefined ? { baseUrl: '', model: '' } : input[name], '接口设置');
     const providerId = config.providerId === undefined ? 'custom' : string(config.providerId, '模型服务', 80);
     if (!MODEL_PROVIDER_IDS.has(providerId)) throw failure('INVALID_INPUT', '模型服务无效。');
     result[name] = { providerId, baseUrl: string(config.baseUrl, '接口地址', 2048), model: string(config.model, '模型名称', 300) };
@@ -192,7 +205,7 @@ function settingsShape(input) {
   if (oldSearch.keyCiphertext !== undefined) result.search.keyCiphertext = validCiphertext(oldSearch.keyCiphertext);
   if ('apiKey' in oldSearch) throw failure('INVALID_INPUT', '检测到不受支持的明文搜索密钥设置。');
 
-  for (const name of ['text', 'vision', 'search']) {
+  for (const name of ['text', 'vision', 'translation', 'search']) {
     const providers = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
     const profiles = providerConfigDefaults(name);
     if (suppliedProfiles[name] !== undefined) {
@@ -224,6 +237,10 @@ function settingsShape(input) {
   result.prefs.selectionEnabled = bool(prefs.selectionEnabled, '划词状态');
   result.prefs.orbAction = orbAction(prefs.orbAction === undefined ? 'chat' : prefs.orbAction);
   result.prefs.autoExplainCapture = prefs.autoExplainCapture === undefined ? false : bool(prefs.autoExplainCapture, '截图后自动解释状态');
+  result.prefs.launchAtLogin = prefs.launchAtLogin === undefined ? false : bool(prefs.launchAtLogin, '开机自启动状态');
+  result.prefs.screenshotTranslation = translationOptions(prefs.screenshotTranslation);
+  result.prefs.captureDefaultMode = captureDefaultMode(prefs.captureDefaultMode ?? 'explain');
+  result.prefs.captureExplainMode = captureExplainMode(prefs.captureExplainMode ?? 'immediate');
   result.prefs.webSearchEnabled = prefs.webSearchEnabled === undefined ? false : bool(prefs.webSearchEnabled, '默认联网搜索状态');
   // 旧版没有这些字段时只补齐默认值，仍保留原服务配置与加密密钥。
   result.prefs.appearance = prefs.appearance === undefined ? defaultAppearance() : appearanceShape(prefs.appearance);
@@ -282,7 +299,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
       try { return string(await decrypt(Buffer.from(ciphertext, 'base64')), '接口密钥', 8192); }
       catch { throw failure('DECRYPTION_FAILED', '无法解密已保存的接口密钥，请重新填写接口密钥。'); }
     };
-    for (const name of ['text', 'vision', 'search']) {
+    for (const name of ['text', 'vision', 'translation', 'search']) {
       const config = settings[name];
       result[name] = { providerId: config.providerId, baseUrl: config.baseUrl, hasKey: Boolean(config.keyCiphertext) };
       if (name === 'search') result[name].protocol = config.protocol;
@@ -373,7 +390,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
   async function applyProfileChanges(settings, changes) {
     if (changes === undefined) return;
     const profileChanges = object(changes, '服务配置草稿');
-    for (const name of ['text', 'vision', 'search']) {
+    for (const name of ['text', 'vision', 'translation', 'search']) {
       if (profileChanges[name] === undefined) continue;
       const profiles = object(profileChanges[name], '服务配置草稿');
       const known = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
@@ -387,7 +404,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
   }
 
   async function applyActiveConfigChanges(settings, changes) {
-    for (const name of ['text', 'vision', 'search']) {
+    for (const name of ['text', 'vision', 'translation', 'search']) {
       if (changes[name] === undefined) continue;
       const change = object(changes[name], name === 'search' ? '联网搜索设置' : '接口设置');
       const ids = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
@@ -406,7 +423,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
   }
 
   function synchronizeActiveProfiles(settings) {
-    for (const name of ['text', 'vision', 'search']) {
+    for (const name of ['text', 'vision', 'translation', 'search']) {
       const providerId = settings[name].providerId;
       settings.serviceProfiles[name][providerId] = structuredClone(Object.fromEntries(
         Object.entries(settings[name]).filter(([key]) => key !== 'providerId'),
@@ -521,7 +538,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
         object(changes, '设置');
         const settings = await diskSettings();
         await applyProfileChanges(settings, changes.serviceProfiles);
-        for (const name of ['text', 'vision', 'search']) settings[name] = { providerId: settings[name].providerId, ...structuredClone(settings.serviceProfiles[name][settings[name].providerId]) };
+        for (const name of ['text', 'vision', 'translation', 'search']) settings[name] = { providerId: settings[name].providerId, ...structuredClone(settings.serviceProfiles[name][settings[name].providerId]) };
         await applyActiveConfigChanges(settings, changes);
         synchronizeActiveProfiles(settings);
         if (changes.prefs !== undefined) {
@@ -529,6 +546,19 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
           for (const key of ['showOrb', 'selectionEnabled']) if (prefs[key] !== undefined) settings.prefs[key] = bool(prefs[key], '偏好设置');
           if (prefs.orbAction !== undefined) settings.prefs.orbAction = orbAction(prefs.orbAction);
           if (prefs.autoExplainCapture !== undefined) settings.prefs.autoExplainCapture = bool(prefs.autoExplainCapture, '截图后自动解释状态');
+          if (prefs.launchAtLogin !== undefined) settings.prefs.launchAtLogin = bool(prefs.launchAtLogin, '开机自启动状态');
+          if (prefs.screenshotTranslation !== undefined) {
+            const screenshotChanges = object(prefs.screenshotTranslation, '截图翻译设置');
+            const mergedTranslationOptions = { ...settings.prefs.screenshotTranslation, ...screenshotChanges };
+            // 旧客户端仅提供 deepSearchEnabled；迁移为总开关并保留它原有的深度范围含义。
+            if (screenshotChanges.deepSearchEnabled !== undefined && screenshotChanges.searchEnabled === undefined && screenshotChanges.searchScope === undefined) {
+              mergedTranslationOptions.searchEnabled = screenshotChanges.deepSearchEnabled;
+              mergedTranslationOptions.searchScope = 'deep';
+            }
+            settings.prefs.screenshotTranslation = translationOptions(mergedTranslationOptions);
+          }
+          if (prefs.captureDefaultMode !== undefined) settings.prefs.captureDefaultMode = captureDefaultMode(prefs.captureDefaultMode);
+          if (prefs.captureExplainMode !== undefined) settings.prefs.captureExplainMode = captureExplainMode(prefs.captureExplainMode);
           if (prefs.webSearchEnabled !== undefined) settings.prefs.webSearchEnabled = bool(prefs.webSearchEnabled, '默认联网搜索状态');
           if (prefs.appearance !== undefined) settings.prefs.appearance = appearanceShape(prefs.appearance);
           if (prefs.windowGeometry !== undefined) settings.prefs.windowGeometry = windowGeometryShape(prefs.windowGeometry);

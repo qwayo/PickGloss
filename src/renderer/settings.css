@@ -1,0 +1,76 @@
+/* 设置沿用主题语义色；独立字段就地编辑，状态不占据主操作位置。 */
+.settings-body .mode-tabs[aria-label="服务类型"]{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;width:100%;max-width:900px;margin-inline:auto}
+.settings-body>.settings-navigation button,.settings-body .mode-tabs[aria-label="服务类型"] button{min-width:0;padding-inline:2px;text-align:center;white-space:nowrap;justify-content:center}
+.settings-body>.settings-navigation .mode-indicator,.settings-body .mode-tabs[aria-label="服务类型"] .mode-indicator{border-radius:2px}
+.settings-page-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:12px}
+.settings-page-heading h1{margin:0}
+.settings-page-heading>[data-settings-save-summary]{font-size:11px;color:var(--muted);white-space:nowrap}
+.settings-group{margin:18px 0 24px}
+.general-settings .settings-group h2{font-size:14px;font-weight:650;color:var(--ink);margin:0 0 6px;padding-bottom:8px;border-bottom:1px solid var(--line);line-height:1.6}
+.setting-item{padding:11px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 75%,transparent)}
+.setting-item:last-child{border-bottom:0}
+.setting-toggle-row,.setting-select-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px}
+.setting-toggle-row{cursor:pointer}
+.setting-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+.setting-title{font-size:13px;font-weight:500;line-height:1.5}
+.setting-description{font-size:12px;line-height:1.5;color:var(--muted);text-wrap:pretty}
+.setting-select-row select{flex:none;width:112px;max-width:48%;height:31px;min-height:31px;padding:3px 6px;border:1px solid var(--line);border-radius:7px;background:var(--field);color:var(--ink);font-size:12px}
+.setting-toggle-row input[role=switch]{appearance:none;flex:none;position:relative;width:32px;height:18px;padding:0;margin:0;border:1px solid var(--muted);border-radius:12px;background:var(--field);cursor:pointer;transition:background var(--fast),border-color var(--fast)}
+.setting-toggle-row input[role=switch]::after{content:'';position:absolute;width:12px;height:12px;left:2px;top:2px;border-radius:50%;background:var(--muted);transition:transform var(--fast),background var(--fast)}
+.setting-toggle-row input[role=switch]:checked{border-color:var(--accent);background:var(--accent)}
+.setting-toggle-row input[role=switch]:checked::after{background:var(--on-accent);transform:translateX(14px)}
+.setting-save-state{display:flex;align-items:baseline;gap:6px;font-size:11px;line-height:1.6;color:var(--muted);margin-top:5px;overflow-wrap:anywhere}
+.setting-save-state:empty{display:none}
+.setting-save-state.is-error{color:var(--danger)}
+.setting-save-state .setting-retry,.appearance-page .appearance-retry{font-size:11px;min-height:22px;padding:2px 5px;border:1px solid var(--line);color:var(--accent-ink);background:var(--surface-secondary);border-radius:5px;flex:none}
+.settings-save-issues{margin:0 0 12px;padding:8px;border:1px solid var(--danger);border-radius:7px;color:var(--danger);font-size:12px}
+.settings-save-issue{display:flex;align-items:center;flex-wrap:wrap;gap:5px}
+.settings-save-issue+.settings-save-issue{margin-top:6px}
+.settings-save-issue>span{flex:1 1 100%}
+.settings-save-issue .setting-retry{font-size:11px;min-height:23px;padding:2px 6px;color:var(--ink);background:var(--surface-secondary);border:1px solid var(--line);border-radius:5px}
+.settings-section>.setting-save-state{margin:0 0 7px}
+.general-settings>.window-settings{margin-top:24px}
+.general-settings .window-settings-copy h3{font-size:13px}
+.general-settings .window-settings-copy p{font-size:12px}
+@media(min-width:640px){.general-settings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;max-width:900px;margin-inline:auto}.general-settings>.settings-page-heading,.general-settings>.status-details{grid-column:1/-1}.general-settings>.window-settings{align-self:start}}
+.reduced-motion .setting-toggle-row input,.reduced-motion .setting-toggle-row input::after{transition:none}
+@media(prefers-reduced-motion:reduce){.setting-toggle-row input,.setting-toggle-row input::after{transition:none}}
+
+/* 保存过程由页首状态汇总播报；单项状态保持可访问，但不挤动后续设置。 */
+.setting-item{position:relative}
+.setting-item > .setting-save-state:not(.is-error):not(:empty){position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+
+/* 图标与标签保持同一视觉中心，主导航沿用轻量下划线状态。 */
+.settings-body>.settings-navigation{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-items:stretch;gap:0;width:100%;max-width:900px;margin-inline:auto}
+.settings-body>.settings-navigation button{display:flex;align-items:center;justify-content:center;gap:5px;min-height:38px;padding:5px 2px 7px;font-size:13px}
+.settings-body>.settings-navigation button>.icon{width:15px;height:15px;opacity:.75}
+.settings-body>.settings-navigation button[aria-selected=true]>.icon{opacity:1}
+.settings-body>.settings-navigation .mode-indicator{height:2px;border-radius:999px}
+
+/* AI 服务分类改用贴合文字的圆角悬停底色，避免矩形块遮住下划线层次。 */
+.settings-body .mode-tabs[aria-label="服务类型"]{align-items:stretch;gap:0}
+.settings-body .mode-tabs[aria-label="服务类型"] button{position:relative;isolation:isolate;display:flex;align-items:center;justify-content:center;gap:3px;min-height:36px;padding:5px 0 7px;border-radius:8px;background:transparent;font-size:12px}
+.settings-body .mode-tabs[aria-label="服务类型"] button::before{content:"";position:absolute;inset:4px 2px 7px;border-radius:7px;background:var(--soft);opacity:0;z-index:-1;pointer-events:none;transition:opacity var(--fast)}
+.settings-body .mode-tabs[aria-label="服务类型"] button:hover{background:transparent;color:var(--ink)}
+.settings-body .mode-tabs[aria-label="服务类型"] button:hover::before{opacity:.7}
+.settings-body .mode-tabs[aria-label="服务类型"] button>.icon{width:13px;height:13px}
+@media(max-width:360px){.settings-body>.settings-navigation button{gap:4px;font-size:12px}.settings-body>.settings-navigation button>.icon{width:14px;height:14px}.settings-body .mode-tabs[aria-label="服务类型"] button{gap:2px;font-size:11px}.settings-body .mode-tabs[aria-label="服务类型"] button>.icon{width:12px;height:12px}}
+
+/* 原生可定制选择器保留键盘和表单语义，弹层跟随控件及主题，不另造菜单状态。 */
+@supports(appearance:base-select){
+  .settings-body select,.settings-body select::picker(select){appearance:base-select}
+  .settings-body select{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;transition:border-color 160ms,background 160ms}
+  .settings-body select:hover,.settings-body select:open{border-color:var(--muted);background:var(--surface-secondary)}
+  .settings-body select:focus-visible{outline:2px solid var(--accent-ink);outline-offset:2px}
+  .settings-body select::picker-icon{color:var(--muted);font-size:10px;transition:rotate 180ms var(--ease)}
+  .settings-body select:open::picker-icon{rotate:180deg}
+  .settings-body select::picker(select){min-inline-size:anchor-size(self-inline);max-block-size:min(260px,60vh);margin-block:2px;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--ink);box-shadow:0 4px 12px #0002;font:12px/1.5 'Segoe UI','Microsoft YaHei UI',sans-serif;opacity:0;transform:translateY(-3px) scale(.98);transform-origin:top center;transition:opacity 120ms,transform 120ms,display 120ms allow-discrete,overlay 120ms allow-discrete}
+  .settings-body select:open::picker(select){opacity:1;transform:none;transition-duration:180ms}
+  @starting-style{.settings-body select:open::picker(select){opacity:0;transform:translateY(-3px) scale(.98)}}
+  .settings-body select option{min-height:29px;padding:5px 7px;gap:8px;border-radius:5px;cursor:pointer;transition:background 100ms}
+  .settings-body select option:hover,.settings-body select option:focus-visible{background:var(--soft);outline:none}
+  .settings-body select option:checked{background:var(--selected);color:var(--selected-text);font-weight:600}
+  .settings-body select option::checkmark{color:var(--accent-ink)}
+  .reduced-motion .settings-body select,.reduced-motion .settings-body select::picker-icon,.reduced-motion .settings-body select::picker(select),.reduced-motion .settings-body select option{transition:none}
+  @media(prefers-reduced-motion:reduce){.settings-body select,.settings-body select::picker-icon,.settings-body select::picker(select),.settings-body select option{transition:none}}
+}

@@ -1,4 +1,5 @@
 'use strict';
+const { applySettingsFixture } = require('./settings-fixture.cjs');
 // 用隐藏 Electron 窗口和虚构状态检查联网服务界面，不访问真实账户或网络。
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
@@ -121,30 +122,9 @@ ipcMain.handle('test:invoke', async (_, action, payload) => {
   if (action === 'get-source-icon') return {ok:true,value:imageData};
   if (action === 'set-note') current.session.note = payload.note;
   if (action === 'test-search-provider') return { ok: true, value: '虚构搜索服务连接成功' };
-  if (action === 'save-settings' && !payload.text) {
-    current.settings.prefs = { ...current.settings.prefs, ...payload.prefs };
-    await pushState(); return { ok: true, value: { prefs: current.settings.prefs } };
-  }
   if (action === 'save-settings') {
-    const serviceProfiles = {};
-    for (const [kind, profiles] of Object.entries(payload.serviceProfiles)) {
-      serviceProfiles[kind] = {};
-      for (const [id, config] of Object.entries(profiles)) serviceProfiles[kind][id] = {
-        baseUrl: config.baseUrl,
-        ...(config.protocol ? { protocol: config.protocol } : {}),
-        ...(config.model === undefined ? {} : { model: config.model }),
-        hasKey: Boolean(config.apiKey) || Boolean(current.settings.serviceProfiles?.[kind]?.[id]?.hasKey),
-      };
-    }
-    current.settings = {
-      ...current.settings,
-      text: { providerId: payload.text.providerId, baseUrl: payload.text.baseUrl, model: payload.text.model, hasKey: Boolean(payload.text.apiKey) || current.settings.text.hasKey },
-      vision: { providerId: payload.vision.providerId, baseUrl: payload.vision.baseUrl, model: payload.vision.model, hasKey: false },
-      search: { providerId: payload.search.providerId, baseUrl: payload.search.baseUrl, ...(payload.search.protocol ? { protocol: payload.search.protocol } : {}), hasKey: Boolean(payload.search.apiKey) || current.settings.search.hasKey },
-      prefs: { ...current.settings.prefs, ...payload.prefs },
-      serviceProfiles,
-    };
-    await pushState();
+    current.settings = applySettingsFixture(current.settings, payload);
+    await pushState(); return { ok: true, value: current.settings };
   }
   return { ok: true };
 });
@@ -354,17 +334,17 @@ app.whenReady().then(async () => {
       keyNote: document.querySelector('.api-key-note')?.textContent,
       keyNoteLines: Math.round(document.querySelector('.api-key-note').scrollHeight / parseFloat(getComputedStyle(document.querySelector('.api-key-note')).lineHeight)),
       visibleKeyNotes: document.querySelectorAll('.settings-section[data-provider]:not([hidden]) .api-key-note').length,
-      autoExplain: document.querySelector('[name="autoExplainCapture"]')?.checked,
+      captureExplainMode: document.querySelector('[name="captureExplainMode"]')?.value,
       providers: [...document.querySelectorAll('.settings-section[data-provider]')].map(section => section.dataset.provider),
     }))()`);
     assert.equal(settingsInitial.keyNote, '本机 DPAPI 加密。路径：C:\\Users\\Mock\\PickGloss\\settings.json');
     assert.equal(settingsInitial.visibleKeyNotes, 1, '当前服务选项卡应只显示一条密钥说明');
     if (viewportWidth <= 350) assert.ok(settingsInitial.keyNoteLines > 1, '小窗中的配置路径应自然换行');
-    assert.equal(settingsInitial.autoExplain, false, '截图自动解释默认关闭');
-    assert.deepEqual(settingsInitial.providers, ['text', 'vision', 'search']);
+    assert.equal(settingsInitial.captureExplainMode, 'immediate', '识图模式默认立即识别');
+    assert.deepEqual(settingsInitial.providers, ['text', 'vision', 'translation', 'search']);
     await win.webContents.executeJavaScript(`document.querySelector('.settings-navigation button').click()`);
     await waitFor(`document.querySelector('[data-settings-section="general"]')?.hidden===false`, '常规设置');
-    assert.deepEqual(await win.webContents.executeJavaScript(`[...document.querySelectorAll('.settings-navigation button')].map(node=>node.textContent)`), ['常规设置','AI 服务','外观与主题','快捷键']);
+    assert.deepEqual(await win.webContents.executeJavaScript(`[...document.querySelectorAll('.settings-navigation button')].map(node=>node.textContent)`), ['常规','AI','外观','快捷键']);
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-settings-section="appearance"] .window-settings')===null && document.querySelector('[data-settings-section="shortcuts"] [data-field="pin-sound"]')===null`), true, '通用选项已迁出外观和快捷键');
     const settingsTop = await win.webContents.executeJavaScript(`(() => {const body=document.querySelector('.settings-body'),nav=document.querySelector('.settings-navigation');return nav.getBoundingClientRect().top-body.getBoundingClientRect().top;})()`);
     assert.ok(settingsTop<=1, '设置分类与顶部没有额外空白');
@@ -379,13 +359,13 @@ app.whenReady().then(async () => {
     assert.equal(hoverStyle.radius,'999px'); assert.ok(hoverStyle.opacity>0.5);
     await screenshot('设置分类-胶囊悬停.png');
     win.webContents.sendInputEvent({type:'mouseMove',x:1,y:1});
-    await win.webContents.executeJavaScript(`(() => {const section=document.querySelector('[data-settings-section="general"]'); section.querySelector('[name="autoExplainCapture"]').checked=true;section.querySelector('[name="pinSound"]').checked=false;section.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));})()`);
-    await waitForCall('save-settings', item => item.payload.prefs?.autoExplainCapture === true);
+    await win.webContents.executeJavaScript(`(() => {const section=document.querySelector('[data-settings-section="general"]'),mode=section.querySelector('[name="captureExplainMode"]');mode.value='prompt';mode.dispatchEvent(new Event('change',{bubbles:true}));const sound=section.querySelector('[name="pinSound"]');sound.checked=false;sound.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitForCall('save-settings', item => item.payload.prefs?.captureExplainMode === 'prompt');
     await win.webContents.executeJavaScript(`document.querySelectorAll('.settings-navigation button')[3].click()`);
     await waitFor(`document.querySelector('[data-settings-section="shortcuts"]')?.hidden===false`, '快捷键设置');
     const shortcutsLayout = await win.webContents.executeJavaScript(`(() => {
       const page=document.querySelector('.shortcuts-page'), actions=page.querySelector('.shortcut-actions');
-      const buttons=[...actions.children].map(node=>node.getBoundingClientRect());
+      const buttons=[...actions.children].filter(node=>node.checkVisibility()).map(node=>node.getBoundingClientRect());
       return {overflow:page.scrollWidth>page.clientWidth+1, heights:buttons.map(box=>box.height), sameLine:buttons.every(box=>Math.abs(box.top-buttons[0].top)<1), rows:[...page.querySelectorAll('.shortcut-row')].map(node=>node.getBoundingClientRect().height)};
     })()`);
     assert.equal(shortcutsLayout.overflow, false);
@@ -406,7 +386,8 @@ app.whenReady().then(async () => {
     await delay(220);
     await win.webContents.executeJavaScript(`document.querySelector('[data-scroll="body"]').scrollTop=0`);
     await screenshot('快捷键-紧凑布局.png');
-    await win.webContents.executeJavaScript(`document.querySelector('.shortcut-actions .secondary').click();document.querySelector('.shortcut-actions .primary').click()`);
+    assert.equal(await win.webContents.executeJavaScript(`Boolean(document.querySelector('.shortcut-actions .primary'))`), false, '快捷键无需额外保存按钮');
+    await win.webContents.executeJavaScript(`document.querySelector('.shortcut-actions .secondary').click()`);
     await waitForCall('save-settings', item => Boolean(item.payload.prefs?.shortcuts));
     assert.equal(current.settings.prefs.pinSound, false, '保存快捷键不会覆盖常规提示音设置');
     current.status.reducedMotion = true; await pushState();
@@ -425,21 +406,20 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(`document.querySelector('[name="text-apiKey"]').scrollIntoView({block:'center',container:'nearest'})`);
     await screenshot('AI服务-密钥说明.png');
     const settingsScroll = await win.webContents.executeJavaScript(`(() => {
-      const body=document.querySelector('[data-scroll="body"]'), save=document.querySelector('[data-settings-section="service"] button[type="submit"]');
+      const body=document.querySelector('[data-scroll="body"]');
       body.scrollTop=body.scrollHeight;
-      const bodyRect=body.getBoundingClientRect(), saveRect=save.getBoundingClientRect();
-      return {scrollable:body.scrollHeight>body.clientHeight,scrollTop:body.scrollTop,saveVisible:saveRect.bottom<=bodyRect.bottom+1&&saveRect.top>=bodyRect.top-1};
+      return {scrollable:body.scrollHeight>body.clientHeight,scrollTop:body.scrollTop,saveCount:document.querySelectorAll('[data-settings-section] button[type="submit"]').length};
     })()`);
     assert.equal(settingsScroll.scrollable, true, '服务设置超过视口时应可滚动');
     assert.ok(settingsScroll.scrollTop > 0, '设置页滚轮可改变滚动位置');
-    assert.equal(settingsScroll.saveVisible, true, '滚到设置底部后能够看到保存按钮');
+    assert.equal(settingsScroll.saveCount, 0, '所有设置无需寻找额外保存按钮');
     await screenshot('AI服务-设置底部.png');
     await win.webContents.executeJavaScript(`document.querySelector('[data-scroll="body"]').scrollTop=0`);
 
     await win.webContents.executeJavaScript(`(() => {
       const select=document.querySelector('[name="text-provider"]'); select.value='deepseek'; select.dispatchEvent(new Event('change',{bubbles:true}));
       window.testStoredKey={value:document.querySelector('[name="text-apiKey"]').value,placeholder:document.querySelector('[name="text-apiKey"]').placeholder};
-      document.querySelector('[name="text-apiKey"]').value='虚构的DeepSeekKey';
+      document.querySelector('[name="text-apiKey"]').value='虚构的DeepSeekKey';document.querySelector('[name="text-apiKey"]').dispatchEvent(new Event('input',{bubbles:true}));
     })()`);
     const storedKey = await win.webContents.executeJavaScript('window.testStoredKey');
     assert.equal(storedKey.value, '', '公开 hasKey 只控制提示，不会被当作明文密钥');
@@ -514,15 +494,14 @@ app.whenReady().then(async () => {
 
 
 
-    // 表单提交通过虚构 IPC 保存，不访问用户配置文件。
-    await win.webContents.executeJavaScript(`document.querySelector('[data-settings-section="service"] form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
-    const saved = await waitForCall('save-settings', item => Boolean(item.payload.text));
+    // 输入与切换自动保存到虚构 IPC，不访问用户配置文件。
+    const saved = await waitForCall('save-settings', item => item.payload.text?.apiKey === '虚构的DeepSeekKey');
     assert.equal(saved.payload.text.providerId, 'deepseek');
     assert.equal(saved.payload.text.apiKey, '虚构的DeepSeekKey');
     assert.equal(saved.payload.serviceProfiles.text.deepseek.apiKey, '虚构的DeepSeekKey');
-    assert.equal(saved.payload.search.providerId, 'custom');
-    assert.equal(saved.payload.search.protocol,'deepseek');
-    assert.equal(saved.payload.serviceProfiles.search.custom.protocol,'deepseek');
+    const savedSearch = await waitForCall('save-settings', item => item.payload.search?.protocol === 'deepseek');
+    assert.equal(savedSearch.payload.search.providerId, 'custom');
+    assert.equal(savedSearch.payload.serviceProfiles.search.custom.protocol,'deepseek');
     assert.equal(saved.payload.prefs, undefined, 'AI 服务保存不覆盖常规偏好');
 
     current.view = 'preview';

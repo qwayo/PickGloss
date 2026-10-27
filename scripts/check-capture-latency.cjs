@@ -56,12 +56,12 @@ async function structuralProbe() {
     desktopCapturer: { async getSources(request) { requests.push(request); events.push({ stage: '取图替身', at: now }); return [{ display_id: String(display.id), thumbnail: image }]; } } };
   const loaded = { exports: {} };
   vm.runInNewContext(source, { module: loaded, exports: loaded.exports, __dirname: path.dirname(sourcePath),
-    require: name => name === 'electron' ? electron : name === './geometry.cjs' ? require('../src/windows/geometry.cjs') : require(name),
+    require: name => name === 'electron' ? electron : name === './screen-capture.cjs' ? { createScreenCapture: () => null } : name.startsWith('./') ? require(path.join(path.dirname(sourcePath), name)) : require(name),
     process: { platform: 'win32', pid: 0 }, Date,
     setTimeout(callback, delay = 0) {
       events.push({ stage: '定时等待', at: now, delay });
       // 只推进退隐等待；就绪失败看门狗保留为待执行计时器，避免替身提前取消会话。
-      if (delay === 160) { now += delay; queueMicrotask(callback); }
+      if (delay <= 160) { now += delay; queueMicrotask(callback); }
       return 1;
     },
     clearTimeout() {}, setInterval() {}, clearInterval() {},
@@ -282,7 +282,7 @@ new MutationObserver(() => {
       desktopCapturer: { async getSources(value) { requests.push({ ...value, at: performance.now(), run: currentRun }); return [{ id: 'screen:707:0', name: '虚构屏幕', display_id: '707', thumbnail: wrapped }]; } } };
     const loaded = new Module(sourcePath, module);
     loaded.filename = sourcePath; loaded.paths = module.paths;
-    loaded.require = name => name === 'electron' ? electron : Module.prototype.require.call(loaded, name);
+    loaded.require = name => name === 'electron' ? electron : name === './screen-capture.cjs' ? { createScreenCapture: () => null } : Module.prototype.require.call(loaded, name);
     loaded._compile(source, sourcePath);
     return loaded.exports.createDesktop({ onAction() {}, onSelection() {}, onStatus() {} });
   }

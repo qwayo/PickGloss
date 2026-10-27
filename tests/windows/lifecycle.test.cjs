@@ -26,7 +26,7 @@ function clock(quantum = 0, timerDelays = []) {
 }
 
 // 使用真实桌面模块和假窗口，不创建 Electron 或访问用户桌面。
-function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, windowsBuild = 26100, materialError = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, dipScale = 1 } = {}) {
+function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, windowsBuild = 26100, materialError = false, frameHelperMissing = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, nativeCapture = null, dipScale = 1 } = {}) {
   const made = [], messages = [], statuses = [], selections = [], selectionUpdates = [], commands = [], actions = [], trays = [], menus = [], ipcMain = new EventEmitter(), time = clock(timerQuantum, timerDelays);
   const nativeTheme = Object.assign(new EventEmitter(), { shouldUseDarkColors: false, shouldUseDarkColorsForSystemIntegratedUI: false, themeSource: 'system' });
   const animationSettings = { prefersReducedMotion: !animate, shouldRenderRichAnimation: true };
@@ -36,7 +36,7 @@ function desktopHarness({ loading = false, animate = false, blurOnHide = false, 
     static getAllWindows() { return made; }
     static getFocusedWindow() { return focused; }
     constructor(options) {
-      super(); this.options = options; this.destroyed = false; this.loading = loading; this.loads = 0; this.frames = []; this.frameTimes = []; this.bounds = { x: 0, y: 0, width: options.width, height: options.height, ...options };
+      super(); this.options = options; this.background = options.backgroundColor; this.destroyed = false; this.loading = loading; this.loads = 0; this.frames = []; this.frameTimes = []; this.bounds = { x: 0, y: 0, width: options.width, height: options.height, ...options };
       this.bounds = { x: this.bounds.x, y: this.bounds.y, width: this.bounds.width, height: this.bounds.height };
       this.webContents = Object.assign(new EventEmitter(), {
         id: made.length + 1, mainFrame: {}, isLoading: () => this.loading, setWindowOpenHandler() {},
@@ -68,21 +68,25 @@ function desktopHarness({ loading = false, animate = false, blurOnHide = false, 
   }
   const display = () => ({ id: 1, bounds: workArea, workArea, scaleFactor: 2 });
   const electron = { BrowserWindow: Window, ipcMain, nativeTheme, desktopCapturer: { getSources: getSources || (async () => []) }, systemPreferences: { getAnimationSettings: () => animationSettings },
-    Menu: { buildFromTemplate(template) { menus.push(template); return { template, popup() {} }; } }, Tray: FakeTray, nativeImage: { createFromPath: value => value },
+    Menu: { buildFromTemplate(template) { menus.push(template); return { template, popup() {} }; } }, Tray: FakeTray, nativeImage: { createFromPath: value => value,
+      createFromBitmap: (_bytes, size) => ({ isEmpty: () => false, getSize: () => size, toJPEG: () => Buffer.from('虚构原生预览'), crop: () => ({ toDataURL: () => 'data:image/png;base64,虚构原生裁剪' }) }) },
     utilityProcess: { fork: () => worker }, app: { getAppPath: () => '测试程序目录' }, screen: Object.assign(new EventEmitter(), {
     getCursorScreenPoint: () => ({ x: 500, y: 300 }),
     getDisplayMatching: display, getPrimaryDisplay: display, getAllDisplays: () => [display()],
     getDisplayNearestPoint: display,
     screenToDipPoint: point => ({ x: Math.round(point.x / dipScale), y: Math.round(point.y / dipScale) }),
+    dipToScreenRect: (_window, rect) => ({ x: rect.x * 2, y: rect.y * 2, width: rect.width * 2, height: rect.height * 2 }),
   }) };
   const target = path.join(__dirname, '../../src/windows/desktop.cjs'), mod = { exports: {} };
   vm.runInNewContext(fs.readFileSync(target, 'utf8'), {
     module: mod, exports: mod.exports, __dirname: path.dirname(target),
-    require: name => name === 'electron' ? electron : name === 'node:perf_hooks' ? { performance: { now: time.now } } : name === 'node:os' ? { release: () => '10.0.' + windowsBuild } : name === 'node:fs' ? { ...fs, existsSync: () => true } : name === './geometry.cjs' ? require('../../src/windows/geometry.cjs') : require(name),
+    require: name => name === 'electron' ? electron : name === 'node:perf_hooks' ? { performance: { now: time.now } } : name === 'node:os' ? { release: () => '10.0.' + windowsBuild } : name === 'node:fs' ? { ...fs, existsSync: () => true } : name === './window-appearance.cjs' ? {
+      createWindowAppearance(win, options) { win.failFrame = options.onError; win.clipRadius = options.clipRadius; return frameHelperMissing || materialError && options.clipRadius ? null : { isReady: true, setBackdrop(value) { win.backdropEnabled = value; }, apply(value) { win.nativeBorder = value; }, dispose() {} }; },
+    } : name === './screen-capture.cjs' ? { createScreenCapture: () => null } : name.startsWith('./') ? require(path.resolve(path.dirname(target), name)) : require(name),
     process: { pid: 1, platform: 'win32' }, Date: { now: time.now },
     ...time, clearInterval() {}, setInterval() {},
   });
-  const desktop = mod.exports.createDesktop({ onAction: (...args) => actions.push(args), onSelection: data => { selections.push(data);return onSelection?.(data); },
+  const desktop = mod.exports.createDesktop({ captureFactory: () => nativeCapture, onAction: (...args) => actions.push(args), onSelection: data => { selections.push(data);return onSelection?.(data); },
     onSelectionContext: data => { selectionUpdates.push(data);return onSelectionContext?.(data); }, onStatus: value => statuses.push(value), onWindowState });
   desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, reducedMotion: false }); statuses.length = 0;
   return { desktop, made, messages, statuses, selections, selectionUpdates, commands, worker, ipcMain, time, nativeTheme, animationSettings, trays, menus, actions,
@@ -142,6 +146,28 @@ test('旧系统保留 CSS 圆角透明画布，禁用不受支持的系统磨砂
   desktop.setAppearance({ current: { mode: 'dark', material: 'glass' } }); desktop.openPanel();
   assert.equal(made[0].options.transparent, true); assert.equal(made[0].material, 'none');
   assert.equal(made[0].shape, undefined); assert.equal(statuses.at(-1).appearanceMaterial, 'solid');
+});
+
+test('磨砂通过 NONE 停止绘制不透明系统边色，固定彩边和纯色窗口仍走原生边框', () => {
+  const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
+  desktop.setAppearance({ current: { mode: 'dark', material: 'glass' }, pinOutline: 'orange' });
+  assert.equal(panel.material, 'acrylic'); assert.equal(panel.nativeBorder, 'none'); assert.equal(panel.accent, false);
+  desktop.setPinned(true); assert.equal(panel.nativeBorder, '#dc873d');
+  desktop.setAppearance({ current: { mode: 'dark', material: 'glass' }, pinOutline: 'none' });
+  assert.equal(panel.nativeBorder, 'none');
+  desktop.setAppearance({ current: { mode: 'dark', material: 'solid' }, pinOutline: 'none' });
+  assert.equal(panel.nativeBorder, '#252525'); assert.equal(panel.material, 'none');
+});
+
+test('窗口外观助手缺失或退出时回退纯色，避免留下无法去除的不透明磨砂边框', () => {
+  for (const missing of [false, true]) {
+    const { desktop, made, statuses } = desktopHarness({ frameHelperMissing: missing });
+    desktop.setAppearance({ current: { mode: 'dark', material: 'glass' } }); desktop.openPanel();
+    const panel = made[0];
+    if (!missing) { assert.equal(panel.material, 'acrylic'); panel.failFrame(); }
+    assert.equal(panel.material, 'none'); assert.equal(panel.background, '#252525');
+    assert.equal(statuses.at(-1).appearanceMaterial, 'solid');
+  }
 });
 
 test('恢复默认同时清除两种自定义尺寸，并保持当前布局和靠边位置', () => {
@@ -438,6 +464,25 @@ test('原生主题跟随系统，托盘使用系统任务栏明暗并提供外�
   assert.equal(trays[0].popupMenus[1].template, menus[1]);
 });
 
+test('托盘菜单显示当前截图快捷键并提供常规设置入口', () => {
+  const { desktop, trays, menus, actions } = desktopHarness();
+  desktop.broadcast({ settings: { prefs: { shortcuts: { capture: 'Ctrl+Shift+S' } } } });
+  desktop.initTray(); trays[0].emit('click');
+  const screenshotItem = menus[0].find(item => item.label.startsWith('截图框选'));
+  assert.equal(screenshotItem.label, '截图框选    Ctrl+Shift+S');
+  screenshotItem.click(); assert.deepEqual(actions.at(-1), ['start-capture']);
+  menus[0].find(item => item.label === '常规设置').click();
+  assert.equal(actions.at(-1)[0], 'open-settings'); assert.equal(actions.at(-1)[1].section, 'general');
+
+  desktop.broadcast({ settings: { prefs: { shortcuts: { capture: 'F8' } } } });
+  trays[0].emit('right-click');
+  assert.equal(menus[1].find(item => item.label.startsWith('截图框选')).label, '截图框选    F8');
+
+  desktop.broadcast({ settings: { prefs: { shortcuts: { capture: '' } } } });
+  trays[0].emit('click');
+  assert.equal(menus[2].find(item => item.label.startsWith('截图框选')).label, '截图框选');
+});
+
 test('置顶与无描边均不创建独立光晕窗，窗口显示和尺寸始终归主窗', () => {
   const { desktop, made, time } = desktopHarness({ animate: true }); desktop.openPanel(); const win = made[0];
   for (const pinOutline of ['blue', 'none', 'orange']) {
@@ -610,6 +655,169 @@ test('不支持磨砂或系统减少透明时回退实色，状态广播覆盖�
   }
 });
 
+test('翻译控制窗独立使用亚克力，不改变主窗口或原位覆盖的材质', () => {
+  const { desktop, made, nativeTheme } = desktopHarness();
+  desktop.setAppearance({ current: { mode: 'dark', material: 'solid' } }); desktop.openPanel();
+  const placement = { region: { x: 100, y: 100, width: 200, height: 100 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay');
+  const controls = made.find(win => win.kind === 'translation'), overlay = made.find(win => win.kind === 'translation-overlay');
+  assert.equal(controls.backdropEnabled, true); assert.equal(controls.options.transparent, true);
+  assert.equal(controls.clipRadius, 14); assert.equal(controls.nativeBorder, 'none'); assert.equal(controls.options.hasShadow, false);
+  assert.equal(controls.material, undefined, '透明控件窗不能再启用矩形系统背景');
+  assert.equal(made.find(win => win.kind === 'panel').material, 'none');
+  assert.equal(overlay.material, undefined, '截图覆盖不得添加背景材质');
+  const event = { sender: controls.webContents, senderFrame: controls.webContents.mainFrame };
+  const state = { status: { appearanceMaterial: 'solid' }, settings: {} };
+  assert.equal(desktop.stateFor(event, state).status.appearanceMaterial, 'glass');
+  assert.equal(desktop.authorize(event, 'translation-content-height'), true, '仅控制窗可反馈翻译内容高度');
+  const overlayEvent = { sender: overlay.webContents, senderFrame: overlay.webContents.mainFrame };
+  assert.equal(desktop.authorize(overlayEvent, 'translation-content-height'), false, '截图覆盖窗不能调整控制窗');
+  const panel = made.find(win => win.kind === 'panel');
+  assert.equal(desktop.authorize({ sender: panel.webContents, senderFrame: panel.webContents.mainFrame }, 'translation-content-height'), false, '主面板不能调整翻译控制窗');
+  assert.equal(state.status.appearanceMaterial, 'solid', '独立材质状态不能反写主窗口状态');
+  nativeTheme.prefersReducedTransparency = true; nativeTheme.emit('updated');
+  assert.equal(controls.backdropEnabled, false); assert.equal(controls.background, '#00000000');
+  assert.equal(desktop.stateFor(event, state).status.appearanceMaterial, 'solid');
+});
+
+test('翻译控制窗在旧系统、材质错误或外观助手失效时使用可读备用表面', () => {
+  for (const options of [{ windowsBuild: 19045 }, { materialError: true }, { frameHelperMissing: true }]) {
+    const { desktop, made } = desktopHarness(options);
+    const placement = { region: { x: 100, y: 100, width: 200, height: 100 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+    desktop.showTranslation(placement, 'overlay');
+    const controls = made.find(win => win.kind === 'translation');
+    assert.equal(controls.material, undefined);
+    assert.equal(controls.background, '#00000000', '备用实色由 CSS 圆角表面绘制，不能填充整块原生窗口');
+    const event = { sender: controls.webContents, senderFrame: controls.webContents.mainFrame };
+    assert.equal(desktop.stateFor(event, { status: {} }).status.appearanceMaterial, 'solid');
+  }
+});
+
+test('覆盖译文固定在原选区，独立移动控制窗口不带动覆盖且切换对照保留控制位置', () => {
+  const { desktop, made } = desktopHarness();
+  const placement = { region: { x: 240, y: 200, width: 360, height: 180 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay');
+  const overlay = made.find(win => win.kind === 'translation-overlay');
+  const controls = made.find(win => win.kind === 'translation');
+  assert.ok(overlay, '原位覆盖必须使用独立窗口'); assert.ok(controls);
+  const eventFor = win => ({ sender: win.webContents, senderFrame: win.webContents.mainFrame });
+  assert.equal(desktop.authorize(eventFor(controls), 'set-translation-preferences'), true, '控制窗可保存语言选择');
+  assert.equal(desktop.authorize(eventFor(controls), 'open-link'), true, '控制窗可打开用户点击的联网来源');
+  assert.equal(desktop.authorize(eventFor(overlay), 'open-link'), false, '只读覆盖窗不能打开外链');
+  assert.equal(desktop.authorize(eventFor(overlay), 'set-translation-preferences'), false, '只读覆盖窗不能修改语言默认值');
+  const before = { ...overlay.getBounds() };
+  controls.setBounds({ ...controls.getBounds(), x: 780, y: 480 });
+  assert.deepEqual({ ...overlay.getBounds() }, before);
+  desktop.showTranslation(placement, 'compare');
+  assert.deepEqual({ ...overlay.getBounds() }, before);
+  assert.equal(controls.getBounds().x, 780); assert.equal(controls.getBounds().y, 480);
+  assert.equal(overlay.options.movable, false); assert.equal(overlay.options.focusable, false);
+  assert.equal(overlay.ignoresMouse, true, '覆盖图不能挡住原软件交互');
+  desktop.hideTranslation(); assert.equal(overlay.isVisible(), false); assert.equal(controls.isVisible(), false);
+});
+
+test('翻译状态调整高度不重新显示隐藏窗口或夺取其他窗口的焦点', () => {
+  const { desktop, made, focusOutside } = desktopHarness();
+  const placement = { region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay');
+  const controls = made.find(win => win.kind === 'translation');
+  const before = { ...controls.getBounds() }; focusOutside();
+  desktop.showTranslation(placement, 'overlay', { extraHeight: 20, activate: false });
+  assert.equal(controls.isFocused(), false); assert.ok(controls.getBounds().height > before.height);
+  assert.equal(controls.getBounds().x, before.x); assert.equal(controls.getBounds().y, before.y);
+  desktop.hideTranslation();
+  desktop.showTranslation(placement, 'overlay', { activate: false });
+  assert.equal(controls.isVisible(), false); assert.equal(controls.isFocused(), false);
+  assert.equal(controls.getBounds().height, before.height);
+});
+
+test('内容高度反馈保留拖动位置，不聚焦或重显窗口、不移动覆盖层且不保存偏好', () => {
+  let settingsWrites = 0;
+  const { desktop, made, focusOutside } = desktopHarness({ onWindowState: async () => { settingsWrites++; } });
+  const placement = { region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'compare');
+  const controls = made.find(win => win.kind === 'translation'), overlay = made.find(win => win.kind === 'translation-overlay');
+  controls.setBounds({ ...controls.getBounds(), x: 780, y: 480 });
+  const position = { x: controls.getBounds().x, y: controls.getBounds().y }, overlayBounds = { ...overlay.getBounds() };
+  focusOutside();
+  assert.ok(desktop.resizeTranslationHeight(placement, 360));
+  assert.deepEqual({ x: controls.getBounds().x, y: controls.getBounds().y }, position, '拖动后只变更高度');
+  assert.equal(controls.getBounds().height, 360);
+  assert.deepEqual({ ...overlay.getBounds() }, overlayBounds, '高度变化不移动原位截图覆盖');
+  assert.equal(controls.isVisible(), true, '已显示窗口保持当前显示状态');
+  assert.equal(controls.isFocused(), false, '测量反馈不能抢焦点');
+  assert.equal(settingsWrites, 0, '临时内容尺寸不进入窗口偏好');
+  desktop.hideTranslation();
+  assert.equal(desktop.resizeTranslationHeight(placement, 420), null, '窗口关闭后迟到测量被忽略');
+  assert.equal(controls.getBounds().height, 360);
+});
+
+test('翻译控制窗高度不超过当前工作区或 480 CSS 像素上限', () => {
+  const harness = desktopHarness(), { desktop, made } = harness;
+  const area = { x: 0, y: 0, width: 420, height: 220 };
+  harness.changeDisplay(area);
+  const placement = { region: { x: 60, y: 40, width: 100, height: 60 }, displayBounds: area };
+  desktop.showTranslation(placement, 'compare');
+  const controls = made.find(win => win.kind === 'translation');
+  const small = desktop.resizeTranslationHeight(placement, 480);
+  assert.equal(small.height, 220, '工作区较小时按工作区限高');
+  assert.equal(controls.getBounds().height, 220);
+  const fullHarness = desktopHarness(), full = { region: { x: 100, y: 100, width: 100, height: 50 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  fullHarness.desktop.showTranslation(full, 'compare');
+  assert.equal(fullHarness.desktop.resizeTranslationHeight(full, 900).height, 480, '常规显示器仍受 480 CSS 像素上限约束');
+  const narrowHarness = desktopHarness(), narrow = { region: { x: 100, y: 100, width: 100, height: 50 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  narrowHarness.desktop.showTranslation(narrow, 'compare');
+  narrowHarness.changeDisplay({ x: 0, y: 0, width: 240, height: 900 });
+  const narrowBounds = narrowHarness.desktop.resizeTranslationHeight(narrow, 360);
+  assert.equal(narrowBounds.width, 240, '跨入更窄工作区时原生窗口宽度服从工作区');
+  assert.equal(narrowBounds.height, 360);
+});
+
+test('截图界面可预热且不读取屏幕，无自有可见窗口时直接取图', async () => {
+  let reads = 0;
+  const image = { isEmpty: () => false, toJPEG: () => Buffer.from('虚构预览') };
+  const { desktop, made, time } = desktopHarness({ getSources: async () => { reads++; return [{ display_id: '1', thumbnail: image }]; } });
+  desktop.prepareCapture();
+  const prepared = made.find(win => win.kind === 'capture');
+  assert.ok(prepared); assert.equal(reads, 0); assert.equal(prepared.isVisible(), false);
+  const pending = desktop.beginCapture();
+  time.advance(0); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 1, '没有可见自有窗口时，不应支付固定退隐等待');
+  await pending; assert.equal(made.filter(win => win.kind === 'capture').length, 1);
+});
+
+test('原生截图预热不采屏，采用物理显示器矩形并在销毁时停止助手', async () => {
+  const calls = [];
+  const reader = { async prepare() { calls.push('prepare'); }, async capture(rect) { calls.push({ ...rect }); return { bitmap: Buffer.alloc(2880 * 1800 * 4), width: 2880, height: 1800 }; }, dispose() { calls.push('dispose'); } };
+  const { desktop } = desktopHarness({ nativeCapture: reader, getSources: async () => { throw Error('不应走后备'); } });
+  desktop.prepareCapture(); assert.deepEqual(calls, ['prepare']);
+  await desktop.beginCapture(); assert.deepEqual(calls[1], { x: 0, y: 0, width: 2880, height: 1800 });
+  assert.equal(desktop.captureState().method, 'native');
+  assert.match(desktop.finishCapture({ x: 10, y: 20, width: 100, height: 60 }), /虚构原生裁剪/);
+  desktop.dispose(); assert.equal(calls.at(-1), 'dispose');
+});
+
+test('原生取图失败自动走现有采集，旧请求取消后不启动后备采集', async () => {
+  let sources = 0, release;
+  const image = { isEmpty: () => false, toJPEG: () => Buffer.from('虚构后备') };
+  const reader = { async prepare() {}, async capture() { throw Error('模拟锁屏'); }, dispose() {} };
+  const h = desktopHarness({ nativeCapture: reader, getSources: async () => { sources++; return [{ display_id: '1', thumbnail: image }]; } });
+  await h.desktop.beginCapture(); assert.equal(sources, 1); assert.equal(h.desktop.captureState().method, 'electron');
+  const late = desktopHarness({ nativeCapture: { ...reader, capture: () => new Promise((_resolve, reject) => { release = reject; }) }, getSources: async () => { sources++; return []; } });
+  const pending = late.desktop.beginCapture(); await new Promise(resolve => setImmediate(resolve));
+  late.desktop.cancelCapture(); release(Error('过期采集')); assert.equal(await pending, false); assert.equal(sources, 1);
+});
+
+test('截图隐藏自有窗口后只等三帧预算，不额外固定等待160毫秒', async () => {
+  let reads = 0;
+  const image = { isEmpty: () => false, toJPEG: () => Buffer.from('虚构预览') };
+  const { desktop, time } = desktopHarness({ getSources: async () => { reads++; return [{ display_id: '1', thumbnail: image }]; } });
+  desktop.openPanel(); const pending = desktop.beginCapture();
+  time.advance(49); await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 0);
+  time.advance(1); await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 1);
+  await pending;
+});
+
 test('截图预览只编码一次并定向送给截图窗口，普通状态不重复发送整屏图', async () => {
   let encodes = 0, requests = 0, options, quality, crop;
   const image = { isEmpty: () => false, toJPEG: value => { quality = value; encodes++; return Buffer.from('虚构预览'); }, getSize: () => ({ width: 2880, height: 1800 }),
@@ -619,6 +827,7 @@ test('截图预览只编码一次并定向送给截图窗口，普通状态不�
   const pending = desktop.beginCapture();
   const overlay = made.find(win => win.kind === 'capture'); assert.ok(overlay, '屏幕读取前先并行加载空截图 renderer');
   assert.equal(overlay.options.webPreferences.backgroundThrottling, false); assert.equal(overlay.options.webPreferences.nodeIntegration, false);
+  assert.equal(overlay.options.thickFrame, false, '快速重复截图不能保留系统退隐动画');
   assert.equal(overlay.isVisible(), false); time.advance(160); assert.equal(await pending, true);
   const first = desktop.captureState(), again = desktop.captureState();
   assert.equal(first.id, again.id); assert.equal(encodes, 1); assert.equal(requests, 1);
@@ -886,8 +1095,9 @@ function mainHarness() {
     requestSingleInstanceLock: () => true, on: events.on.bind(events), whenReady: () => new Promise(() => {}), quit: () => calls.quit++ };
   const desktop = { flushDrafts: async () => flags.ack, flushWindowState: async () => true, restoreWindowState: () => false, setAppearance() {}, openPanel: () => {calls.open++;flags.visible=true;}, dispose: () => calls.dispose++, captureState: () => null,
     isPanelVisible:()=>flags.visible, hidePanel(){calls.hide++;flags.visible=false;}, async beginCapture(){if(flags.capturing)return false;flags.capturing=true;calls.capture++;return true;},
-    broadcast() {}, initTray() {}, setOrb() {}, startSelection() {} };
-  const store = { init: async () => {}, getSettings: async () => ({ prefs: {}, text: {}, vision: {} }),
+    broadcast() {}, initTray() {}, setOrb() {}, startSelection() {}, prepareCapture() {} };
+  const persistedSettings = { prefs: { orbAction: 'chat' }, text: {}, vision: {} };
+  const store = { init: async () => {}, getSettings: async () => structuredClone(persistedSettings),
     updateSession: async () => { calls.writes++; if (!flags.save) throw new Error('测试磁盘写入失败'); }, listSessions: async () => [] };
   const electron = { app, globalShortcut: { unregisterAll() {}, unregister() {}, register: () => true }, ipcMain: { handle() {} },
     session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} } } };
@@ -896,11 +1106,11 @@ function mainHarness() {
     require: name => name === 'electron' ? electron : name === './core/store.cjs' ? { createStore: () => store } :
       name === './windows/desktop.cjs' ? { createDesktop: () => desktop } : name === './core/shortcuts.cjs' ? require('../../src/core/shortcuts.cjs') : name === './core/history.cjs' ? require('../../src/core/history.cjs') : name.startsWith('./') ? {} : require(name),
     process: { argv: [], env: {}, pid: 1, platform: 'win32' }, ...time, structuredClone,
-    auditStore: store, auditDesktop: desktop,
+    auditStore: store, auditDesktop: desktop, auditSettings: persistedSettings,
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(target, 'utf8') + `
-    store = auditStore; desktop = auditDesktop; settings = {prefs:{orbAction:'chat'}}; activeId = '测试会话';
+    store = auditStore; desktop = auditDesktop; settings = auditSettings; activeId = '测试会话';
     cache.set(activeId, {id: activeId, kind: 'text', threads: {}});
     globalThis.audit = {quit, start, handle, setOrbAction:value=>settings.prefs.orbAction=value, info: () => ({quitting, readyToExit, error: status.error, view, activeId})};
   `, context);
@@ -916,7 +1126,7 @@ test('悬浮球连续点击依次开关，不并发打开窗口；空历史回�
 
 test('悬浮球关闭前保存草稿，失败不隐藏且后续点击可重试', async()=>{
   const app=mainHarness();app.flags.visible=true;app.flags.ack=false;
-  await assert.rejects(app.handle('orb-activate'),/草稿尚未保存/);
+  await assert.rejects(app.handle('orb-activate'),/有更改尚未保存/);
   assert.equal(app.calls.hide,0);assert.equal(app.flags.visible,true);
   app.flags.ack=true;await app.handle('orb-activate');assert.equal(app.calls.hide,1);
 });
@@ -945,7 +1155,7 @@ test('退出前草稿未确认或最终写盘失败时保留进程，恢复后�
   assert.equal(app.calls.quit, 0);
   assert.equal(app.calls.dispose, 0);
   assert.equal(app.info().quitting, false);
-  assert.match(app.info().error, /草稿尚未保存/);
+  assert.match(app.info().error, /有更改尚未保存/);
   app.flags.ack = true; app.flags.save = false;
   await app.quit();
   assert.equal(app.calls.quit, 0);
@@ -965,7 +1175,7 @@ test('退出草稿确认抛错时取消退出，确认恢复后仍可重试', as
   assert.equal(app.calls.quit, 0);
   assert.equal(app.calls.dispose, 0);
   assert.equal(app.info().quitting, false);
-  assert.match(app.info().error, /草稿尚未保存/);
+  assert.match(app.info().error, /有更改尚未保存/);
   app.desktop.flushDrafts = async () => true;
   await app.quit();
   assert.equal(app.calls.quit, 1);

@@ -30,6 +30,10 @@ temp/
 # 验收记录与机器证据属于本机过程材料，不进入公开仓库
 /docs/verification/
 
+# 调研与需求文档只保留在本机
+/docs/research/
+/docs/specs/
+
 # 本地工具、调试缓存与系统生成文件
 /.codex/
 /.agents/

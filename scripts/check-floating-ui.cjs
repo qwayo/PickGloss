@@ -53,6 +53,9 @@ async function handle(action, payload = {}) {
   else if (action === 'navigate') state.view = payload.view;
   else if (action === 'set-draft') return;
   else if (action === 'orb-drag') return desktop.dragOrb(payload);
+  else if (action === 'menu-ready') return desktop.menuReady(payload);
+  else if (action === 'menu-close') return desktop.closeMenu(payload);
+  else if (action === 'open-settings') { desktop.closeMenu(); state.view = 'settings'; state.settingsSection = payload.section === 'general' ? 'general' : 'service'; }
   else throw Error(`隔离检查不支持动作：${action}`);
   emit(); return state.settings;
 }
@@ -147,19 +150,25 @@ app.whenReady().then(async () => {
       assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderLeftColor'), 'rgba(0, 0, 0, 0)', '未发光时不绘制左侧和底部的普通灰描边');
       const rootBackground = await evaluate('getComputedStyle(document.documentElement).backgroundColor');
       assert.equal(rootBackground, material === 'solid' ? (mode === 'dark' ? 'rgb(37, 37, 37)' : 'rgb(255, 255, 255)') : 'rgba(0, 0, 0, 0)', '仅实色解释窗填充同色根画布，磨砂仍保持透明');
-      assert.equal(panel.getAccentColor().toLowerCase(), mode === 'dark' ? '#252525' : '#ffffff', '原生边色随纸面切换');
+      if (material === 'glass') assert.equal(panel.getAccentColor(), false, '磨砂普通状态关闭不透明强调边色');
+      else assert.equal(panel.getAccentColor().toLowerCase(), mode === 'dark' ? '#252525' : '#ffffff', '纯色原生边色随纸面切换');
+      await until(() => evaluate(`document.documentElement.style.getPropertyValue('--native-border-suppressed')===${quoteJavaScriptString(material === 'glass' ? '1' : '0')} && parseFloat(document.documentElement.style.getPropertyValue('--native-client-width'))>0`), '原生边色应答与实际客户区几何同步');
+      const nativeGeometry = await evaluate('(()=>{const s=document.documentElement.style;return {width:parseFloat(s.getPropertyValue("--native-client-width")),height:parseFloat(s.getPropertyValue("--native-client-height")),band:parseFloat(s.getPropertyValue("--native-pin-band")),left:parseFloat(s.getPropertyValue("--native-pin-left")),top:parseFloat(s.getPropertyValue("--native-pin-top")),right:parseFloat(s.getPropertyValue("--native-pin-right")),bottom:parseFloat(s.getPropertyValue("--native-pin-bottom"))}})()');
+      assert.ok(nativeGeometry.width > 0 && nativeGeometry.height > 0 && nativeGeometry.band > 0, '光条采用原生助手返回的有效客户区尺寸');
+      assert.ok(['left', 'top', 'right', 'bottom'].every(edge => nativeGeometry[edge] >= 0 && nativeGeometry[edge] <= nativeGeometry.band), '内孔四边扣除非客户区后仍在总色带以内');
       assert.equal(await evaluate('getComputedStyle(document.documentElement).getPropertyValue("--paper").trim()'), mode === 'dark' ? '#252525' : '#ffffff');
       if (material === 'glass') await shot(`${mode === 'dark' ? '深色' : '浅色'}磨砂`);
     }
     checks.push({ 检查: '八次明暗与材质切换', 通过: true });
     await handle('pin', { pinned: true });
     await until(() => evaluate('Boolean(document.querySelector(".panel-bar .is-pinned"))'), '置顶状态');
-    assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").borderTopWidth'), '2px', '恢复原有置顶描边粗细');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").borderTopWidth'), '0px', '原生路径的柔光从实体光条内孔起光，不用透明边框向内推开');
     const pinShadow = await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").boxShadow');
     assert.ok(pinShadow.includes('0.4') && pinShadow.includes('0.16'), '恢复原有两层柔光强度');
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".native-pin-frame")).display'), 'block', '固定时绘制原强度光条');
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".native-pin-frame mask")).maskType'), 'luminance', '内孔透明，不给磨砂铺不透明底板');
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".native-pin-frame")).pointerEvents'), 'none');
+    await until(() => evaluate('(()=>{const s=document.documentElement.style,r=document.querySelector(".native-pin-frame").getBoundingClientRect();return Math.abs(r.width-parseFloat(s.getPropertyValue("--native-client-width")))<.05&&Math.abs(r.height-parseFloat(s.getPropertyValue("--native-client-height")))<.05})()'), '固定光条尺寸与实际物理客户区同步');
     assert.equal(panel.getAccentColor().toLowerCase(), '#dc873d', '原生边框与光条同色');
     await shot('置顶-恢复原发光与页面圆角');
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel-bar .is-pinned .icon path")).fill'), await evaluate('getComputedStyle(document.querySelector(".panel-bar .is-pinned .icon")).color'));
@@ -194,7 +203,7 @@ app.whenReady().then(async () => {
     await evaluate('document.querySelector(".panel-body").scrollTop=0'); await shot('外观设置-阅读尺寸');
     await handle('wide', { wide: false }); await until(() => !state.status.windowTransitioning, '恢复小窗');
     checks.push({ 检查: '真实鼠标点击色板及光标显示', 通过: true });
-    await click('.appearance-reset');
+    await click('.appearance-preset[data-preset="default"]');
     await handle('navigate', { view: 'paste' });
     await until(() => evaluate('Boolean(document.querySelector("[data-field=paste-text]"))'), '识别页面');
     const fit = await evaluate('(()=>{const b=document.querySelector(".panel-body"),r=b.getBoundingClientRect(),a=document.querySelector(".form-actions").getBoundingClientRect();return {高度:b.clientHeight,内容:b.scrollHeight,操作可见:a.bottom<=r.bottom,缩放:document.querySelector("#app").style.zoom,滚动条:getComputedStyle(b).scrollbarWidth}})()');
@@ -247,6 +256,14 @@ app.whenReady().then(async () => {
     await shot('深色悬浮球', orb);
     const ball = await orb.webContents.executeJavaScript('({背景:getComputedStyle(document.querySelector(".orb")).backgroundColor,高光:getComputedStyle(document.querySelector(".orb")).backgroundImage})');
     assert.equal(ball.背景, 'rgb(37, 37, 37)'); assert.ok(ball.高光.includes('radial-gradient'));
+    desktop.menu({ source: 'panel' });
+    const menu = windows.find(win => win.testOptions.webPreferences && win.webContents.getURL().includes('window=menu')) || windows.at(-1);
+    await until(() => menu.webContents.executeJavaScript(`Boolean(document.querySelector('[data-menu-command="general-settings"]'))`), '快捷菜单常规设置入口');
+    assert.notEqual(await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="settings"] .icon').innerHTML`),await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"] .icon').innerHTML`),'AI 图标与常规齿轮区分');
+    await shot('快捷菜单-常规设置入口', menu);
+    await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"]').click()`);
+    await until(() => evaluate(`document.querySelector('[data-settings-section="general"]')?.hidden === false`), '菜单直达常规设置');
+    checks.push({ 检查: '快捷菜单常规设置入口直达对应分类', 通过: true });
     assert.deepEqual(errors, []); assert.ok(windows.every(w => w.isDestroyed() || !w.isVisible()));
     await fs.writeFile(path.join(output, '界面检查.json'), JSON.stringify({ 通过: true, 说明: '真实 Electron 隐藏窗口，虚构会话和隔离存储；不代表真实桌面流畅度或系统磨砂观感验收。', checks }, null, 2));
     console.log('悬浮窗检查通过：圆角、主题、置顶、色板指针、识别页和三轮展开采样。');
