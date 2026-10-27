@@ -196,11 +196,9 @@ test('搜索失败保留问题，联网重试及不联网继续均复用失败�
   assert.equal((await app.store.getSession(next.id)).webSearchEnabled,true);
 });
 
-test('截图默认待确认，自动解释开关及截图联网使用正确服务',async()=>{
+test('截图直接开始识图，旧自动解释关闭值不阻断且截图联网使用正确服务',async()=>{
   const app=await configured();
-  await app.handle('capture-done',{rect:{}});
-  assert.equal((await app.state()).view,'preview');assert.equal(app.requests.length,0);
-  await app.handle('save-settings',{prefs:{autoExplainCapture:true}});
+  await app.handle('save-settings',{prefs:{autoExplainCapture:false}});
   await app.handle('capture-done',{rect:{}});await app.drain();
   let current=(await app.state()).session;
   assert.equal((await app.state()).view,'explain');assert.equal(current.webSearchEnabled,false);assert.equal(app.requests.length,1);

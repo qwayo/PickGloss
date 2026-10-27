@@ -63,3 +63,49 @@ html[data-appearance=light] .orb{--orb-finish:radial-gradient(ellipse at 30% 18%
 .reduced-motion .orb.dragging{transform:none}
 @media(prefers-reduced-motion:reduce){.orb.dragging{transform:none}}
 .orb:hover{background-color:var(--paper);background-image:var(--orb-finish)}
+
+/* 批量选择会话时，所有危险操作都与筛选和当前分页状态一同呈现。 */
+.history-heading-actions{display:flex;align-items:center;gap:4px;flex:none}
+.history-heading-actions button{width:26px;height:26px;min-height:26px;padding:5px;border:0;border-radius:5px}
+.history-heading-actions .icon{width:14px;height:14px}
+.history-heading-actions button[aria-pressed=true]{color:var(--accent-ink);background:var(--selected)}
+.history-selection{position:sticky;top:0;z-index:3;margin:8px 0 6px;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--paper);box-shadow:0 2px 5px #0000000a;max-height:calc(100dvh - 140px);overflow:auto}
+.history-selection[hidden]{display:none}
+.history-selection-toolbar{display:flex;align-items:center;gap:4px;flex-wrap:nowrap}
+.history-selection-toolbar button{min-height:25px;height:25px;padding:2px 5px;font-size:11px;white-space:nowrap}
+.history-selection-toolbar .icon-button{width:25px;padding:5px;flex:none}
+.history-selection-toolbar .icon{width:14px;height:14px}
+.history-selection-count{margin:0 auto 0 0;font-size:11px;font-weight:500;white-space:nowrap}
+.history-selection-toolbar .danger{color:var(--danger)}
+.history-selection-warning,.history-batch-status{font-size:11px;line-height:1.5;margin:5px 0 0;overflow-wrap:anywhere}
+.history-selection-warning{color:var(--danger)}
+.history-selection-warning .text-button{font-size:12px;min-height:24px;margin-left:4px}
+.history-batch-status.failure{color:var(--danger)}
+.history-batch-status.success{color:var(--success)}
+.batch-delete-confirm{border-left:2px solid var(--danger);padding-left:9px;margin-top:9px;font-size:13px;line-height:1.65}
+.batch-delete-confirm p{margin:5px 0 8px}
+.batch-delete-confirm .actions{gap:6px}
+.batch-delete-confirm .actions button{min-height:29px;padding:4px 8px;font-size:12px}
+.history-select-label{display:flex;align-items:flex-start;justify-content:center;flex:none;padding:5px 1px 0 0;cursor:pointer}
+.history-select-checkbox{width:16px;height:16px;margin:0;accent-color:var(--accent-ink)}
+.history-topline:has(.history-select-checkbox){gap:8px}
+@media(max-width:420px){.history-selection{padding:5px}.history-selection-toolbar{gap:3px}}
+
+/* 解释模式保留下划线选中状态，悬停底色仅贴着标签文字。 */
+.mode-tabs[aria-label="解释模式"] button{position:relative;isolation:isolate}
+.mode-tabs[aria-label="解释模式"] button::before{content:"";position:absolute;inset:4px -5px 10px;border-radius:6px;background:var(--soft);opacity:0;z-index:-1;pointer-events:none;transition:opacity var(--fast)}
+.mode-tabs[aria-label="解释模式"] button:hover{background:transparent}
+.mode-tabs[aria-label="解释模式"] button:hover::before{opacity:.75}
+
+/* 查看上下文收紧标题与正文间距，同时保留清晰的键盘焦点。 */
+.context-disclosure{margin-top:4px;margin-bottom:8px;font-size:11px}
+.context-disclosure summary{min-height:22px;font-size:11px}
+.context-disclosure .context-text{font-size:12px;margin-top:4px}
+
+/* 收藏状态只强调已填充的星形图标。 */
+.panel-footer .starred,.panel-footer .starred:hover,.panel-footer .starred[aria-pressed=true]{background:transparent}
+
+:root{--success:#8fd49a}html[data-appearance=light]{--success:#276d38}
+
+/* 白色十字配深色外描边，在压暗画面和明亮原图上均清晰；中心热点对准选区。 */
+.capture-surface{cursor:url("assets/capture-crosshair.svg") 16 16,crosshair}

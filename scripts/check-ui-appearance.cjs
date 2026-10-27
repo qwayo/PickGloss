@@ -31,6 +31,39 @@ async function shot(name) {
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
   await fs.writeFile(path.join(output, name), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
 }
+async function centeredTabs(selector, label) {
+  const geometry = await evaluate(`(()=>{const tabs=document.querySelector(${quoteJavaScriptString(selector)}),box=tabs.getBoundingClientRect(),buttons=[...tabs.querySelectorAll('[role="tab"]')];return {width:box.width,items:buttons.map(node=>{const r=node.getBoundingClientRect();return {left:r.left-box.left,right:box.right-r.right,width:r.width,align:getComputedStyle(node).textAlign,overflow:node.scrollWidth>node.clientWidth}})}})()`);
+  assert.equal(geometry.items.length,4,label);
+  for (const item of geometry.items) { assert.ok(Math.abs(item.width-geometry.width/4)<1,label); assert.equal(item.align,'center',label); assert.equal(item.overflow,false,label); }
+  assert.ok(Math.abs(geometry.items[0].left-geometry.items[3].right)<1,label);
+  observations.push({ 检查: label, 布局: geometry });
+}
+async function picker(selector, name) {
+  assert.equal(await evaluate(`CSS.supports('appearance','base-select')`),true,'当前 Electron 支持原生主题选择器');
+  await win.webContents.executeJavaScript(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});node.scrollIntoView({block:'center'});node.focus();node.showPicker()})()`, true);
+  await waitFor(()=>evaluate(`document.querySelector(${quoteJavaScriptString(selector)}).matches(':open')`),'主题选择器展开');
+  await shot(name);
+  win.webContents.debugger.attach('1.3');
+  try {
+    await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  } finally { win.webContents.debugger.detach(); }
+  await waitFor(()=>evaluate(`!document.querySelector(${quoteJavaScriptString(selector)}).matches(':open')`),'Esc 收起选择器');
+  assert.equal(calls.includes('close'),false,'Esc 只收起选择器，不关闭设置');
+}
+async function keyboardSelectCaptureMode() {
+  await win.webContents.executeJavaScript(`document.querySelector('[name="captureDefaultMode"]').showPicker()`,true);
+  win.webContents.debugger.attach('1.3');
+  try {
+    for (const [key,code,virtualKey] of [['ArrowDown','ArrowDown',40],['Enter','Enter',13]]) {
+      await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyDown',key,code,windowsVirtualKeyCode:virtualKey});
+      await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode:virtualKey});
+    }
+  } finally { win.webContents.debugger.detach(); }
+  await waitFor(async()=>(await store.getSettings()).prefs.captureDefaultMode==='translate','键盘选中翻译并自动保存');
+  assert.equal(await evaluate(`document.querySelector('[name="captureDefaultMode"]').value`),'translate');
+  observations.push({ 检查: '原生选择器键盘选项触发自动保存，Esc 仅收起弹层', 通过: true });
+}
 async function emit() { desktop.broadcast(fixture); }
 async function handle(action, payload = {}) {
   calls.push(action);
@@ -43,7 +76,7 @@ async function handle(action, payload = {}) {
     fixture.session = await store.updateSession(payload.id, { threads: { [payload.mode]: { draft: payload.draft } } });
   } else if (action === 'set-mode') fixture.session = await store.updateSession(payload.id, { activeMode: payload.mode });
   else if (action === 'favorite') fixture.session = await store.updateSession(payload.id, { saved: payload.saved });
-  else if (action === 'open-settings' || action === 'open-appearance') { fixture.view = 'settings'; fixture.settingsSection = action === 'open-appearance' ? 'appearance' : 'service'; }
+  else if (['open-settings','open-appearance','open-shortcuts'].includes(action)) { fixture.view = 'settings'; fixture.settingsSection = action === 'open-shortcuts' ? 'shortcuts' : action === 'open-appearance' ? 'appearance' : payload.section === 'general' ? 'general' : 'service'; }
   else if (action === 'navigate') fixture.view = payload.view;
   else if (action === 'open-history') { fixture.view = 'history'; fixture.history = await store.listSessions(); }
   else if (action === 'reset-window-size') fixture.wide = desktop.resetPanelSize();
@@ -115,35 +148,65 @@ app.whenReady().then(async () => {
     await waitFor(()=>evaluate(`document.querySelector('.panel').classList.contains('reading-layout')&&document.querySelector('[data-scroll="body"]').classList.contains('answer-pane')`),'再次阅读布局');
     await evaluate(`document.querySelector('[data-scroll="body"]').scrollTop=0`); await shot('正式程序-黑银阅读.png');
     await evaluate(`window.pickgloss.invoke('open-settings')`); await waitFor(() => evaluate(`Boolean(document.querySelector('[data-field="text-model"]'))`), '服务设置');
+    await evaluate(`window.pickgloss.invoke('open-settings',{section:'general'})`); await waitFor(() => evaluate(`!document.querySelector('[data-settings-section="general"]').hidden`), '常规设置');
+    assert.equal(await evaluate(`Boolean(document.querySelector('[name="searchEnabled"], [name="searchScope"]'))`), false, '联网在截图翻译菜单控制');
+    await shot('常规设置-深色分组.png');
+    await centeredTabs('.settings-navigation','宽窗设置分类四等分居中');
+    assert.deepEqual(await evaluate(`[...document.querySelector('[name="captureDefaultMode"]').options].map(node=>node.textContent)`),['识图','翻译']);
+    assert.deepEqual(await evaluate(`[...document.querySelector('[name="translationMode"]').options].map(node=>node.textContent)`),['快速','深度']);
+    await picker('[name="captureDefaultMode"]','截图默认模式-深色展开.png');
+    await keyboardSelectCaptureMode();
     assert.equal(await evaluate(`document.querySelector('[name="orbAction"]').value`),'chat');
-    await input('[name="orbAction"]','capture');
-    await click('[data-settings-section="service"] form button[type="submit"]');
+    await input('[name="orbAction"]','capture'); await evaluate(`document.querySelector('[name="orbAction"]').dispatchEvent(new Event('change',{bubbles:true}))`);
     await waitFor(async()=>(await store.getSettings()).prefs.orbAction==='capture','悬浮球截图设置写盘');
     await win.webContents.reload();await ready();
     assert.equal(await evaluate(`document.querySelector('[name="orbAction"]').value`),'capture','悬浮球功能刷新后读回');
-    failSave=true;await input('[name="orbAction"]','chat');
-    await click('[data-settings-section="service"] form button[type="submit"]');
-    await waitFor(()=>evaluate(`document.querySelector('[data-settings-section="service"]').textContent.includes('隔离验证的设置写入失败')`),'悬浮球设置失败反馈');
+    observations.push({ 检查: '常规选项更改后自动保存并重载读回', 方式: '无提交按钮' });
+    failSave=true;await input('[name="orbAction"]','chat'); await evaluate(`document.querySelector('[name="orbAction"]').dispatchEvent(new Event('change',{bubbles:true}))`);
+    await waitFor(()=>evaluate(`document.querySelector('[data-settings-section="general"]').textContent.includes('隔离验证的设置写入失败')`),'悬浮球设置失败反馈');
     assert.equal(await evaluate(`document.querySelector('[name="orbAction"]').value`),'chat','失败时保留选择以便重试');
     assert.equal((await store.getSettings()).prefs.orbAction,'capture','失败不覆盖已保存功能');
-    failSave=false;await click('[data-settings-section="service"] form button[type="submit"]');
+    failSave=false;await click('[data-autosave="general:orbAction"] button');
     await waitFor(async()=>(await store.getSettings()).prefs.orbAction==='chat','恢复默认左键功能');
-    await input('[data-field="text-model"]', '尚未保存的服务草稿');
     await click('.settings-navigation button:nth-child(2)');
+    await centeredTabs('.mode-tabs[aria-label="服务类型"]','宽窗服务分类四等分居中');
+    await shot('AI服务-居中分类.png');
+    assert.equal(await evaluate(`document.querySelector('[name="text-clearKey"]').closest('label').hidden`), true, '没有密钥时不出现清除动作');
+    const savedText = (await store.getSettings()).text;
+    await input('[name="text-baseUrl"]', 'invalid-host');
+    await waitFor(() => evaluate(`Boolean(document.querySelector('[data-provider="text"] .setting-save-state.is-error'))`), '无效服务地址明确未保存');
+    await input('[name="text-provider"]', 'mimo'); await evaluate(`document.querySelector('[name="text-provider"]').dispatchEvent(new Event('change',{bubbles:true}))`);
+    await waitFor(async () => (await store.getSettings()).text.providerId === 'mimo', '其他厂商仍可独立保存');
+    await waitFor(() => evaluate(`!document.querySelector('[data-settings-save-issues]').hidden && document.querySelector('[data-settings-save-issues]').textContent.includes('自定义')`), '后台失败配置始终可定位');
+    await shot('后台服务保存失败-可定位.png');
+    await click('[data-settings-save-issues] button:first-of-type');
+    await waitFor(() => evaluate(`document.querySelector('[name="text-provider"]').value==='custom' && document.querySelector('[name="text-baseUrl"]').value==='invalid-host'`), '定位失败厂商并保留原输入');
+    await click('[data-settings-save-issues] button:nth-of-type(2)');
+    await waitFor(() => evaluate(`document.querySelector('[data-settings-save-issues]').hidden && document.querySelector('[name="text-provider"]').value==='mimo'`), '显式恢复后解除保存阻断');
+    assert.equal((await store.getSettings()).text.providerId, 'mimo', '放弃未保存修改不改动当前已生效的厂商');
+    await input('[name="text-provider"]', 'custom'); await evaluate(`document.querySelector('[name="text-provider"]').dispatchEvent(new Event('change',{bubbles:true}))`);
+    await waitFor(async () => (await store.getSettings()).text.providerId === 'custom', '恢复原服务用于后续检查');
+    assert.equal((await store.getSettings()).text.baseUrl, savedText.baseUrl);
+    observations.push({ 检查: '后台厂商失败可定位及显式恢复', 草稿保留: true, 有效配置未被恢复动作改写: true });
+    await input('[data-field="text-model"]', '自动保存的服务草稿');
+    await click('.settings-navigation button:nth-child(3)');
     await waitFor(async () => fixture.settingsSection === 'appearance', '设置分类同步');
-    await click('.settings-navigation button:first-child'); await waitFor(async () => fixture.settingsSection === 'service', '服务分类同步');
+    await click('.settings-navigation button:nth-child(2)'); await waitFor(async () => fixture.settingsSection === 'service', '服务分类同步');
     await evaluate(`window.pickgloss.invoke('open-appearance')`);
-    await waitFor(() => evaluate(`document.querySelector('.settings-navigation button:nth-child(2)').getAttribute('aria-selected')==='true'`), '外部入口重新打开外观');
-    assert.equal(await evaluate(`document.querySelector('[aria-label="窗口设置"]').closest('[data-settings-section]').dataset.settingsSection`),'appearance');
+    await waitFor(() => evaluate(`document.querySelector('.settings-navigation button:nth-child(3)').getAttribute('aria-selected')==='true'`), '外部入口重新打开外观');
+    assert.equal(await evaluate(`document.querySelector('[aria-label="窗口设置"]').closest('[data-settings-section]').dataset.settingsSection`),'general');
+    await evaluate(`window.pickgloss.invoke('open-settings',{section:'general'})`); await waitFor(() => evaluate(`!document.querySelector('[data-settings-section="general"]').hidden`), '窗口设置所在分类');
     await evaluate(`document.querySelector('[title="恢复窗口默认大小"]').scrollIntoView({block:'nearest'})`);
     await click('[title="恢复窗口默认大小"]');
     await waitFor(()=>evaluate(`document.querySelector('[data-window-size-feedback]').textContent==='已恢复默认大小'`),'恢复窗口默认大小反馈');
-    assert.equal(await evaluate(`document.querySelector('[data-settings-section="appearance"]').hidden`),false,'恢复窗口后留在外观分类');
+    assert.equal(await evaluate(`document.querySelector('[data-settings-section="general"]').hidden`),false,'恢复窗口后留在常规分类');
+    await evaluate(`window.pickgloss.invoke('open-appearance')`); await waitFor(() => evaluate(`!document.querySelector('[data-settings-section="appearance"]').hidden`), '回到外观分类');
     observations.push({ 检查: '本地分类切换后外部入口重开', 正确打开外观: true });
     await click('[data-mode="light"]');
     await waitFor(async () => (await store.getSettings()).prefs.appearance.current.mode === 'light', '浅色写盘');
     assert.equal(await evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--paper').trim()`), '#ffffff');
-    assert.equal(await evaluate(`document.querySelector('[data-field="text-model"]').value`), '尚未保存的服务草稿');
+    assert.equal(await evaluate(`document.querySelector('[data-field="text-model"]').value`), '自动保存的服务草稿');
+    assert.equal((await store.getSettings()).text.model, '自动保存的服务草稿', '切换设置分类前服务输入已自动保存');
     await input('.appearance-name', '后台推送期间输入');
     fixture.session.threads.context.messages[0].content += '\n\n后台完成的另一段回答。'; await emit();
     await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
@@ -157,8 +220,7 @@ app.whenReady().then(async () => {
     await waitFor(async () => (await store.getSettings()).prefs.appearance.presets.length === 2, '第二个预设写盘');
     await input('.appearance-name', '黑银微雾'); await click('[data-material="glass"]');
     await waitFor(async () => (await store.getSettings()).prefs.appearance.current.material === 'glass', '材质写盘');
-    await click('.appearance-secondary');
-    await waitFor(async () => (await store.getSettings()).prefs.appearance.presets.some(preset => preset.name === '黑银微雾'), '预设更新');
+    await waitFor(async () => (await store.getSettings()).prefs.appearance.presets.some(preset => preset.name === '黑银夜读' && preset.values.material === 'glass'), '活动预设配色自动更新');
     assert.equal((await store.getSettings()).prefs.appearance.presets.length, 2);
     failSave = true; await input('.appearance-name', '失败时保留的名字');
     await input('[aria-label="强调色十六进制色值"]', '#424242'); await click('.appearance-primary');
@@ -167,11 +229,12 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate(`document.querySelector('[aria-label="强调色十六进制色值"]').value`), '#424242');
     assert.equal((await store.getSettings()).prefs.appearance.presets.length, 2);
     failSave = false;
+    await click('.appearance-retry'); await waitFor(async () => (await store.getSettings()).prefs.appearance.presets.length === 3, '失败恢复后自动保存重试');
     fixture.settings = await store.getSettings(); await win.webContents.reload(); await ready();
-    await click('.settings-navigation button:nth-child(2)');
-    await waitFor(() => evaluate(`document.querySelectorAll('.appearance-preset').length===3`), '重载读回预设');
-    assert.equal(await evaluate(`document.querySelector('.appearance-name').value`), '黑银微雾');
-    observations.push({ 检查: '预设创建更新与失败后重载', 预设名称: fixture.settings.prefs.appearance.presets.map(preset => preset.name), 失败不新增: true, 字段失败保留: true, 实际材质: fixture.status.appearanceMaterial });
+    await click('.settings-navigation button:nth-child(3)');
+    await waitFor(() => evaluate(`document.querySelectorAll('.appearance-preset').length===4`), '重载读回预设');
+    assert.equal(await evaluate(`document.querySelector('.appearance-name').value`), '', '新预设名称不是尚待提交的当前设置');
+    observations.push({ 检查: '预设创建自动更新、失败保留与重试后重载', 预设名称: fixture.settings.prefs.appearance.presets.map(preset => preset.name), 失败不新增: true, 字段失败保留: true, 实际材质: fixture.status.appearanceMaterial });
     await click('[data-mode="system"]'); await waitFor(async () => (await store.getSettings()).prefs.appearance.current.mode === 'system', '跟随系统写盘');
     observations.push({ 检查: '跟随系统', 模式: 'system', 当前系统明暗: fixture.status.appearanceDark, 未更改系统外观: true });
     await evaluate(`(()=>{const box=document.querySelector('.appearance-motion input');box.checked=true;box.dispatchEvent(new Event('change',{bubbles:true}));})()`);
@@ -183,6 +246,19 @@ app.whenReady().then(async () => {
     await click('[data-mode="light"]'); await waitFor(async () => (await store.getSettings()).prefs.appearance.current.mode === 'light', '暖白主题设置');
     await click('[data-material="solid"]'); await waitFor(async () => (await store.getSettings()).prefs.appearance.current.material === 'solid', '实色回退');
     await shot('正式程序-暖白主题设置.png');
+    await evaluate(`window.pickgloss.invoke('open-settings',{section:'general'})`); await waitFor(() => evaluate(`!document.querySelector('[data-settings-section="general"]').hidden`), '浅色常规设置');
+    await shot('常规设置-浅色分组.png');
+    await handle('wide', { wide: false }); await waitFor(async () => !fixture.status.windowTransitioning && win.getBounds().width <= 302, '浅色设置小窗');
+    await shot('常规设置-浅色小窗.png');
+    await centeredTabs('.settings-navigation','小窗设置分类四等分居中');
+    await picker('[name="captureDefaultMode"]','截图默认模式-浅色展开.png');
+    await click('.settings-navigation button:nth-child(4)');
+    await shot('快捷键-末项对齐.png');
+    await click('.settings-navigation button:nth-child(2)');
+    await centeredTabs('.mode-tabs[aria-label="服务类型"]','小窗服务分类四等分居中');
+    await shot('AI服务-小窗居中.png');
+    await click('.settings-navigation button:nth-child(1)');
+    await handle('wide', { wide: true }); await waitFor(async () => !fixture.status.windowTransitioning && win.getBounds().width >= 858, '恢复检查宽布局');
     fixture.view = 'explain'; await emit(); await waitFor(() => evaluate(`Boolean(document.querySelector('.message'))`), '解释返回');
     await evaluate(`document.querySelector('[data-scroll="body"]').scrollTop=0`); await shot('正式程序-暖白阅读.png');
     await desktop.flushWindowState();

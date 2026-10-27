@@ -15,7 +15,7 @@ async function harness(t, timers = {}) {
   const calls = { orb: [], selection: [], appearance: [], broadcasts: 0, quit: 0, disposed: 0, restored: null };
   let options, handler;
   const desktop = {
-    captureState: () => null, broadcast: () => calls.broadcasts++, openPanel() {}, initTray() {},
+    captureState: () => null, broadcast: () => calls.broadcasts++, openPanel() {}, initTray() {}, prepareCapture() {},
     setOrb: value => calls.orb.push(value), startSelection: value => calls.selection.push(value),
     setAppearance: value => calls.appearance.push(value), restoreWindowState: geometry => { calls.restored = geometry; return geometry.wide; },
     flushDrafts: async () => true, flushWindowState: async () => true, dispose: () => calls.disposed++,

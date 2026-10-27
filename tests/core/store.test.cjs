@@ -20,6 +20,93 @@ async function setup(options = {}) {
   return { directory, store, injections };
 }
 
+test('并发保存截图语言和显示方式分别合并，重启后保留最新选择', async () => {
+  const { store, injections } = await setup();
+  await store.saveSettings({ prefs: { screenshotTranslation: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' } } });
+  await Promise.all([
+    store.saveSettings({ prefs: { screenshotTranslation: { targetLanguage: 'ja' } } }),
+    store.saveSettings({ prefs: { screenshotTranslation: { displayMode: 'compare' } } }),
+  ]);
+  const restarted = createStore(injections); await restarted.init();
+  const saved = (await restarted.getSettings()).prefs.screenshotTranslation;
+  assert.deepEqual(saved, { sourceLanguage: 'en', targetLanguage: 'ja', displayMode: 'compare', showOriginal: false, translationMode: 'standard', searchEnabled: true, searchScope: 'deep' });
+  await assert.rejects(store.saveSettings({ prefs: { screenshotTranslation: null } }), /截图翻译设置/);
+  await assert.rejects(store.saveSettings({ prefs: { screenshotTranslation: { targetLanguage: '无效语言' } } }), /目标语言无效/);
+  assert.deepEqual((await store.getSettings()).prefs.screenshotTranslation, saved);
+});
+
+test('翻译深度与联网独立保存，语言和显示更新不会覆盖它们，重启后仍生效', async () => {
+  const { store, injections, directory } = await setup();
+  assert.equal((await store.getSettings()).prefs.screenshotTranslation.translationMode, 'standard');
+  await store.saveSettings({ prefs: { screenshotTranslation: { translationMode: 'deep', searchEnabled: false, searchScope: 'deep' } } });
+  await Promise.all([
+    store.saveSettings({ prefs: { screenshotTranslation: { targetLanguage: 'ja' } } }),
+    store.saveSettings({ prefs: { screenshotTranslation: { displayMode: 'compare' } } }),
+  ]);
+  const restarted = createStore(injections); await restarted.init();
+  const prefs = (await restarted.getSettings()).prefs.screenshotTranslation;
+  assert.equal(prefs.translationMode, 'deep'); assert.equal(prefs.searchEnabled, false); assert.equal(prefs.searchScope, 'deep');
+  assert.equal(prefs.targetLanguage, 'ja'); assert.equal(prefs.displayMode, 'compare');
+  await assert.rejects(restarted.saveSettings({ prefs: { screenshotTranslation: { translationMode: 'invalid' } } }), /翻译.*无效/);
+  await assert.rejects(restarted.saveSettings({ prefs: { screenshotTranslation: { searchEnabled: 'false' } } }), /联网.*无效/);
+  assert.deepEqual((await restarted.getSettings()).prefs.screenshotTranslation, prefs);
+  const file = path.join(directory, 'settings.json'), raw = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete raw.prefs.screenshotTranslation.translationMode; delete raw.prefs.screenshotTranslation.searchEnabled; delete raw.prefs.screenshotTranslation.searchScope;
+  await fs.writeFile(file, JSON.stringify(raw));
+  const legacy = createStore(injections); await legacy.init();
+  assert.equal((await legacy.getSettings()).prefs.screenshotTranslation.translationMode, 'standard');
+  assert.equal((await legacy.getSettings()).prefs.screenshotTranslation.searchEnabled, true);
+  assert.equal((await legacy.getSettings()).prefs.screenshotTranslation.searchScope, 'deep');
+  assert.equal((await legacy.getSettings()).prefs.screenshotTranslation.targetLanguage, 'ja');
+});
+
+test('旧深度联网布尔值迁移为总开关且保存后只落盘规范字段', async () => {
+  for (const legacyValue of [false, true]) {
+    const { store, injections, directory } = await setup();
+    const file = path.join(directory, 'settings.json');
+    const raw = JSON.parse(await fs.readFile(file, 'utf8'));
+    Object.assign(raw.prefs.screenshotTranslation, { sourceLanguage: 'en', targetLanguage: 'ja', displayMode: 'compare', translationMode: 'deep', deepSearchEnabled: legacyValue });
+    delete raw.prefs.screenshotTranslation.searchEnabled; delete raw.prefs.screenshotTranslation.searchScope;
+    await fs.writeFile(file, JSON.stringify(raw));
+
+    const migrated = createStore(injections); await migrated.init();
+    const options = (await migrated.getSettings()).prefs.screenshotTranslation;
+    assert.equal(options.searchEnabled, legacyValue);
+    assert.equal(options.searchScope, 'deep');
+    assert.equal(Object.hasOwn(options, 'deepSearchEnabled'), false);
+    assert.equal(options.sourceLanguage, 'en'); assert.equal(options.targetLanguage, 'ja');
+    assert.equal(options.displayMode, 'compare'); assert.equal(options.translationMode, 'deep');
+
+    await migrated.saveSettings({ prefs: { screenshotTranslation: { targetLanguage: 'ko' } } });
+    const persisted = JSON.parse(await fs.readFile(file, 'utf8')).prefs.screenshotTranslation;
+    assert.equal(persisted.searchEnabled, legacyValue);
+    assert.equal(persisted.searchScope, 'deep');
+    assert.equal(Object.hasOwn(persisted, 'deepSearchEnabled'), false);
+    assert.equal(persisted.sourceLanguage, 'en'); assert.equal(persisted.targetLanguage, 'ko');
+    assert.equal(persisted.displayMode, 'compare'); assert.equal(persisted.translationMode, 'deep');
+  }
+});
+
+test('独立翻译模型加密保存且厂商密钥隔离，旧文件兼容默认截图模式', async () => {
+  const { directory, store, injections } = await setup();
+  const initial = await store.getSettings();
+  assert.equal(initial.translation.model, ''); assert.equal(initial.prefs.captureDefaultMode, 'explain'); assert.equal(initial.prefs.captureExplainMode, 'immediate');
+  await store.saveSettings({ translation: { providerId: 'custom', baseUrl: 'https://translate.invalid/v1', model: '专用翻译模型', apiKey: '虚构翻译密钥' }, prefs: { captureDefaultMode: 'translate' } });
+  const restarted = createStore(injections); await restarted.init();
+  assert.equal((await restarted.getSettings({ includeSecrets: true })).translation.apiKey, '虚构翻译密钥');
+  assert.equal((await restarted.getSettings()).prefs.captureDefaultMode, 'translate');
+  assert.equal((await restarted.getSettings()).translation.hasKey, true);
+  assert.equal((await restarted.getSettings()).text.hasKey, false);
+  await assert.rejects(restarted.saveSettings({ prefs: { captureDefaultMode: 'invalid' } }), /截图默认模式无效/);
+  const file = path.join(directory, 'settings.json'), raw = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(JSON.stringify(raw).includes('虚构翻译密钥'), false);
+  delete raw.translation; delete raw.serviceProfiles.translation; delete raw.prefs.captureDefaultMode;
+  const legacy = JSON.stringify(raw); await fs.writeFile(file, legacy, 'utf8');
+  const old = createStore(injections); await old.init();
+  assert.equal((await old.getSettings()).translation.model, ''); assert.equal((await old.getSettings()).prefs.captureDefaultMode, 'explain');
+  assert.equal(await fs.readFile(file, 'utf8'), legacy, '读取旧配置不能静默重写');
+});
+
 test('旧设置缺少外观和窗口状态时补齐黑银默认值，读取不重写旧文件', async () => {
   const { directory, store, injections } = await setup();
   await store.saveSettings({ text: { baseUrl: 'https://example.com/v1', model: '测试模型', apiKey: '仅测试密钥' }, prefs: { showOrb: false } });
@@ -158,7 +245,7 @@ test('非法快捷键及提示音设置不能覆盖本地配置，支持清空�
   const { directory, store } = await setup();
   const file = path.join(directory, 'settings.json'), before = await fs.readFile(file, 'utf8');
   for (const prefs of [{ pinSound: 'true' }, { shortcuts: {} }, { shortcuts: { ...DEFAULT_SHORTCUTS, paste: 'G' } },
-    { shortcuts: { ...DEFAULT_SHORTCUTS, paste: 'Alt+Shift+S' } }]) {
+    { shortcuts: { ...DEFAULT_SHORTCUTS, paste: DEFAULT_SHORTCUTS.capture } }]) {
     await assert.rejects(store.saveSettings({ prefs }), { code: 'INVALID_INPUT' });
     assert.equal(await fs.readFile(file, 'utf8'), before);
   }
@@ -384,11 +471,30 @@ test('旧 version 1 平面密钥迁移到 custom 草稿且截图自动解释默�
   assert.equal(migrated.text.providerId, 'custom');
   assert.equal(migrated.serviceProfiles.text.custom.hasKey, true);
   assert.equal(migrated.prefs.autoExplainCapture, false);
+  assert.equal(migrated.prefs.captureExplainMode, 'immediate', '旧 autoExplainCapture=false 不迁移成提示词模式');
   assert.equal(migrated.prefs.webSearchEnabled, false);
   await restarted.saveSettings({ prefs: { autoExplainCapture: true } });
   const privateView = await restarted.getSettings({ includeSecrets: true });
   assert.equal(privateView.serviceProfiles.text.custom.apiKey, '旧配置虚构密钥');
   assert.equal(privateView.prefs.autoExplainCapture, true);
+});
+
+test('截图解释模式只接受立即识别或先补充提示词，旧配置默认立即识别', async () => {
+  const { directory, store, injections } = await setup();
+  assert.equal((await store.getSettings()).prefs.captureExplainMode, 'immediate');
+  await store.saveSettings({ prefs: { captureExplainMode: 'prompt' } });
+  const restarted = createStore(injections); await restarted.init();
+  assert.equal((await restarted.getSettings()).prefs.captureExplainMode, 'prompt');
+  const file = path.join(directory, 'settings.json'), raw = JSON.parse(await fs.readFile(file, 'utf8'));
+  await assert.rejects(restarted.saveSettings({ prefs: { captureExplainMode: 'unknown' } }), /截图解释模式无效/);
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).prefs.captureExplainMode, raw.prefs.captureExplainMode);
+
+  raw.prefs.autoExplainCapture = false;
+  delete raw.prefs.captureExplainMode;
+  await fs.writeFile(file, JSON.stringify(raw), 'utf8');
+  const legacy = createStore(injections); await legacy.init();
+  assert.equal((await legacy.getSettings()).prefs.captureExplainMode, 'immediate');
+  assert.equal((await legacy.getSettings()).prefs.autoExplainCapture, false, '保留旧字段，但不据此推导新模式');
 });
 
 test('联网开关、contextPending、requestQuestion 与安全来源随会话历史保存', async () => {

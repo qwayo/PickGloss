@@ -46,6 +46,8 @@ test('便携包白名单拒绝开发文件和敏感路径', () => {
     '/src/./main.cjs',
     '/src\\..\\settings.json',
     '/src/windows/ContextProbe.cs',
+    '/src/windows/WindowAppearance.cs',
+    '/src/windows/ScreenCapture.cs',
     '/node_modules/selection-hook/README.md',
     '/node_modules/selection-hook/src/windows/selection_hook.cc',
     '/node_modules/selection-hook/prebuilds/linux-x64/selection-hook.node',

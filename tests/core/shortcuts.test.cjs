@@ -12,6 +12,11 @@ function registry() {
   };
 }
 
+test('截图框选默认快捷键为 Ctrl+Shift+S', () => {
+  assert.equal(DEFAULT_SHORTCUTS.capture, 'Ctrl+Shift+S');
+  assert.equal(normalizeAccelerator(DEFAULT_SHORTCUTS.capture), 'Ctrl+Shift+S');
+});
+
 test('快捷键规范化等价修饰键和顺序，重复命令组合被拒绝', () => {
   assert.equal(normalizeAccelerator(' shift + control + option + g '), 'Ctrl+Alt+Shift+G');
   assert.equal(normalizeAccelerator('Win+Ctrl+f12'), 'Ctrl+Super+F12');
@@ -61,7 +66,35 @@ test('快捷键未变时仅保存数据，清空组合只注销本控制器对�
   let persisted = 0; await controller.apply(DEFAULT_SHORTCUTS, async () => persisted++);
   assert.equal(persisted, 1); assert.equal(globalShortcut.registered.length, count);
   await controller.apply({ ...DEFAULT_SHORTCUTS, capture: '' });
-  assert.deepEqual(globalShortcut.removed, ['Alt+Shift+S']); assert.equal(controller.snapshot().bindings.capture.registered, false);
+  assert.deepEqual(globalShortcut.removed, [DEFAULT_SHORTCUTS.capture]); assert.equal(controller.snapshot().bindings.capture.registered, false);
+  await controller.dispose();
+});
+
+test('已保存快捷键被另一实例占用时，不重注册无变化组合，也不阻止保存新组合', async () => {
+  const globalShortcut = registry(), controller = createShortcutController({ globalShortcut, onCommand() {} });
+  globalShortcut.unavailable.add(DEFAULT_SHORTCUTS.capture);
+  await assert.rejects(controller.apply(DEFAULT_SHORTCUTS), { code: 'SHORTCUT_UNAVAILABLE' });
+  const count = globalShortcut.registered.length;
+  let persisted = false;
+  await controller.apply(DEFAULT_SHORTCUTS, async () => { persisted = true; });
+  assert.equal(persisted, true);
+  assert.equal(globalShortcut.registered.length, count, '无变化保存不应重注册被占用的组合');
+  await controller.apply({ ...DEFAULT_SHORTCUTS, paste: 'Ctrl+Alt+G' }, async () => { persisted = true; });
+  assert.equal(globalShortcut.callbacks.has('Ctrl+Alt+G'), true);
+  assert.equal(controller.snapshot().bindings.capture.registered, false);
+  await controller.dispose();
+});
+
+test('录制后保存新组合不先恢复已被另一实例占用的旧组合', async () => {
+  const globalShortcut = registry(), controller = createShortcutController({ globalShortcut, onCommand() {} });
+  await controller.apply(DEFAULT_SHORTCUTS);
+  await controller.setRecording(true);
+  globalShortcut.unavailable.add(DEFAULT_SHORTCUTS.capture);
+  let saved;
+  await controller.apply({ ...DEFAULT_SHORTCUTS, history: 'Ctrl+Alt+H' }, async next => { saved = next; });
+  assert.equal(saved.history, 'Ctrl+Alt+H');
+  assert.equal(globalShortcut.callbacks.has('Ctrl+Alt+H'), true);
+  assert.equal(controller.snapshot().bindings.capture.registered, false);
   await controller.dispose();
 });
 
@@ -91,16 +124,18 @@ test('录制中保存被占用的新组合仍须预检，失败不写盘并恢�
   await controller.dispose();
 });
 
-test('录制超时会恢复快捷键，恢复时遇到占用如实报告未注册', async () => {
+test('录制超时会恢复快捷键，恢复时遇到占用不阻止关闭录制', async () => {
   const globalShortcut = registry(); let timeout;
   const controller = createShortcutController({ globalShortcut, onCommand() {}, setTimer: (callback, delay) => { assert.equal(delay, 25000); timeout = callback; return 1; }, clearTimer() {} });
   await controller.apply(DEFAULT_SHORTCUTS); await controller.setRecording(true);
   timeout(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(controller.snapshot().recording, false); assert.equal(controller.snapshot().bindings.paste.registered, true);
   await controller.setRecording(true); globalShortcut.unavailable.add(DEFAULT_SHORTCUTS.capture);
-  await assert.rejects(controller.setRecording(false), { code: 'SHORTCUT_UNAVAILABLE' });
+  await controller.setRecording(false);
   assert.equal(controller.snapshot().recording, false); assert.equal(controller.snapshot().bindings.capture.registered, false);
-  assert.match(controller.snapshot().error, /无法注册/); assert.equal(globalShortcut.callbacks.size, 0);
+  assert.match(controller.snapshot().bindings.capture.error, /未注册/); assert.equal(controller.snapshot().error, '');
+  assert.equal(globalShortcut.callbacks.has(DEFAULT_SHORTCUTS.paste), true);
+  assert.ok(globalShortcut.callbacks.size > 0, '未占用的组合仍应恢复');
   await controller.dispose();
 });
 

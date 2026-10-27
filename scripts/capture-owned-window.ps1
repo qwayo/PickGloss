@@ -1,4 +1,4 @@
-﻿param([long]$PanelHandle, [long]$BackgroundHandle, [uint32]$OwnerPid, [string]$OutputPath)
+﻿param([long]$PanelHandle, [long]$BackgroundHandle, [uint32]$OwnerPid, [string]$OutputPath, [long]$MaterialHandle = 0, [uint32]$MaterialPid = 0)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 # 截图前后逐像素核对窗口归属；被遮挡则不保存，防止采入其他应用。
@@ -20,35 +20,44 @@ public static class OwnedWindowCapture {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
   [DllImport("dwmapi.dll")] static extern int DwmFlush();
   [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out Rect rect, int size);
-  static void Check(Rect rect, IntPtr panel, IntPtr background) {
+  [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] static extern int DwmGetWindowValue(IntPtr window, uint attribute, out uint value, int size);
+  static void Check(Rect rect, IntPtr panel, IntPtr background, IntPtr material, uint materialPid) {
     if (!IsWindowVisible(panel) || !IsWindowVisible(background)) throw new Exception("测试窗口不可见，实屏检查未覆盖");
     Rect current;
     if(DwmGetWindowAttribute(panel,9,out current,Marshal.SizeOf(typeof(Rect)))!=0 || current.Left!=rect.Left || current.Top!=rect.Top || current.Right!=rect.Right || current.Bottom!=rect.Bottom) throw new Exception("测试窗口在捕获期间移动，未保存截图");
     if(GetAncestor(WindowFromPoint(new Point((rect.Left+rect.Right)/2,(rect.Top+rect.Bottom)/2)),2)!=panel) throw new Exception("测试窗口未位于背景之上，未保存截图");
+    if (material != IntPtr.Zero) {
+      uint currentPid; GetWindowThreadProcessId(material, out currentPid);
+      if (materialPid == 0 || currentPid != materialPid) throw new Exception("原生材质窗口归属不一致");
+    }
     for (int y=rect.Top; y<rect.Bottom; y++) for (int x=rect.Left; x<rect.Right; x++) {
       IntPtr owner=GetAncestor(WindowFromPoint(new Point(x,y)),2);
-      if(owner!=panel && owner!=background) throw new Exception("测试矩形被其他窗口遮挡，未保存截图");
+      if(owner!=panel && owner!=background && (material==IntPtr.Zero || owner!=material)) throw new Exception("测试矩形被其他窗口遮挡，未保存截图");
     }
   }
-  public static string Capture(long panelValue, long backgroundValue, uint ownerPid, string output) {
+  public static string Capture(long panelValue, long backgroundValue, uint ownerPid, string output, long materialValue, uint materialPid) {
     SetProcessDpiAwarenessContext(new IntPtr(-4));
     IntPtr panel=new IntPtr(panelValue), background=new IntPtr(backgroundValue);
+    IntPtr material=new IntPtr(materialValue);
+    if ((materialValue==0)!=(materialPid==0)) throw new Exception("材质窗口参数不完整");
     uint panelPid, backgroundPid;
     GetWindowThreadProcessId(panel,out panelPid); GetWindowThreadProcessId(background,out backgroundPid);
     if(panelPid==0 || panelPid!=backgroundPid || panelPid!=ownerPid) throw new Exception("测试窗口归属不一致");
     Rect rect; if(DwmGetWindowAttribute(panel,9,out rect,Marshal.SizeOf(typeof(Rect)))!=0) throw new Exception("无法读取 DWM 可见边界，实屏未覆盖");
     int width=rect.Right-rect.Left, height=rect.Bottom-rect.Top;
     if(width<=0 || height<=0 || width>8192 || height>8192) throw new Exception("测试矩形无效");
-    DwmFlush(); Check(rect,panel,background);
+    DwmFlush(); Check(rect,panel,background,material,materialPid);
     using(Bitmap bitmap=new Bitmap(width,height)) {
       using(Graphics graphics=Graphics.FromImage(bitmap)) graphics.CopyFromScreen(rect.Left,rect.Top,0,0,new Size(width,height));
-      Check(rect,panel,background);
+      Check(rect,panel,background,material,materialPid);
       bitmap.Save(output,ImageFormat.Png);
     }
     Rect client; Point origin=new Point(0,0);
     if(!GetClientRect(panel,out client) || !ClientToScreen(panel,ref origin)) throw new Exception("无法读取客户区边界");
-    return String.Format("{{\"x\":{0},\"y\":{1},\"width\":{2},\"height\":{3},\"client\":{{\"left\":{4},\"top\":{5},\"width\":{6},\"height\":{7}}}}}",rect.Left,rect.Top,width,height,origin.X-rect.Left,origin.Y-rect.Top,client.Right,client.Bottom);
+    uint borderColor, borderThickness;
+    int colorStatus=DwmGetWindowValue(panel,34,out borderColor,4), thicknessStatus=DwmGetWindowValue(panel,37,out borderThickness,4);
+    return String.Format("{{\"x\":{0},\"y\":{1},\"width\":{2},\"height\":{3},\"client\":{{\"left\":{4},\"top\":{5},\"width\":{6},\"height\":{7}}},\"nativeBorder\":{{\"color\":{8},\"suppressed\":{9},\"thickness\":{10},\"colorStatus\":{11},\"thicknessStatus\":{12}}}}}",rect.Left,rect.Top,width,height,origin.X-rect.Left,origin.Y-rect.Top,client.Right,client.Bottom,colorStatus==0?borderColor.ToString():"null",colorStatus==0?(borderColor==0xfffffffe).ToString().ToLowerInvariant():"null",thicknessStatus==0?borderThickness.ToString():"null",colorStatus,thicknessStatus);
   }
 }
 '@
-[OwnedWindowCapture]::Capture($PanelHandle, $BackgroundHandle, $OwnerPid, $OutputPath)
+[OwnedWindowCapture]::Capture($PanelHandle, $BackgroundHandle, $OwnerPid, $OutputPath, $MaterialHandle, $MaterialPid)

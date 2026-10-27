@@ -19,6 +19,8 @@ const files = new Map([
   ['resources/app/THIRD_PARTY_LICENSES.md', '固定第三方许可汇总\n'],
   ['resources/app/src/main.cjs', 'module.exports = "固定主入口";\n'],
   ['resources/app/src/preload.cjs', 'module.exports = "固定预加载";\n'],
+  ['resources/app/src/windows/window-appearance.cjs', 'module.exports = "固定窗口外观桥接";\n'],
+  ['resources/app/src/windows/screen-capture.cjs', 'module.exports = "固定屏幕采集桥接";\n'],
   ['resources/app/node_modules/markdown-it/LICENSE', '固定 markdown-it 许可证\n'],
   ['resources/app/node_modules/selection-hook/LICENSE', '固定 selection-hook 许可证\n'],
   ['resources/app/node_modules/node-gyp-build/LICENSE', '固定 node-gyp-build 许可证\n'],
@@ -27,6 +29,8 @@ const files = new Map([
   ['resources/app/node_modules/selection-hook/package.json', '{"name":"固定依赖"}\n'],
   ['resources/app/extra.txt', '固定非抽样产品文件\n'],
   ['resources/native/ContextProbe.exe', '固定原生助手内容\n'],
+  ['resources/native/WindowAppearance.exe', '固定窗口外观助手内容\n'],
+  ['resources/native/ScreenCapture.exe', '固定屏幕采集助手内容\n'],
 ]);
 const readme = '拾译隔离测试包\n请核对完整清单。\n';
 function hash(value) { return createHash('sha256').update(value).digest('hex'); }
@@ -49,6 +53,7 @@ async function makeCase(name, options = {}) {
     candidateId, packageDirectory, packageFileCount: entries.length, files: entries,
     source, sourceFingerprint: fingerprint(source), packageFingerprint: fingerprint(entries),
     nativeSha256: entries.find(item => item.path === 'resources/native/ContextProbe.exe').sha256,
+    nativeFiles: entries.filter(item => item.path.startsWith('resources/native/') && !(options.missingAppearanceEntry && item.path.endsWith('/WindowAppearance.exe')) && !(options.missingCaptureEntry && item.path.endsWith('/ScreenCapture.exe'))),
   };
   for (const [file, content] of files) {
     await put(product, file, content);
@@ -73,7 +78,21 @@ function verify(output, args = []) {
 test('完整的合成便携包通过公开核验命令', async () => {
   const result = verify(await makeCase('complete'));
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /15 个文件/);
+  assert.match(result.stdout, new RegExp(`${files.size} 个文件`));
+});
+
+test('含窗口外观桥接的便携包不能省略外观助手清单或产物', async () => {
+  const missingEntry = verify(await makeCase('missing-appearance-entry', { missingAppearanceEntry: true }));
+  assert.notEqual(missingEntry.status, 0); assert.match(missingEntry.stderr, /WindowAppearance\.exe/);
+  const missingBinary = verify(await makeCase('missing-appearance-binary', { omit: ['resources/native/WindowAppearance.exe'] }));
+  assert.notEqual(missingBinary.status, 0); assert.match(missingBinary.stderr, /WindowAppearance\.exe/);
+});
+
+test('含屏幕采集桥接的便携包不能省略截图助手清单或产物', async () => {
+  const missingEntry = verify(await makeCase('missing-capture-entry', { missingCaptureEntry: true }));
+  assert.notEqual(missingEntry.status, 0); assert.match(missingEntry.stderr, /ScreenCapture\.exe/);
+  const missingBinary = verify(await makeCase('missing-capture-binary', { omit: ['resources/native/ScreenCapture.exe'] }));
+  assert.notEqual(missingBinary.status, 0); assert.match(missingBinary.stderr, /ScreenCapture\.exe/);
 });
 
 test('便携包缺少运行时第三方许可证时失败', async () => {

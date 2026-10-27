@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>高亮框选光标</title>
+  <path d="M16 3v9m0 8v9M3 16h9m8 0h9" fill="none" stroke="#111" stroke-width="4" stroke-linecap="round"/>
+  <path d="M16 3v9m0 8v9M3 16h9m8 0h9" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="16" cy="16" r="1" fill="#fff" stroke="#111" stroke-width=".5"/>
+</svg>

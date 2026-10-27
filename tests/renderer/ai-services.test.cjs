@@ -48,7 +48,8 @@ function renderer(invoke = async () => ({ ok: true })) {
     globalThis.audit = { setState: value => state=value, webSearchButton, toggleWebSearch, webSearchEnabled, retrySearch,
       searchStatusView, searchSourcesView, explainView, composer, serviceCatalog, loadSourceIcon, sourceSiteIcon };
   `;
-  vm.runInContext(source.replace(/^import .*;\s*$/gm, '').replace(/void bootstrap\(\);\s*$/, '') + harness, context);
+  const autosave = fs.readFileSync(path.join(__dirname, '../../src/renderer/settings-autosave.js'), 'utf8').replace(/^export /gm, '');
+  vm.runInContext(autosave + '\n' + source.replace(/^import .*;\s*$/gm, '').replace(/void bootstrap\(\);\s*$/, '') + harness, context);
   return { ...context.audit, calls, advanceTime: value => { timestamp += value; } };
 }
 

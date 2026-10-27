@@ -2,9 +2,16 @@ import { brand } from './brand.js';
 import { createAppearanceUI } from './appearance.js';
 import { createShortcutsUI } from './shortcuts.js';
 import { contextParts } from './context-highlight.mjs';
+import { createTranslationUI, languageSelect } from './translation.js';
+import { createSettingsAutosave } from './settings-autosave.js';
 
 const root = document.getElementById('app');
+let captureTranslationMode = 'explain', captureTranslationOptions = null, captureLanguageSaves = 0;
+let captureLanguageDraft = false, captureLanguageRevision = 0;
 const surface = new URLSearchParams(location.search).get('window') || 'panel';
+const translationUI = ['translation', 'translation-overlay'].includes(surface)
+  ? createTranslationUI({ root, invoke: (...args) => call(...args), role: surface === 'translation-overlay' ? 'overlay' : 'controls' })
+  : null;
 const LIMITS = { text: 12000, context: 6000, question: 4000, note: 4000 };
 const MODE_NAMES = { context: '语境解释', independent: '独立释义', visual: '截图讲解' };
 const pending = new Set();
@@ -16,11 +23,15 @@ const questionSubmissions = new Map();
 const notes = new Map();
 const dirtyNotes = new Map();
 const tests = new Map();
-const serviceDrafts = { text: new Map(), vision: new Map(), search: new Map() };
-const selectedProviders = { text: 'custom', vision: 'custom', search: 'exa' };
+const serviceDrafts = { text: new Map(), vision: new Map(), translation: new Map(), search: new Map() };
+const serviceDraftVersions = new Map();
+const selectedProviders = {};
 const webSearchOverrides = new Map();
 const sourceIconCache = new Map();
 const copyFeedback = new Map();
+const fetchedModelResults = new Map();
+const fetchedModelTokens = { text: 0, vision: 0, translation: 0 };
+const modelFetchRenderers = new Map();
 let state = null;
 let renderedKey = '';
 let lastContentView = 'paste';
@@ -29,8 +40,15 @@ let historyFilter = 'all';
 let historyVisible = 50;
 let renameId = null;
 let renameDraft = '';
+let historyMultiSelect = false;
+const historySelection = new Set();
+let historyBatchConfirm = false;
+let historyBatchStatus = null;
 let settingsTab = 'text';
 let settingsSection = 'service';
+let locatingSettingsFailure = false;
+let settingsSaveDepth = 0;
+const generalSaveVersions = new Map(), generalSaveNotices = new Map();
 let deleteId = null;
 let composing = false;
 let justFinishedComposition = false;
@@ -203,7 +221,7 @@ function syncModeIndicator() {
 function syncContentTransitions() {
   if (state?.view === 'settings') {
     revealTabContent(root.querySelector(`[data-settings-section="${settingsSection}"]`), 'settings', settingsSection, ['general', 'service', 'appearance', 'shortcuts']);
-    if (settingsSection === 'service') revealTabContent(root.querySelector(`[data-provider="${settingsTab}"]`), 'services', settingsTab, ['text', 'vision', 'search']);
+    if (settingsSection === 'service') revealTabContent(root.querySelector(`[data-provider="${settingsTab}"]`), 'services', settingsTab, ['text', 'vision', 'translation', 'search']);
   } else if (state?.view === 'explain') revealTabContent(root.querySelector('.mode-content'), `mode:${session()?.id}`, mode(), ['context', 'independent']);
 }
 
@@ -261,6 +279,7 @@ const iconPaths = {
   star: ['m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L2 9.6l6.2-.9L12 3Z'],
   shirt: ['M8 3 2 6l3 5 2-1v11h10V10l2 1 3-5-6-3M8 3a4 4 0 0 0 8 0'],
   settings: ['M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1 1-3Z'],
+  ai: ['m10 4 2.5 6.5L19 13l-6.5 2.5L10 22l-2.5-6.5L1 13l6.5-2.5L10 4Z', 'm19 2 1.1 2.9L23 6l-2.9 1.1L19 10l-1.1-2.9L15 6l2.9-1.1L19 2Z'],
   crop: ['M8 3v13h13M3 8h13v13'],
   send: ['M12 20V4M5 11l7-7 7 7'],
   stop: ['M6 6h12v12H6Z'],
@@ -277,6 +296,7 @@ const iconPaths = {
   search: ['M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0M15 15l6 6'],
   globe: ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z', 'M2 12h20', 'M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z'],
   edit: ['m15 4 5 5M4 20l4-1L21 6l-4-4L4 15v5Z'],
+  select: ['M4 5h4v4H4ZM4 15h4v4H4ZM12 7h8M12 17h8'],
 };
 
 function icon(name) {
@@ -322,8 +342,8 @@ function button(label, action, options = {}) {
 }
 
 const appearanceUI = createAppearanceUI({
-  save: appearance => call('save-settings', { prefs: { appearance } }, { scope: 'appearance', render: false }),
-  refresh: () => render(),
+  save: appearance => settingsAutosave.commit('appearance', { prefs: { appearance } }),
+  // 外观组件已读回保存结果并同步控件；不要整页重建，保留拖动、焦点和选择状态。
   onReducedMotion: () => {
     stopTabMotion();
     if (!state?.status?.windowTransitioning) { transitionAnchor = null; readingAnchor = captureReadingAnchor(); }
@@ -331,8 +351,123 @@ const appearanceUI = createAppearanceUI({
 });
 const shortcutsUI = createShortcutsUI({
   invoke: (action, payload) => call(action, payload, { lock: false, render: false }),
-  save: prefs => call('save-settings', { prefs }, { scope: 'shortcuts', render: false }),
+  save: prefs => settingsAutosave.commit('shortcuts', { prefs }),
+  onDiscard: () => settingsAutosave.discardFailure('shortcuts'),
 });
+
+const settingsAutosave = createSettingsAutosave({
+  persist: async payload => {
+    settingsSaveDepth++;
+    try { return await call('save-settings', { ...payload, autosave: true }, { scope: 'settings-autosave', lock: false, render: false }); }
+    finally { settingsSaveDepth--; }
+  },
+  changed: (key, value) => {
+    for (const node of root.querySelectorAll('[data-autosave]')) if (node.dataset.autosave === key) paintAutosaveStatus(node, key, value);
+    for (const node of root.querySelectorAll('[data-settings-save-summary]')) node.textContent = settingsAutosave.summary();
+    for (const node of root.querySelectorAll('[data-settings-save-issues]')) paintSettingsIssues(node);
+    if (key.startsWith('service:')) {
+      const [, kind, providerId] = key.split(':'), form = root.querySelector('[data-settings-section="service"] form');
+      if (form && selectedProviderId(form, kind) === providerId) updateApiKeyStatus(form, kind);
+    }
+  },
+});
+
+function paintAutosaveStatus(node, key, value = settingsAutosave.status(key)) {
+  node.className = `setting-save-state${value.status === 'error' ? ' is-error' : ''}`;
+  node.setAttribute('role', value.status === 'error' ? 'alert' : 'status');
+  node.replaceChildren();
+  if (!value.message || value.status === 'saved') return;
+  node.append(el('span', {}, value.message));
+  if (value.status === 'error') node.append(button('重试', () => {
+    const [, kind, providerId] = key.split(':');
+    const form = root.querySelector('[data-settings-section="service"] form');
+    return key.startsWith('service:') && form && selectedProviderId(form, kind) === providerId
+      ? queueServiceSave(form, kind, true) : settingsAutosave.retry(key);
+  }, { class: 'setting-retry' }));
+}
+
+function autosaveStatus(key) {
+  const node = el('div', { 'data-autosave': key, 'aria-live': 'polite' });
+  paintAutosaveStatus(node, key);
+  if (generalSaveNotices.has(key)) {
+    node.className = 'setting-save-state is-error'; node.setAttribute('role', 'alert');
+    node.textContent = generalSaveNotices.get(key);
+  }
+  return node;
+}
+
+function failedSettingLabel(key) {
+  const [scope, kind, providerId] = key.split(':');
+  if (scope === 'service') return `${({ text: '文字模型', vision: '识图模型', translation: '翻译模型', search: '联网搜索' })[kind] || 'AI 服务'} · ${serviceCatalog(kind).find(item => item.id === providerId)?.name || providerId}`;
+  return scope === 'appearance' ? '外观与主题' : scope === 'shortcuts' ? '快捷键' : '常规设置';
+}
+
+function paintSettingsIssues(node) {
+  const keys = settingsAutosave.failedKeys();
+  node.hidden = keys.length === 0; node.replaceChildren();
+  for (const key of keys) node.append(el('div', { class: 'settings-save-issue' },
+    el('span', {}, `${failedSettingLabel(key)}未保存`),
+    button('查看', () => locateAutosaveFailure(key), { class: 'setting-retry', title: `查看未保存的${failedSettingLabel(key)}` }),
+    ['service', 'general', 'shortcuts'].includes(key.split(':')[0]) ? button('恢复已保存值', () => restoreAutosaveFailure(key), { class: 'setting-retry', title: `放弃本次未保存的${failedSettingLabel(key)}修改` }) : null));
+}
+
+async function locateAutosaveFailure(key = settingsAutosave.failedKeys()[0]) {
+  if (!key || locatingSettingsFailure) return;
+  locatingSettingsFailure = true;
+  try {
+    const [scope, kind, providerId] = key.split(':');
+    if (scope === 'service') {
+      const form = root.querySelector('[data-settings-section="service"] form');
+      if (form) captureServiceDraft(form, kind);
+      selectedProviders[kind] = providerId; settingsTab = kind;
+      if (form) {
+        form.querySelector(`[name="${kind}-provider"]`).value = providerId;
+        applyServiceProfile(form, kind, providerId);
+      }
+    }
+    settingsSection = scope === 'service' ? 'service' : scope === 'appearance' ? 'appearance' : scope === 'shortcuts' ? 'shortcuts' : 'general';
+    await call(settingsSection === 'appearance' ? 'open-appearance' : settingsSection === 'shortcuts' ? 'open-shortcuts' : 'open-settings',
+      { section: settingsSection }, { scope: 'settings-location', lock: false, render: false });
+    render();
+    const target = [...root.querySelectorAll('[data-autosave]')].find(node => node.dataset.autosave === key)
+      || root.querySelector(`[data-settings-section="${settingsSection}"] [role="alert"]`);
+    target?.scrollIntoView({ block: 'center' });
+  } finally { locatingSettingsFailure = false; }
+}
+
+async function restoreAutosaveFailure(key) {
+  const scopeName = key.split(':')[0];
+  if (scopeName === 'shortcuts') await shortcutsUI.discard?.();
+  if (!settingsAutosave.discardFailure(key) && scopeName !== 'shortcuts') return;
+  locatingSettingsFailure = true;
+  try {
+    const [scope, kind, providerId] = key.split(':');
+    if (scope === 'service') {
+      serviceDrafts[kind].delete(providerId);
+      serviceDraftVersions.set(key, (serviceDraftVersions.get(key) || 0) + 1);
+      if (selectedProviders[kind] === providerId) {
+        const active = state.settings?.[kind]?.providerId || (kind === 'search' ? 'exa' : 'custom');
+        selectedProviders[kind] = active;
+        const form = root.querySelector('[data-settings-section="service"] form');
+        if (form) { form.querySelector(`[name="${kind}-provider"]`).value = active; applyServiceProfile(form, kind, active); }
+      }
+    } else if (scope === 'general') {
+      const input = root.querySelector(`[name="${kind}"]`), prefs = state.settings?.prefs || {};
+      const value = kind === 'translationMode' ? prefs.screenshotTranslation?.[kind] : prefs[kind];
+      if (input) { if (input.type === 'checkbox') input.checked = value === true; else input.value = value ?? ''; }
+    }
+    render();
+  } finally { locatingSettingsFailure = false; }
+}
+
+async function flushSettings() {
+  const shortcutResult = await shortcutsUI.flush?.();
+  const appearanceResult = await appearanceUI.flush?.();
+  const saved = await settingsAutosave.flush();
+  const ok = saved && shortcutResult?.ok !== false && appearanceResult !== false && appearanceResult?.ok !== false;
+  if (!ok) await locateAutosaveFailure(settingsAutosave.failedKeys()[0] || (shortcutResult?.ok === false ? 'shortcuts' : 'appearance'));
+  return ok;
+}
 
 function playPinFeedback(previous, next) {
   if (surface !== 'panel') return;
@@ -409,7 +544,9 @@ function isStreaming() {
   const status = current.status || [...(current.messages || [])].reverse().find(message => message.role === 'assistant')?.status;
   return ['streaming', 'loading', 'pending', 'generating', 'running'].includes(status);
 }
-function effectiveProvider(kind, settings=state?.settings) { return settings?.[kind === 'vision' && !settings?.vision?.model?.trim() ? 'text' : kind]; }
+function effectiveProvider(kind, settings=state?.settings) {
+  return settings?.[(kind === 'vision' || kind === 'translation') && !settings?.[kind]?.model?.trim() ? 'text' : kind];
+}
 function hasProvider(kind) { const config = effectiveProvider(kind); return Boolean(config?.baseUrl?.trim() && config?.model?.trim()); }
 function safeImage(data) { return typeof data === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=\r\n]+$/.test(data) ? data : ''; }
 function errorNode(scope) { return el('p', { class: 'inline-error', role: 'alert' }, errors.get(scope) || ''); }
@@ -455,20 +592,31 @@ function receive(next) {
   document.documentElement.classList.toggle('native-rounded-frame', next.status?.nativeRoundedFrame === true);
   document.documentElement.classList.toggle('panel-surface', surface === 'panel');
   playPinFeedback(previous, next);
-  appearanceUI.receive(next.settings?.prefs?.appearance, next.status || {});
+  const appearance = next.settings?.prefs?.appearance;
+  appearanceUI.receive(surface === 'translation' ? { ...appearance, current: { ...appearance?.current, material: 'glass', opacity: 72 } } : appearance, next.status || {});
   shortcutsUI.receive(next.settings?.prefs, next.status || {});
   if (!previous) { historySearch = next.historyQuery || ''; historyFilter = next.historySavedOnly ? 'saved' : 'all'; }
-  if (state.view === 'history' && previous?.view !== 'history') historyVisible = 50;
+  if (state.view === 'history' && (previous?.view !== 'history' || previous.historyOpenId !== next.historyOpenId)) historyVisible = 50;
+  if (previous?.view === 'history' && (state.view !== 'history' || previous.historyOpenId !== next.historyOpenId)) {
+    exitHistoryMultiSelect();
+  }
   if (['paste', 'explain', 'preview', 'context'].includes(state.view)) lastContentView = state.view;
   if (state.view === 'settings' && (previous?.view !== 'settings' || previous?.settingsSection !== next.settingsSection)) settingsSection = next.settingsSection || 'service';
   if (previous?.session?.id !== next.session?.id || previous?.session?.activeMode !== next.session?.activeMode) readingAnchor = null;
   const contentState = value => {
     const { wide: _wide, status: nativeStatus, ...content } = value;
     const { wide, windowTransitioning, appearanceDark, appearanceMaterial, reducedMotion, ...visibleStatus } = nativeStatus || {};
-    if (content.view === 'settings') { content.session = { kind: value.session?.kind }; content.history = null; }
+    if (content.view === 'settings') {
+      content.session = { kind: value.session?.kind }; content.history = null;
+      // 本窗口自动保存的回声只更新元数据，不重建正在操作的控件。
+      if (settingsSaveDepth > 0) content.settings = null;
+    }
     return JSON.stringify({ ...content, status: visibleStatus });
   };
   if (surface === 'panel' && previous && contentState(previous) === contentState(next)) {
+    if (next.view === 'settings' && settingsSaveDepth > 0) {
+      syncServiceProfileMetadata();
+    }
     syncWindowLayout();
     if (!next.status?.windowTransitioning) {
       for (const input of root.querySelectorAll('[data-field="question"]')) updateField(input);
@@ -578,6 +726,7 @@ function render() {
   if (surface === 'menu') { renderMenu(); return; }
   if (surface === 'selection') { renderSelection(); return; }
   if (surface === 'capture') { renderCapture(); return; }
+  if (['translation', 'translation-overlay'].includes(surface)) { translationUI.render(state.translation, state.translationLanguages, state.settings?.prefs?.screenshotTranslation); return; }
   const view = ['paste', 'explain', 'preview', 'context', 'settings', 'history'].includes(state.view) ? state.view : 'paste';
   const key = ['explain', 'preview', 'context'].includes(view) ? `${view}:${session()?.id || ''}:${view === 'explain' ? mode() : ''}` : view;
   const saved = key === renderedKey ? snapshot() : null;
@@ -705,7 +854,8 @@ function pasteView(body) {
     if (result.ok && result.value && withContext && hasProvider('text')) await call('start-explanation', result.value, { scope: 'explain' });
   };
   body.append(el('form', { onsubmit: submit, novalidate: true }, text.wrap, context.wrap, errorNode('paste'),
-    el('div', { class: 'form-actions' }, button('截图框选', () => call('start-capture'), { icon: 'crop', class: 'secondary', busy: 'start-capture' }),
+    el('div', { class: 'form-actions' }, button('AI 识图', () => call('start-capture', { mode: 'explain' }), { icon: 'ai', class: 'secondary', busy: 'start-capture' }),
+      button('OCR 翻译', () => call('start-capture', { mode: 'translate' }), { icon: 'crop', class: 'secondary', busy: 'start-capture' }),
       button(pending.has('new-text') ? '正在打开…' : '开始解释', null, { type: 'submit', class: 'primary', busy: 'new-text' }))));
 }
 
@@ -1017,7 +1167,7 @@ function flushDraft() {
   clearTimeout(draftTimer);
   draftTimer = null;
   draftWork = draftWork.then(async () => {
-    let ok=true;
+    let ok = surface === 'panel' ? await flushSettings() : true;
     for(const [key,item] of [...dirtyDrafts]) {
       if(item.draft.length>LIMITS.question){errors.set('global','有追问超过 4000 字，缩短后才能保存。');ok=false;continue;}
       const result=await call('set-draft',item,{scope:'global',lock:false,render:false});
@@ -1065,19 +1215,19 @@ async function sendQuestion() {
 
 function previewView(body) {
   const active = session();
-  body.append(el('h1', {}, '确认截图'), el('p', { class: 'hint' }, '直接解释，也可以补充背景或指出想了解的内容。'));
+  body.append(el('h1', {}, '识图'), el('p', { class: 'hint' }, '补充图片背景或识别要求，也可以直接开始。'));
   if (!safeImage(active?.imageData)) {
-    body.append(notice('没有取得截图', '请重新框选需要理解的区域。', [button('重新框选', () => call('start-capture'), { icon: 'crop', class: 'primary', busy: 'start-capture' })], true));
+    body.append(notice('没有取得截图', '请重新框选需要理解的区域。', [button('重新框选', () => call('start-capture', { mode: 'explain' }), { icon: 'crop', class: 'primary', busy: 'start-capture' })], true));
     return;
   }
   body.append(el('img', { class: 'preview-image', src: active.imageData, alt: '本次框选的图像预览' }));
-  const note = field('截图说明', 'image-note', notes.get(active.id) ?? active.note ?? '', { multiline: true, optional: true, limit: LIMITS.note, placeholder: '例如：解释图中两条曲线有什么区别', oninput:event=>{
+  const note = field('提示词', 'image-note', notes.get(active.id) ?? active.note ?? '', { multiline: true, optional: true, limit: LIMITS.note, placeholder: '描述图片，或告诉 AI 你想了解什么', oninput:event=>{
     notes.set(active.id,event.target.value);dirtyNotes.set(active.id,{id:active.id,note:event.target.value});scheduleDraft();
   } });
   body.append(note.wrap, errorNode('preview'), errorNode('web-search'), el('div', { class: 'form-actions' },
-    button('重新框选', () => call('start-capture'), { icon: 'crop', class: 'secondary', busy: 'start-capture' }),
+    button('重新框选', () => call('start-capture', { mode: 'explain' }), { icon: 'crop', class: 'secondary', busy: 'start-capture' }),
     webSearchButton(),
-    button(pending.has('set-note') || pending.has('start-explanation') ? '正在准备…' : '直接解释', async () => {
+    button(pending.has('set-note') || pending.has('start-explanation') ? '正在准备…' : '开始识图', async () => {
       if (pending.has('set-note') || pending.has('start-explanation')) return;
       const value = note.control.value;
       const error = validate(value, LIMITS.note, '截图说明');
@@ -1109,22 +1259,26 @@ function settingsView(body) {
   const appearance = el('div', { 'data-settings-section': 'appearance', hidden: settingsSection !== 'appearance' });
   const shortcuts = el('div', { 'data-settings-section': 'shortcuts', hidden: settingsSection !== 'shortcuts' });
   const sections = { general, service, appearance, shortcuts };
-  const entries = [['general', '常规设置'], ['service', 'AI 服务'], ['appearance', '外观与主题'], ['shortcuts', '快捷键']];
+  const entries = [['general', '常规', 'settings', '常规设置'], ['service', 'AI', 'ai', 'AI 服务'], ['appearance', '外观', 'shirt', '外观与主题'], ['shortcuts', '快捷键', 'keyboard', '快捷键']];
   const tabs = el('div', { class: 'settings-navigation', role: 'tablist', 'aria-label': '设置分类' });
-  for (const [value, label] of entries) tabs.append(button(label, () => {
-    if (value !== 'shortcuts') void shortcutsUI.endRecording();
+  for (const [value, label, glyph, title] of entries) tabs.append(button(label, () => {
+    if (value !== 'shortcuts') void shortcutsUI.flush?.();
+    if (value !== 'appearance') void appearanceUI.flush?.();
+    void settingsAutosave.flush();
     settingsSection = value;
     for (const [key, node] of Object.entries(sections)) node.hidden = key !== value;
     [...tabs.querySelectorAll('[role="tab"]')].forEach((tab, i) => tab.setAttribute('aria-selected', String(entries[i][0] === value)));
     syncModeIndicator(); syncContentTransitions();
     body.scrollTop = 0;
     void call(({ appearance: 'open-appearance', shortcuts: 'open-shortcuts' })[value] || 'open-settings', value === 'general' ? { section: 'general' } : {}, { lock: false, render: false }).then(result => { if (!result.ok) render(); });
-  }, { role: 'tab', selected: settingsSection === value }));
+  }, { role: 'tab', selected: settingsSection === value, icon: glyph, title }));
   generalSettingsView(general);
   serviceSettingsView(service);
   appearanceUI.mount(appearance);
   shortcutsUI.mount(shortcuts);
-  body.append(tabs, general, service, appearance, shortcuts);
+  const issues = el('aside', { class: 'settings-save-issues', 'data-settings-save-issues': '', 'aria-label': '未保存的设置', role: 'alert' });
+  paintSettingsIssues(issues);
+  body.append(tabs, issues, general, service, appearance, shortcuts);
 }
 
 const FALLBACK_SERVICE_CATALOG = {
@@ -1155,7 +1309,7 @@ function serviceCatalog(kind) {
 
 function syncSelectedProviderDrafts() {
   if (state?.view !== 'settings' || settingsSection !== 'service') return;
-  for (const kind of ['text', 'vision', 'search']) {
+  for (const kind of ['text', 'vision', 'translation', 'search']) {
     const select = root.querySelector(`[name="${kind}-provider"]`);
     if (select?.value) selectedProviders[kind] = select.value;
   }
@@ -1165,12 +1319,13 @@ function syncServiceProfileMetadata() {
   if (state?.view !== 'settings' || settingsSection !== 'service') return;
   const form = root.querySelector('[data-settings-section="service"] form');
   if (!form) return;
-  for (const kind of ['text', 'vision', 'search']) {
+  for (const kind of ['text', 'vision', 'translation', 'search']) {
     const providerId = selectedProviderId(form, kind);
     const config = resolveServiceProfile(kind, providerId);
     const key = form.querySelector(`[name="${kind}-apiKey"]`);
     if (kind === 'search') form.querySelector('.search-protocol-select').hidden = providerId !== 'custom';
     if (key) key.placeholder = config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写';
+    updateApiKeyStatus(form, kind);
     const link = form.querySelector(`[data-key-link="${kind}"]`);
     if (link) link.hidden = !externalHttpUrl(config.keyUrl);
   }
@@ -1223,6 +1378,7 @@ function applyServiceProfile(form, kind, providerId) {
   if (key) key.placeholder = config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写';
   const link = form.querySelector(`[data-key-link="${kind}"]`);
   if (link) link.hidden = !externalHttpUrl(config.keyUrl);
+  updateApiKeyStatus(form, kind);
 }
 
 function providerSelect(form, kind, providerId) {
@@ -1233,10 +1389,78 @@ function providerSelect(form, kind, providerId) {
       captureServiceDraft(form, kind, selectedProviders[kind] || providerId);
       selectedProviders[kind] = event.target.value;
       applyServiceProfile(form, kind, event.target.value);
+      invalidateFetchedModels(kind);
+      const status = form.querySelector(`[data-service-save="${kind}"]`);
+      if (status) { status.dataset.autosave = `service:${kind}:${event.target.value}`; paintAutosaveStatus(status, status.dataset.autosave); }
+      void queueServiceSave(form, kind, true);
     } }, ...providers.map(item => el('option', { value: item.id, selected: item.id === providerId }, item.name)));
   return el('div', { class: 'field-wrap service-provider-select' },
     el('label', { class: 'label', for: `field-${kind}-provider` }, kind === 'search' ? '搜索服务提供商' : '模型厂商'),
     select);
+}
+
+function fetchedModelsKey(config) {
+  const value = JSON.stringify([config.providerId || '', config.baseUrl || '', config.apiKey || '', config.clearKey === true]);
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+  return (hash >>> 0).toString(16);
+}
+
+function invalidateFetchedModels(kind) {
+  fetchedModelTokens[kind]++;
+  fetchedModelResults.delete(kind);
+  modelFetchRenderers.get(kind)?.();
+}
+
+function modelFetchControls(form, kind, modelField) {
+  const section = el('div', { class: 'model-fetch-controls' });
+  const buttonNode = button('获取模型', async () => {
+    const config = providerConfig(form, kind);
+    const key = fetchedModelsKey(config);
+    const token = ++fetchedModelTokens[kind];
+    fetchedModelResults.set(kind, { key, pending: true, models: [] });
+    draw();
+    const result = await call('fetch-models', { kind, config }, { scope: `fetch-models-${kind}`, render: false, lock: false });
+    const currentForm = root.querySelector('[data-settings-section="service"] form');
+    const currentConfig = currentForm ? providerConfig(currentForm, kind) : null;
+    if (token !== fetchedModelTokens[kind]) return;
+    if (!currentConfig || fetchedModelsKey(currentConfig) !== key) {
+      if (fetchedModelResults.get(kind)?.key === key) fetchedModelResults.delete(kind);
+      modelFetchRenderers.get(kind)?.();
+      return;
+    }
+    const models = result.ok && Array.isArray(result.value?.models)
+      ? [...new Set(result.value.models.filter(value => typeof value === 'string').map(value => value.trim()).filter(Boolean))]
+      : [];
+    fetchedModelResults.set(kind, result.ok
+      ? { key, pending: false, models, message: models.length ? `已获取 ${models.length} 个模型 ID。` : '没有获取到模型 ID，可以手动填写。' }
+      : { key, pending: false, models: [], message: `获取失败：${result.error || '服务暂不可用'}。可以手动填写。` });
+    (modelFetchRenderers.get(kind) || draw)();
+  }, { class: 'secondary model-fetch-button' });
+  const output = el('div', { class: 'model-fetch-output', 'aria-live': 'polite' });
+  const row = el('div', { class: 'model-field-row' }, modelField.wrap, buttonNode);
+  section.append(row, el('p', { class: 'hint model-fetch-hint' }, kind === 'vision'
+    ? '列表仅显示当前服务返回的模型 ID，不代表模型支持识图；也可以手动填写。'
+    : '列表仅显示当前服务返回的模型 ID；也可以手动填写。'), output);
+
+  function draw() {
+    const currentKey = fetchedModelsKey(providerConfig(form, kind));
+    const entry = fetchedModelResults.get(kind);
+    const current = entry?.key === currentKey ? entry : null;
+    buttonNode.disabled = current?.pending === true;
+    buttonNode.textContent = current?.pending ? '正在获取…' : '获取模型';
+    output.replaceChildren();
+    if (!current) { output.hidden = true; return; }
+    output.hidden = false;
+    output.append(el('p', { class: `model-fetch-status${current.pending ? ' pending' : current.models.length ? ' success' : current.message.startsWith('获取失败') ? ' failure' : ''}`, role: 'status' }, current.pending ? '正在向当前服务获取模型列表…' : current.message));
+    if (current.models.length) output.append(el('div', { class: 'model-fetch-list', 'aria-label': '服务返回的模型 ID' },
+      ...current.models.map(model => button(model, () => {
+        modelField.control.value = model;
+        modelField.control.dispatchEvent(new Event('input', { bubbles: true }));
+      }, { class: 'model-option', title: `使用模型 ID：${model}` }))));
+  }
+  modelFetchRenderers.set(kind, draw);
+  return section;
 }
 
 function serviceKeyLink(kind) {
@@ -1253,6 +1477,38 @@ function apiKeyNote() {
   return el('p', { class: 'hint api-key-note' }, `本机 DPAPI 加密。路径：${state.settingsFilePath || '暂不可用'}`);
 }
 
+function apiKeyStatus(form, kind) {
+  return el('p', { class: 'api-key-status missing', 'data-key-status': kind, role: 'status' }, 'API 密钥未配置');
+}
+
+function updateApiKeyStatus(form, kind) {
+  const node = form.querySelector(`[data-key-status="${kind}"]`);
+  if (!node) return;
+  const providerId = selectedProviderId(form, kind);
+  const config = resolveServiceProfile(kind, providerId);
+  const typedKey = form.querySelector(`[name="${kind}-apiKey"]`)?.value.trim();
+  const clearControl = form.querySelector(`[name="${kind}-clearKey"]`);
+  const clearKey = clearControl?.checked === true;
+  const saveState = settingsAutosave.status(`service:${kind}:${providerId}`).status;
+  if (clearControl) {
+    clearControl.disabled = !config.hasKey && !clearKey;
+    const label = clearControl.closest('label'); if (label) label.hidden = !config.hasKey && !clearKey;
+  }
+  if (typedKey) {
+    node.className = 'api-key-status pending';
+    node.textContent = saveState === 'error' ? '新 API 密钥未保存' : '新 API 密钥待自动保存';
+  } else if (clearKey && config.hasKey) {
+    node.className = 'api-key-status pending';
+    node.textContent = saveState === 'error' ? 'API 密钥清除未保存' : '正在清除 API 密钥…';
+  } else if (config.hasKey === true && !clearKey) {
+    node.className = 'api-key-status configured';
+    node.textContent = 'API 密钥已配置';
+  } else {
+    node.className = 'api-key-status missing';
+    node.textContent = 'API 密钥未配置';
+  }
+}
+
 function profilePayload(config, kind) {
   const result = { baseUrl: config.baseUrl || '' };
   if (kind === 'search' && config.protocol) result.protocol = config.protocol;
@@ -1262,22 +1518,38 @@ function profilePayload(config, kind) {
   return result;
 }
 
-function serviceProfilesPayload(form) {
-  const result = { text: {}, vision: {}, search: {} };
-  for (const kind of ['text', 'vision', 'search']) {
-    for (const [id, profile] of Object.entries(state.settings?.serviceProfiles?.[kind] || {})) result[kind][id] = profilePayload(profile, kind);
-    for (const [id, draft] of serviceDrafts[kind]) result[kind][id] = profilePayload(draft, kind);
-    const current = readServiceDraft(form, kind);
-    result[kind][current.providerId] = profilePayload(current, kind);
-  }
-  return result;
+function queueServiceSave(form, kind, immediate = false) {
+  const providerId = selectedProviderId(form, kind);
+  selectedProviders[kind] = providerId;
+  captureServiceDraft(form, kind, providerId);
+  const config = { ...serviceDrafts[kind].get(providerId) };
+  const key = `service:${kind}:${providerId}`, version = (serviceDraftVersions.get(key) || 0) + 1;
+  serviceDraftVersions.set(key, version); tests.delete(kind);
+  return settingsAutosave.schedule(key, () => {
+    const profile = profilePayload(config, kind);
+    const payload = { serviceProfiles: { [kind]: { [providerId]: profile } } };
+    // 旧厂商的迟到编辑只更新自己的配置，不能将当前服务切回去。
+    if (selectedProviders[kind] === providerId) payload[kind] = { providerId, ...profile };
+    return payload;
+  }, { immediate }).then(result => {
+    if (!result.ok || serviceDraftVersions.get(key) !== version) return result;
+    serviceDrafts[kind].delete(providerId);
+    const activeForm = root.querySelector('[data-settings-section="service"] form');
+    if (activeForm && selectedProviderId(activeForm, kind) === providerId) {
+      activeForm.querySelector(`[name="${kind}-apiKey"]`).value = '';
+      activeForm.querySelector(`[name="${kind}-clearKey"]`).checked = false;
+      updateApiKeyStatus(activeForm, kind);
+    }
+    return result;
+  });
 }
 
 function serviceSettingsView(body) {
-  body.append(el('h1', {}, 'AI 服务'), el('p', { class: 'hint' }, '识图模型留空时，截图使用文字模型的整套配置。API Key 留空会保留已保存的密钥。'));
-  const kinds = ['text', 'vision', 'search'];
+  body.append(el('div', { class: 'settings-page-heading' }, el('h1', {}, 'AI 服务'), el('span', { 'data-settings-save-summary': '' }, settingsAutosave.summary())),
+    el('p', { class: 'hint' }, '识图、翻译模型留空时沿用文字模型；密钥留空保留已配置值。'));
+  const kinds = ['text', 'vision', 'translation', 'search'];
   const tabs = el('div', { class: 'mode-tabs', role: 'tablist', 'aria-label': '服务类型' });
-  for (const kind of kinds) tabs.append(button(({ text: '文字模型', vision: '识图模型', search: '联网搜索' })[kind], () => {
+  for (const kind of kinds) tabs.append(button(({ text: '文字模型', vision: '识图模型', translation: '翻译模型', search: '联网搜索' })[kind], () => {
     settingsTab = kind;
     for (const section of root.querySelectorAll('[data-provider]')) section.hidden = section.dataset.provider !== kind;
     for (const tab of tabs.querySelectorAll('[role="tab"]')) tab.setAttribute('aria-selected', String(tab.dataset.kind === kind));
@@ -1287,60 +1559,69 @@ function serviceSettingsView(body) {
   body.append(tabs);
   const form = el('form', { novalidate: true, onsubmit: async event => {
     event.preventDefault();
-    const text = providerConfig(form, 'text');
-    const vision = providerConfig(form, 'vision');
-    const search = searchProviderConfig(form);
-    const payload = {
-      text, vision, search, serviceProfiles: serviceProfilesPayload(form),
-    };
-    const result = await call('save-settings', payload, { scope: 'settings' });
-    if (result.ok) { tests.clear(); for (const kind of kinds) serviceDrafts[kind].clear(); }
+    await settingsAutosave.flush();
   } });
-  for (const kind of ['text', 'vision']) {
-    const config = state.settings?.[kind] || {};
-    const providerId = config.providerId || 'custom';
+  for (const kind of ['text', 'vision', 'translation']) {
+    const providerId = selectedProviders[kind] || state.settings?.[kind]?.providerId || 'custom';
+    const config = resolveServiceProfile(kind, providerId);
     const section = el('section', { class: 'settings-section', 'data-provider': kind, hidden: settingsTab !== kind });
     section.append(providerSelect(form, kind, providerId));
     if (kind === 'vision') section.append(el('p', { class: 'hint' }, '可选：模型名称留空时，使用文字模型的地址、模型和密钥，忽略下面的识图配置。文字模型需要支持图片输入。'));
-    section.append(field('服务地址', `${kind}-baseUrl`, config.baseUrl || '', { placeholder: '兼容服务的 API 地址' }).wrap,
-      field('模型名称', `${kind}-model`, config.model || '', { optional: kind === 'vision', placeholder: kind === 'vision' ? '留空使用文字模型' : '文字模型名称' }).wrap,
-      field('API Key', `${kind}-apiKey`, '', { type: 'password', optional: true, placeholder: config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写' }).wrap,
+    if (kind === 'translation') section.append(el('p', { class: 'hint' }, '模型名称留空时，截图翻译沿用文字模型的整套配置；填写独立模型后，截图翻译会使用这里的服务。'));
+    const baseUrl = field('服务地址', `${kind}-baseUrl`, config.baseUrl || '', { placeholder: '兼容服务的 API 地址', oninput: () => invalidateFetchedModels(kind) });
+    const modelField = field('模型名称', `${kind}-model`, config.model || '', { optional: kind !== 'text', placeholder: kind !== 'text' ? '留空使用文字模型' : '文字模型名称' });
+    const apiKey = field('API Key', `${kind}-apiKey`, '', { type: 'password', optional: true, placeholder: config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写', oninput: () => { invalidateFetchedModels(kind); updateApiKeyStatus(form, kind); } });
+    const saveState = autosaveStatus(`service:${kind}:${providerId}`); saveState.dataset.serviceSave = kind;
+    section.append(saveState, baseUrl.wrap,
+      modelFetchControls(form, kind, modelField),
+      apiKey.wrap,
+      apiKeyStatus(form, kind),
       apiKeyNote(),
       serviceKeyLink(kind),
-      el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: `${kind}-clearKey`, 'data-field': `${kind}-clearKey` }), '清除已保存的 API Key'),
-      el('p', { class: 'hint' }, kind === 'vision' ? '测试连接会向识图模型发送小图片；模型名称留空时使用当前文字配置。可能产生服务费用。' : '点击“测试连接”会向上方服务发送测试内容，并可能产生服务费用。'),
+       el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: `${kind}-clearKey`, 'data-field': `${kind}-clearKey`, onchange: () => { invalidateFetchedModels(kind); updateApiKeyStatus(form, kind); } }), '清除已保存的 API Key'),
+      el('p', { class: 'hint' }, kind === 'vision' ? '测试连接会向识图模型发送小图片；模型名称留空时使用当前文字配置。可能产生服务费用。'
+        : kind === 'translation' ? '测试连接会发送一条短翻译样例；模型名称留空时使用当前文字配置。可能产生服务费用。'
+          : '点击“测试连接”会向上方服务发送测试内容，并可能产生服务费用。'),
       button(pending.has('test-provider') && tests.get(kind)?.pending ? '正在测试…' : '测试连接', async () => {
         if (pending.has('test-provider')) return;
         const config = providerConfig(form, kind);
-        const fallbackConfig = kind === 'vision' && !config.model ? providerConfig(form, 'text') : undefined;
+        const fallbackConfig = ['vision', 'translation'].includes(kind) && !config.model ? providerConfig(form, 'text') : undefined;
         const selected = fallbackConfig || config;
-        if (!selected.baseUrl || !selected.model) { tests.set(kind, { error: true, message: fallbackConfig ? '请先填写文字模型的服务地址和模型名称，或单独配置识图模型。' : '请先填写服务地址和模型名称。' }); render(); return; }
-        tests.set(kind, { pending: true, message: fallbackConfig ? '正在使用文字模型发送识图测试图片…' : '正在向指定服务发送测试内容…' });
+        if (!selected.baseUrl || !selected.model) {
+          const fallbackMessage = kind === 'translation' ? '请先填写文字模型的服务地址和模型名称，或单独配置翻译模型。' : '请先填写文字模型的服务地址和模型名称，或单独配置识图模型。';
+          tests.set(kind, { error: true, message: fallbackConfig ? fallbackMessage : '请先填写服务地址和模型名称。' }); render(); return;
+        }
+        tests.set(kind, { pending: true, message: fallbackConfig
+          ? kind === 'translation' ? '正在使用文字模型配置发送翻译测试…' : '正在使用文字模型发送识图测试图片…'
+          : '正在向指定服务发送测试内容…' });
         const result = await call('test-provider', { kind, config, fallbackConfig }, { scope: `test-${kind}` });
         tests.set(kind, { error: !result.ok, message: result.ok ? (typeof result.value === 'string' ? result.value : result.value?.message || '连接成功，服务已返回测试结果。') : result.error || '测试没有完成，请重试。' });
         render();
       }, { class: 'secondary', busy: 'test-provider' }),
-      el('p', { class: `test-result${tests.get(kind)?.error ? ' danger' : ' success'}`, role: 'status' }, tests.get(kind)?.message || ''),
+      el('p', { class: `test-result${tests.get(kind)?.pending ? ' pending' : tests.get(kind)?.error ? ' failure' : tests.get(kind) ? ' success' : ''}`, role: 'status' }, tests.get(kind)?.message || ''),
       errorNode(`test-${kind}`));
     form.append(section);
     applyServiceProfile(form, kind, providerId);
+    modelFetchRenderers.get(kind)?.();
   }
   {
     const kind = 'search';
-    const config = state.settings?.search || {};
-    const providerId = config.providerId || 'exa';
+    const providerId = selectedProviders.search || state.settings?.search?.providerId || 'exa';
+    const config = resolveServiceProfile(kind, providerId);
     const section = el('section', { class: 'settings-section', 'data-provider': kind, hidden: settingsTab !== kind });
-    section.append(providerSelect(form, kind, providerId),
+    const saveState = autosaveStatus(`service:${kind}:${providerId}`); saveState.dataset.serviceSave = kind;
+    section.append(providerSelect(form, kind, providerId), saveState,
       el('div', { class: 'field-wrap search-protocol-select', hidden: providerId !== 'custom' },
         el('label', { class: 'label', for: 'search-protocol' }, '接口格式'),
         el('select', { id: 'search-protocol', name: 'search-protocol', 'data-field': 'search-protocol', 'aria-label': '自定义搜索接口格式' },
           ...[['exa', 'Exa 兼容'], ['brave', 'Brave 兼容'], ['deepseek', 'DeepSeek 兼容']].map(([value, label]) => el('option', { value }, label))),
         el('p', { class: 'hint' }, '填写完整搜索地址，接口需兼容所选格式。')),
       field('搜索服务地址', 'search-baseUrl', config.baseUrl || '', { placeholder: '所选搜索服务的 API 地址' }).wrap,
-      field('API Key', 'search-apiKey', '', { type: 'password', optional: true, placeholder: config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写' }).wrap,
+      field('API Key', 'search-apiKey', '', { type: 'password', optional: true, placeholder: config.hasKey ? '已配置，留空保留原 Key' : '未配置，按服务要求填写', oninput: () => updateApiKeyStatus(form, kind) }).wrap,
+      apiKeyStatus(form, kind),
       apiKeyNote(),
       serviceKeyLink(kind),
-      el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'search-clearKey', 'data-field': 'search-clearKey' }), '清除已保存的 API Key'),
+      el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'search-clearKey', 'data-field': 'search-clearKey', onchange: () => updateApiKeyStatus(form, kind) }), '清除已保存的 API Key'),
       el('p', { class: 'hint' }, '测试会向所选搜索服务发送一次短查询，可能产生服务费用。'),
       button(pending.has('test-search-provider') && tests.get(kind)?.pending ? '正在测试…' : '测试搜索服务', async () => {
         if (pending.has('test-search-provider')) return;
@@ -1351,37 +1632,72 @@ function serviceSettingsView(body) {
         tests.set(kind, { error: !result.ok, message: result.ok ? (typeof result.value === 'string' ? result.value : result.value?.message || '搜索服务已返回测试结果。') : result.error || '测试没有完成，请重试。' });
         render();
       }, { class: 'secondary', busy: 'test-search-provider' }),
-      el('p', { class: `test-result${tests.get(kind)?.error ? ' danger' : ' success'}`, role: 'status' }, tests.get(kind)?.message || ''),
+       el('p', { class: `test-result${tests.get(kind)?.pending ? ' pending' : tests.get(kind)?.error ? ' failure' : tests.get(kind) ? ' success' : ''}`, role: 'status' }, tests.get(kind)?.message || ''),
       errorNode('test-search'));
     form.append(section);
     applyServiceProfile(form, kind, providerId);
   }
-  form.append(errorNode('settings'),
-    el('div', { class: 'form-actions' }, button('取消', () => navigate(lastContentView), { class: 'secondary' }), button(pending.has('save-settings') ? '正在保存…' : '保存设置', null, { type: 'submit', class: 'primary', busy: 'save-settings' })));
+  const edited = (event, immediate) => {
+    const input = event.target, section = input.closest?.('[data-provider]');
+    if (!section || !input.name || input.name.endsWith('-provider') || event.isComposing || composing || locatingSettingsFailure) return;
+    void queueServiceSave(form, section.dataset.provider, immediate);
+  };
+  form.addEventListener('input', event => edited(event, false));
+  form.addEventListener('change', event => edited(event, true));
+  form.addEventListener('focusout', event => {
+    const section = event.target.closest?.('[data-provider]');
+    if (!section || locatingSettingsFailure) return;
+    const kind = section.dataset.provider;
+    // 输入事件已记录快照；失焦仅加速待写入项，不重复提交失败项或隐藏其恢复入口。
+    settingsAutosave.expedite(`service:${kind}:${selectedProviderId(form, kind)}`);
+  });
+  form.append(errorNode('settings'));
   body.append(form);
 }
 
 function generalSettingsView(body) {
-  body.append(el('h1', {}, '常规设置'));
-  const form = el('form', { novalidate: true, onsubmit: async event => {
-    event.preventDefault();
-    const checked = name => form.querySelector(`[name="${name}"]`).checked;
-    await call('save-settings', { prefs: { showOrb: checked('showOrb'), selectionEnabled: checked('selectionEnabled'),
-      autoExplainCapture: checked('autoExplainCapture'), pinSound: checked('pinSound'), orbAction: form.querySelector('[name="orbAction"]').value } }, { scope: 'general' });
-  } });
-  form.append(el('label', { class: 'label', for: 'orb-action' }, '悬浮球左键功能'),
-    el('select', { id: 'orb-action', class: 'orb-action-select', name: 'orbAction', 'data-field': 'orbAction', 'aria-label': '悬浮球左键功能' },
-      el('option', { value: 'chat', selected: state.settings?.prefs?.orbAction !== 'capture' }, '打开 / 关闭最新会话（默认）'),
-      el('option', { value: 'capture', selected: state.settings?.prefs?.orbAction === 'capture' }, '截图框选')),
-    el('p', { class: 'hint' }, '选择会话时，再次点击会关闭窗口；选择截图时，点击直接开始框选。右键始终打开菜单。'),
-    el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'autoExplainCapture', 'data-field': 'autoExplainCapture', checked: state.settings?.prefs?.autoExplainCapture === true }), '截图框选完成后自动解释'),
-    el('p', { class: 'hint' }, '关闭时仍会先显示截图预览，由你确认后再开始解释。联网沿用上次开关。'),
-    el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'showOrb', 'data-field': 'showOrb', checked: Boolean(state.settings?.prefs?.showOrb) }), '显示悬浮球'),
-    el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'selectionEnabled', 'data-field': 'selectionEnabled', checked: Boolean(state.settings?.prefs?.selectionEnabled) }), '启用划词入口'),
-    el('label', { class: 'check-label' }, el('input', { type: 'checkbox', name: 'pinSound', 'data-field': 'pinSound', checked: state.settings?.prefs?.pinSound !== false }), '置顶时播放提示音'),
-    errorNode('general'),
-    el('div', { class: 'form-actions' }, button(pending.has('save-settings') ? '正在保存…' : '保存设置', null, { type: 'submit', class: 'primary', busy: 'save-settings' })));
-  body.append(form);
+  body.append(el('div', { class: 'settings-page-heading' }, el('h1', {}, '常规设置'), el('span', { 'data-settings-save-summary': '' }, settingsAutosave.summary())));
+  const prefs = state.settings?.prefs || {};
+  const group = title => { const section = el('section', { class: 'settings-group', 'aria-label': title }, el('h2', {}, title)); body.append(section); return section; };
+  const save = async (name, value) => {
+    const key = `general:${name}`, revision = (generalSaveVersions.get(name) || 0) + 1;
+    generalSaveVersions.set(name, revision); generalSaveNotices.delete(key);
+    const change = name === 'translationMode' ? { screenshotTranslation: { [name]: value } } : { [name]: value };
+    const result = await settingsAutosave.commit(key, { prefs: change });
+    if (!result.ok && name === 'launchAtLogin' && generalSaveVersions.get(name) === revision) {
+      // 系统拒绝时，开关回到真实保存值；没有未保存修改，关闭窗口不应被拦住。
+      settingsAutosave.discardFailure(key);
+      generalSaveNotices.set(key, `${result.error} 开关已还原。`);
+      const input = root.querySelector('[name="launchAtLogin"]');
+      if (input) input.checked = state.settings?.prefs?.launchAtLogin === true;
+      const status = [...root.querySelectorAll('[data-autosave]')].find(node => node.dataset.autosave === key);
+      if (status) { status.className = 'setting-save-state is-error'; status.setAttribute('role', 'alert'); status.textContent = generalSaveNotices.get(key); }
+      errors.delete('settings-autosave');
+    }
+  };
+  const toggle = (section, name, title, description, checked) => {
+    const input = el('input', { type: 'checkbox', role: 'switch', name, 'data-field': name, 'aria-label': title, 'aria-description': description, checked, onchange: event => save(name, event.target.checked) });
+    const item = el('div', { class: 'setting-item' },
+      el('label', { class: 'setting-toggle-row' }, el('span', { class: 'setting-copy' }, el('span', { class: 'setting-title' }, title), description ? el('span', { class: 'setting-description' }, description) : null), input), autosaveStatus(`general:${name}`));
+    section.append(item); return item;
+  };
+  const select = (section, name, title, description, value, choices) => {
+    section.append(el('div', { class: 'setting-item' }, el('label', { class: 'setting-select-row' },
+      el('span', { class: 'setting-copy' }, el('span', { class: 'setting-title' }, title), description ? el('span', { class: 'setting-description' }, description) : null),
+      el('select', { name, 'data-field': name, 'aria-label': title, onchange: event => save(name, event.target.value) },
+        ...choices.map(([id, text]) => el('option', { value: id, selected: id === value }, text)))), autosaveStatus(`general:${name}`)));
+  };
+  const desktop = group('桌面入口');
+  toggle(desktop, 'showOrb', '显示悬浮球', '桌面上的快捷入口', prefs.showOrb !== false);
+  select(desktop, 'orbAction', '悬浮球左键功能', '右键始终打开菜单', prefs.orbAction || 'chat', [['chat', '最新会话'], ['capture', '截图框选']]);
+  toggle(desktop, 'selectionEnabled', '启用划词入口', '选中文字后显示解释入口', prefs.selectionEnabled !== false);
+  const capture = group('截图与翻译');
+  select(capture, 'captureDefaultMode', '截图默认模式', '用于悬浮球和截图快捷键，松开即处理', prefs.captureDefaultMode || 'explain', [['explain', '识图'], ['translate', '翻译']]);
+  select(capture, 'captureExplainMode', '识图模式', '框选后直接识别，或先补充图片说明', prefs.captureExplainMode || 'immediate', [['immediate', '立即识别'], ['prompt', '先补充提示词']]);
+  select(capture, 'translationMode', '截图翻译方式', '快速关闭思考，深度开启思考', prefs.screenshotTranslation?.translationMode || 'standard', [['standard', '快速'], ['deep', '深度']]);
+  const system = group('启动与提示');
+  toggle(system, 'launchAtLogin', '开机自启动', '登录后在托盘运行，不弹出窗口', prefs.launchAtLogin === true);
+  toggle(system, 'pinSound', '置顶提示音', '', prefs.pinSound !== false);
   windowSettingsView(body);
   const status = state.status || {};
   if (status.selection || status.shortcutErrors?.length) body.append(el('section', { class: 'status-details' }, el('h3', {}, '系统状态'), status.selection ? el('p', {}, status.selection) : null, ...(status.shortcutErrors || []).map(message => el('p', { class: 'danger' }, message))));
@@ -1423,7 +1739,14 @@ function historyView(body) {
   body.classList.add('history-body');
   const page = el('div', { class: 'history-page' });
   page.append(el('div', { class: 'history-heading' }, el('h1', {}, '会话历史'),
-    button('新建', () => navigate('paste'), { icon: 'text', class: 'secondary' })));
+    el('div', { class: 'history-heading-actions' },
+      button(historyMultiSelect ? '退出多选' : '多选', () => {
+        if (pending.has('delete-sessions')) return;
+        historyMultiSelect = !historyMultiSelect;
+        historySelection.clear(); historyBatchConfirm = false; historyBatchStatus = null;
+        render();
+      }, { icon: historyMultiSelect ? 'close' : 'select', iconOnly: true, pressed: historyMultiSelect, class: 'icon-button', disabled: pending.has('delete-sessions') }),
+      button('新建', () => navigate('paste'), { icon: 'edit', iconOnly: true, class: 'icon-button' }))));
   const search = el('input', { type: 'search', maxlength: 1000, 'data-field': 'history-search', 'aria-label': '搜索标题、原文、截图说明或问答', placeholder: '搜索会话、原文或回答', value: historySearch, oninput: event => {
     historySearch = event.target.value;
     historyVisible = 50; void searchHistory();
@@ -1433,10 +1756,12 @@ function historyView(body) {
   const tabs = el('div', { class: 'filter-tabs', role: 'tablist', 'aria-label': '历史筛选' },
     ...[['all', '全部会话'], ['saved', '手动收藏']].map(([value, label]) => button(label, () => { historyFilter = value; historyVisible = 50; void searchHistory(); render(); }, { selected: historyFilter === value, role: 'tab' })));
   const count = el('p', { class: 'history-count', role: 'status' });
-  tools.append(el('div', { class: 'history-filter-row' }, tabs, count)); page.append(tools, errorNode('history'));
+  tools.append(el('div', { class: 'history-filter-row' }, tabs, count));
+  const selection = el('section', { class: 'history-selection', 'data-history-selection': 'true', hidden: !historyMultiSelect, 'aria-label': '批量管理会话' });
+  page.append(tools, errorNode('history'), selection);
   const list = el('div', { 'data-history-list': 'true' });
   page.append(list); body.append(page);
-  renderHistoryList(list, count);
+  renderHistoryList(list, count, selection);
 }
 
 async function searchHistory() {
@@ -1460,10 +1785,120 @@ function historyDay(value) {
   return { key: `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`, label: days === 0 ? '今天' : days === 1 ? '昨天' : new Intl.DateTimeFormat('zh-CN', { ...(date.getFullYear() !== today.getFullYear() ? { year: 'numeric' } : {}), month: 'long', day: 'numeric' }).format(date) };
 }
 
-function renderHistoryList(list, count = root.querySelector('.history-count')) {
+function isHistoryQueryCurrent() {
+  return state?.historyQuery === undefined || (state.historyQuery === historySearch && state.historySavedOnly === (historyFilter === 'saved'));
+}
+
+function historySelectionVisibility(items = state?.history || []) {
+  if (!isHistoryQueryCurrent()) return { hidden: historySelection.size, current: false };
+  const visible = new Set(items.slice(0, historyVisible).map(item => item.id));
+  return { hidden: [...historySelection].filter(id => !visible.has(id)).length, current: true };
+}
+
+function exitHistoryMultiSelect() {
+  historyMultiSelect = false; historySelection.clear(); historyBatchConfirm = false; historyBatchStatus = null;
+}
+
+function clearHistorySelection() {
+  if (pending.has('delete-sessions')) return;
+  historySelection.clear(); historyBatchConfirm = false; historyBatchStatus = null;
+  render();
+}
+
+function cleanupHistorySession(id) {
+  notes.delete(id); dirtyNotes.delete(id);
+  for (const key of drafts.keys()) if (key.startsWith(`${id}:`)) { drafts.delete(key); dirtyDrafts.delete(key); }
+}
+
+async function confirmBatchHistoryDelete() {
+  if (!historySelection.size || pending.has('delete-sessions')) return;
+  const visibility = historySelectionVisibility();
+  if (!visibility.current || visibility.hidden) {
+    historyBatchConfirm = false;
+    historyBatchStatus = { failure: true, message: '筛选结果或分页已变化，所选会话中仍有隐藏项。请清除选择或显示全部所选会话后再继续。' };
+    render(); return;
+  }
+  const ids = [...historySelection];
+  if (ids.length > 500) {
+    historyBatchConfirm = false;
+    historyBatchStatus = { failure: true, message: '单次最多移到回收站 500 个会话，请减少选择后重试。' };
+    render(); return;
+  }
+  historyBatchConfirm = false;
+  const result = await call('delete-sessions', { ids }, { scope: 'history' });
+  if (!result.ok) {
+    historyBatchStatus = { failure: true, message: `批量移动未完成；所选会话仍保留，可以重试。${result.error ? ` ${result.error}` : ''}` };
+    render(); return;
+  }
+  const value = result.value;
+  if (!value || !Array.isArray(value.deletedIds) || !Array.isArray(value.failed)) {
+    historyBatchStatus = { failure: true, message: '没有收到完整的批量处理结果；所有选择均已保留，请刷新历史核对后再操作。' };
+    render(); return;
+  }
+  const requested = new Set(ids);
+  const deleted = new Set(value.deletedIds.filter(id => typeof id === 'string' && requested.has(id)));
+  const uncertain = new Set(value.failed.filter(item => item?.uncertain === true && requested.has(item.id)).map(item => item.id));
+  const failures = new Map(value.failed.filter(item => item && typeof item.id === 'string' && requested.has(item.id)).map(item => [item.id, String(item.error || '移动失败。')]));
+  for (const id of deleted) cleanupHistorySession(id);
+  for (const item of value.failed) if (item?.absent === true && requested.has(item.id)) cleanupHistorySession(item.id);
+  historySelection.clear();
+  for (const id of ids) if (!deleted.has(id) && !uncertain.has(id)) historySelection.add(id);
+  const unreported = [...historySelection].filter(id => !failures.has(id));
+  if (failures.size || unreported.length) {
+    const details = [...failures].map(([id, error]) => `${id}：${error}`).join('；');
+    const missing = unreported.length ? `另有 ${unreported.length} 个结果未返回，` : '';
+    historyBatchStatus = { failure: true, message: `已移到回收站 ${deleted.size} 个；${failures.size} 个未确认成功。${missing}${uncertain.size ? `${uncertain.size} 个结果无法确认，已取消选择，请刷新历史并检查系统回收站。` : '未成功的选择仍保留，可核对后重试。'}${details ? ` ${details}` : ''}` };
+  } else historyBatchStatus = { failure: false, message: `已把 ${deleted.size} 个会话移到回收站。` };
+  render();
+}
+
+function renderHistorySelection(panel) {
+  if (!panel) return;
+  panel.replaceChildren();
+  panel.hidden = !historyMultiSelect;
+  if (!historyMultiSelect) return;
+  const items = state?.history || [];
+  const current = isHistoryQueryCurrent();
+  const visibility = historySelectionVisibility(items);
+  const canSelectAll = current && items.length > 0 && items.length <= 500;
+  panel.append(el('div', { class: 'history-selection-toolbar' },
+    el('p', { class: 'history-selection-count', role: 'status' }, `已选 ${historySelection.size} 个会话`),
+    button('全选', () => {
+      if (pending.has('delete-sessions') || !isHistoryQueryCurrent() || items.length > 500) return;
+      historySelection.clear();
+      for (const item of items) historySelection.add(item.id);
+      historyBatchConfirm = false; historyBatchStatus = null;
+      render();
+    }, { class: 'secondary', title: '全选当前筛选结果', disabled: !canSelectAll || pending.has('delete-sessions') }),
+    button('清空', clearHistorySelection, { class: 'secondary', title: '清除选择', disabled: historySelection.size === 0 || pending.has('delete-sessions') }),
+    button('批量移到回收站', () => { historyBatchConfirm = true; historyBatchStatus = null; render(); }, {
+      icon: 'trash', iconOnly: true, class: 'icon-button danger', disabled: historySelection.size === 0 || !current || visibility.hidden > 0 || pending.has('delete-sessions'),
+    })));
+  if (!current) panel.append(el('p', { class: 'history-selection-warning', role: 'status' }, '正在更新搜索或收藏筛选结果，批量操作已暂停；完成后会检查所有已选会话是否仍显示。'));
+  else if (visibility.hidden) panel.append(el('div', { class: 'history-selection-warning', role: 'alert' },
+    el('span', {}, `${visibility.hidden} 个已选会话被搜索、收藏筛选或分页隐藏。为防止误删，批量操作已暂停；可加载更多以显示所选会话，或清除选择。`),
+    button('清除全部选择', clearHistorySelection, { class: 'text-button', disabled: pending.has('delete-sessions') })));
+  if (items.length > 500 && !canSelectAll) panel.append(el('p', { class: 'history-selection-warning', role: 'status' }, '当前筛选结果超过 500 个，单次批量操作最多 500 个；请缩小筛选范围后再全选。'));
+  if (historyBatchStatus) panel.append(el('p', { class: `history-batch-status${historyBatchStatus.failure ? ' failure' : ' success'}`, role: historyBatchStatus.failure ? 'alert' : 'status' }, historyBatchStatus.message));
+  if (historyBatchConfirm) {
+    const selectedItems = current ? items.filter(item => historySelection.has(item.id)) : [];
+    const savedCount = selectedItems.filter(item => item.saved).length;
+    const safelyConfirmable = current && visibility.hidden === 0 && historySelection.size > 0 && historySelection.size <= 500 && !pending.has('delete-sessions');
+    panel.append(el('div', { class: 'batch-delete-confirm', role: 'group', 'aria-label': '确认批量移到回收站' },
+      el('p', {}, `确认将 ${historySelection.size} 个会话移到回收站？每个会话的回答、追问和手动收藏记录都会随整条会话一起移走。${savedCount ? `其中包括 ${savedCount} 个已收藏会话。` : ''}`),
+      el('div', { class: 'actions' },
+        button('取消', () => { historyBatchConfirm = false; render(); }, { class: 'secondary' }),
+        button(pending.has('delete-sessions') ? '正在移动…' : `确认移到回收站（${historySelection.size}）`, confirmBatchHistoryDelete, {
+          class: 'secondary danger', busy: 'delete-sessions', disabled: !safelyConfirmable,
+        }))));
+  }
+}
+
+function renderHistoryList(list, count = root.querySelector('.history-count'), selectionPanel = root.querySelector('[data-history-selection]')) {
   if (!list) return;
+  renderHistorySelection(selectionPanel);
   const query = historySearch.trim().toLocaleLowerCase();
-  if (state.historyQuery !== undefined && (state.historyQuery !== historySearch || state.historySavedOnly !== (historyFilter === 'saved'))) {
+  if (!isHistoryQueryCurrent()) {
     if (count) count.textContent = '正在搜索…'; list.replaceChildren(); return;
   }
   const items = state.history || [];
@@ -1489,7 +1924,21 @@ function renderHistoryList(list, count = root.querySelector('.history-count')) {
     open.setAttribute('aria-label', `打开会话：${title}`);
     open.append(el('span', { class: 'history-copy' }, el('span', { class: 'history-title' }, title), summary && summary !== title ? el('span', { class: 'history-summary' }, summary) : null));
     const star = button(item.saved ? '取消收藏' : '收藏会话', () => call('favorite', { id: item.id, saved: !item.saved }, { scope: 'history' }), { icon: 'star', iconOnly: true, class: `icon-button history-star${item.saved ? ' starred' : ''}`, pressed: Boolean(item.saved), busy: 'favorite' });
-    const entry = el('article', { class: 'history-item', 'data-history-id': item.id }, el('div', { class: 'history-topline' }, open, star));
+    const checkbox = historyMultiSelect ? el('label', { class: 'history-select-label', title: `选择会话：${title}` },
+      el('input', { type: 'checkbox', class: 'history-select-checkbox', checked: historySelection.has(item.id),
+        disabled: pending.has('delete-sessions') || (!historySelection.has(item.id) && historySelection.size >= 500), 'aria-label': `选择会话：${title}`,
+        onchange: event => {
+          if (event.target.checked && !historySelection.has(item.id)) {
+            if (historySelection.size >= 500) {
+              event.target.checked = false;
+              historyBatchStatus = { failure: true, message: '单次最多选择 500 个会话，请先清除部分选择。' };
+            } else historySelection.add(item.id);
+          } else if (!event.target.checked) historySelection.delete(item.id);
+          historyBatchConfirm = false;
+          if (!historyBatchStatus?.failure || !historyBatchStatus.message.includes('最多选择')) historyBatchStatus = null;
+          renderHistorySelection(root.querySelector('[data-history-selection]'));
+        } })) : null;
+    const entry = el('article', { class: 'history-item', 'data-history-id': item.id }, el('div', { class: 'history-topline' }, checkbox, open, star));
     const activity = new Date(item.lastActivityAt || item.createdAt);
     const time = Number.isNaN(activity.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(activity);
     entry.append(el('div', { class: 'history-bottom' }, el('span', { class: 'history-meta', title: `${names} · ${dateLabel(item.lastActivityAt || item.createdAt)}` }, `${item.sourceLabel || (item.kind === 'image' ? '截图' : '文字')}${time ? ` · ${time}` : ''}`),
@@ -1514,8 +1963,7 @@ function renderHistoryList(list, count = root.querySelector('.history-count')) {
       button(pending.has('delete-session') ? '正在移动…' : '确认移到回收站', async () => {
         const result = await call('delete-session', { id: item.id }, { scope: 'history' });
         if (result.ok) {
-          deleteId = null;notes.delete(item.id);dirtyNotes.delete(item.id);
-          for(const key of drafts.keys())if(key.startsWith(item.id+':')){drafts.delete(key);dirtyDrafts.delete(key);}
+          deleteId = null; historySelection.delete(item.id); historyBatchConfirm = false; cleanupHistorySession(item.id);
           render();
         }
       }, { class: 'secondary danger', busy: 'delete-session' }))));
@@ -1599,8 +2047,7 @@ function renderMenu() {
     menu.append(el('div', { class: 'quick-menu-heading' }, brand({ small: true, tile: true }), el('span', {}, 'PickGloss'), close));
     const groups = [
       [['paste', '粘贴文字', 'text'], ['capture', '截图框选', 'crop'], ['history', '会话历史', 'history']],
-      [['toggle-pin', state.pinned ? '取消置顶' : '置顶窗口', 'pin', state.pinned], ['toggle-wide', state.wide ? '收回小窗' : '展开阅读视图', state.wide ? 'narrow' : 'wide']],
-      [['appearance', '外观与主题', 'shirt'], ['settings', 'AI 服务', 'settings'], ['shortcuts', '快捷键', 'keyboard']],
+      [['general-settings', '常规设置', 'settings'], ['settings', 'AI 服务', 'ai'], ['appearance', '外观与主题', 'shirt'], ['shortcuts', '快捷键', 'keyboard']],
       [['toggle-orb', state.settings?.prefs?.showOrb === false ? '显示悬浮球' : '隐藏悬浮球', 'orb'], ['toggle-selection', state.settings?.prefs?.selectionEnabled === false ? '开启划词入口' : '关闭划词入口', 'pause']],
       [...(isStreaming() ? [['stop', '停止回答', 'stop']] : []), ['quit', '退出 PickGloss', 'back']],
     ];
@@ -1611,8 +2058,8 @@ function renderMenu() {
         const row = el('button', { type: 'button', class: 'quick-menu-item', role: checked === undefined ? 'menuitem' : 'menuitemcheckbox', 'aria-checked': checked, 'data-menu-command': command, onclick: async () => {
           if (menuBusy) return;
           menuBusy = true;
-          const direct = { settings: 'open-settings', shortcuts: 'open-shortcuts', quit: 'quit' }[command];
-          try { await call(direct || 'shortcut-command', direct ? {} : { command }, { render: false, scope: 'menu' }); }
+          const direct = { 'general-settings': 'open-settings', settings: 'open-settings', shortcuts: 'open-shortcuts', quit: 'quit' }[command];
+          try { await call(direct || 'shortcut-command', command === 'general-settings' ? { section: 'general' } : direct ? {} : { command }, { render: false, scope: 'menu' }); }
           finally { menuBusy = false; renderMenu(); }
         } }, icon(glyph), el('span', { class: 'menu-label' }, label), accelerator ? el('kbd', {}, accelerator.replaceAll('Super', 'Win')) : null, checked ? el('span', { class: 'quick-menu-check', 'aria-hidden': 'true' }, '✓') : null);
         group.append(row);
@@ -1669,7 +2116,22 @@ function renderCapture() {
   const preview = state.capture?.imageData;
   const incoming = typeof preview === 'string' && /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/=\r\n]+$/.test(preview) ? preview : '';
   const data = incoming || (id && id === captureId ? captureImage : '');
-  if (captureId === id && captureImage === data && root.querySelector('.capture-surface')) { updateCaptureControls(); return; }
+  if (captureId === id && captureImage === data && root.querySelector('.capture-surface')) {
+    const saved = state.settings?.prefs?.screenshotTranslation;
+    if (!captureLanguageSaves && saved?.sourceLanguage === captureTranslationOptions.sourceLanguage && saved?.targetLanguage === captureTranslationOptions.targetLanguage) captureLanguageDraft = false;
+    if (!captureLanguageSaves && !captureLanguageDraft && saved) {
+      Object.assign(captureTranslationOptions, saved, { showOriginal: false });
+      for (const [label, key] of [['源语言', 'sourceLanguage'], ['目标语言', 'targetLanguage']]) {
+        root.querySelector(`select[aria-label="${label}"]`).value = captureTranslationOptions[key];
+      }
+    }
+    updateCaptureControls(); return;
+  }
+  if (captureId !== id || !captureTranslationOptions) {
+    captureLanguageDraft = false; captureLanguageRevision++; errors.delete('capture-language');
+    captureTranslationMode = (state.capture?.mode ?? state.captureMode) === 'translate' ? 'translate' : 'explain';
+    captureTranslationOptions = { sourceLanguage: 'auto', targetLanguage: 'zh-Hans', displayMode: 'overlay', ...state.settings?.prefs?.screenshotTranslation, showOriginal: false };
+  }
   captureId = id; captureImage = data; captureReady = false;
   const token = ++captureLoadToken;
   crop = null;
@@ -1681,6 +2143,40 @@ function renderCapture() {
       button('取消', () => call('capture-cancel'), { class: 'secondary', busy: 'capture-cancel' }),
       button('完成', completeCapture, { class: 'primary', disabled: true, busy: 'capture-done' }))),
     el('div', { class: 'capture-error', role: 'alert', hidden: true }));
+  const modes = el('div', { class: 'capture-translation-options', role: 'group', 'aria-label': '截图模式' });
+  const languageOptions = el('div', { class: 'capture-translation-options' });
+  const sourceLanguage = languageSelect(state.translationLanguages, captureTranslationOptions?.sourceLanguage || 'auto', '源语言', true);
+  const targetLanguage = languageSelect(state.translationLanguages, captureTranslationOptions?.targetLanguage || 'zh-Hans', '目标语言');
+  const saveLanguages = async () => {
+    captureTranslationOptions.sourceLanguage = sourceLanguage.value;
+    captureTranslationOptions.targetLanguage = targetLanguage.value;
+    captureLanguageDraft = true;
+    const revision = ++captureLanguageRevision, scope = `capture-language-${revision}`;
+    const options = { sourceLanguage: sourceLanguage.value, targetLanguage: targetLanguage.value };
+    captureLanguageSaves++;
+    try {
+      const result = await call('set-translation-preferences', { options }, { scope, render: false, lock: false });
+      // 旧框选或旧语言的迟到响应不能撤销当前选择，也不能覆盖当前错误反馈。
+      if (revision === captureLanguageRevision) {
+        if (result.ok) errors.delete('capture-language');
+        else errors.set('capture-language', result.error || '语言选择未保存，本次翻译仍使用当前选框。');
+      }
+    } finally { errors.delete(scope); captureLanguageSaves--; render(); }
+  };
+  sourceLanguage.addEventListener('change', saveLanguages);
+  targetLanguage.addEventListener('change', saveLanguages);
+  languageOptions.append(sourceLanguage, el('span', {}, '→'), targetLanguage);
+  const syncCaptureMode = () => {
+    for (const choice of modes.querySelectorAll('[data-capture-mode]')) choice.setAttribute('aria-pressed', String(choice.dataset.captureMode === captureTranslationMode));
+    languageOptions.hidden = captureTranslationMode !== 'translate';
+    if (captureReady) layer.querySelector('.capture-help-message').textContent = captureTranslationMode === 'translate' ? '拖动框选，松开即翻译 · Esc 取消' : '拖动框选，松开即识图 · Esc 取消';
+  };
+  for (const [value, label] of [['explain', '识图'], ['translate', '翻译']]) {
+    const choice = button(label, () => { captureTranslationMode = value; syncCaptureMode(); }, { class: 'secondary' });
+    choice.dataset.captureMode = value; modes.append(choice);
+  }
+  modes.append(languageOptions); syncCaptureMode();
+  layer.querySelector('.capture-help-message').after(modes);
   layer.addEventListener('pointerdown', event => {
     if (!captureReady || !data || pending.has('capture-done') || event.button !== 0 || event.target.closest('.capture-help')) return;
     event.preventDefault();
@@ -1703,6 +2199,7 @@ function renderCapture() {
     if (layer.hasPointerCapture(event.pointerId)) layer.releasePointerCapture(event.pointerId);
     if (!crop || crop.width < 8 || crop.height < 8) { crop = null; errors.set('capture', '选区太小，请重新框选。'); }
     updateCaptureControls();
+    if (crop) void completeCapture();
   });
   layer.addEventListener('pointercancel', () => { captureDragging = false; crop = null; updateCaptureControls(); });
   root.replaceChildren(layer);
@@ -1713,7 +2210,7 @@ function renderCapture() {
       if (token !== captureLoadToken || captureId !== id) return;
       if (!image.naturalWidth || !image.naturalHeight) throw Error('截图预览没有有效尺寸');
       captureReady = true;
-      layer.querySelector('.capture-help-message').textContent = '拖动框选，松开后确认 · Esc 取消';
+      syncCaptureMode();
       updateCaptureControls();
       return call('capture-ready', { id }, { lock: false, render: false });
     }).catch(() => {
@@ -1744,14 +2241,14 @@ function updateCaptureControls() {
   finish.disabled = !captureReady || !crop || captureDragging || crop.width < 8 || crop.height < 8 || pending.has('capture-done');
   finish.textContent = pending.has('capture-done') ? '正在处理…' : '完成';
   const message = root.querySelector('.capture-error');
-  message.textContent = errors.get('capture') || errors.get('global') || '';
+  message.textContent = errors.get('capture') || errors.get('capture-language') || errors.get('global') || '';
   message.hidden = !message.textContent;
 }
 
 async function completeCapture() {
   if (!crop || captureDragging || pending.has('capture-done')) return;
   const rect = Object.fromEntries(Object.entries(crop).map(([key, value]) => [key, Math.round(value)]));
-  await call('capture-done', { rect }, { scope: 'capture' });
+  await call('capture-done', { rect, mode: captureTranslationMode, ...(captureTranslationMode === 'translate' ? { options: captureTranslationOptions } : {}) }, { scope: 'capture' });
 }
 
 document.addEventListener('compositionstart', () => { composing = true; justFinishedComposition = false; clearTimeout(compositionEndTimer); });
@@ -1772,6 +2269,10 @@ window.addEventListener('blur', finishAnswerPointer);
 window.addEventListener('focus', () => {
   if (surface === 'panel' && state?.view === 'history') void call('refresh-history', {}, { scope: 'history', render: false }).then(() => render());
 });
+document.addEventListener('visibilitychange', () => {
+  if (surface === 'panel' && document.hidden && state?.view === 'history') { exitHistoryMultiSelect(); render(); }
+  if (surface === 'panel' && document.hidden) void flushSettings();
+});
 document.addEventListener('compositionend', event => {
   composing = false;
   // 某些输入法在 compositionend 后才派发确认候选的 Enter，此事件仍属于本次组合。
@@ -1779,15 +2280,23 @@ document.addEventListener('compositionend', event => {
   clearTimeout(compositionEndTimer);
   compositionEndTimer = setTimeout(() => { justFinishedComposition = false; compositionEndTimer = null; }, 0);
   if (event.target.dataset?.field === 'question') { rememberDraft(event.target); scheduleDraft(); }
+  const service = event.target.closest?.('[data-provider]');
+  if (service) void queueServiceSave(service.closest('form'), service.dataset.provider);
   if (deferredRender) { deferredRender = false; render(); }
 });
 document.addEventListener('keydown', event => {
   if (event.isComposing || composing) return;
   if (event.key === 'Escape') {
+    // 选择器展开时先由浏览器收起列表，避免同一次 Esc 关闭整个设置窗口。
+    if (root.querySelector('select:open')) return;
     event.preventDefault();
     if (surface === 'capture') void call('capture-cancel');
+    else if (['translation', 'translation-overlay'].includes(surface) && state?.translation) void call('close-translation', { id: state.translation.id });
     else if (renameId !== null) { renameId = null; render(); }
     else if (deleteId !== null) { deleteId = null; render(); }
+    else if (historyBatchConfirm) { historyBatchConfirm = false; render(); }
+    else if (historyMultiSelect && state?.view === 'history' && pending.has('delete-sessions')) { /* 批量移动进行中时保留选择状态。 */ }
+    else if (historyMultiSelect && state?.view === 'history') { exitHistoryMultiSelect(); render(); }
     else if (surface === 'panel') { void flushDraft().then(ok => ok && call('close')); }
   }
   if (surface === 'capture' && event.key === 'Enter' && !captureDragging) { event.preventDefault(); void completeCapture(); }
@@ -1800,6 +2309,7 @@ window.addEventListener('pagehide', () => {
   clearTimeout(compositionEndTimer);
   appearanceUI.dispose();
   shortcutsUI.dispose();
+  settingsAutosave.dispose();
   if (typeof unsubscribe === 'function') unsubscribe();
   if (typeof unsubscribeQuit === 'function') unsubscribeQuit();
 });

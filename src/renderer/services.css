@@ -28,7 +28,12 @@
 .context-pending .stream-dot{flex:none}
 .service-provider-select .label{margin-top:10px}
 .service-provider-select select{display:block;width:100%;max-width:100%;min-height:34px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--field);color:var(--ink)}
-.api-key-note{overflow-wrap:anywhere;word-break:break-word}
+.api-key-note{overflow-wrap:anywhere;word-break:break-word;color:var(--muted);font-size:11px;line-height:1.5;margin:4px 0 7px}
+.api-key-status{font-size:12px;line-height:1.5;margin:5px 0 0}
+.api-key-status.configured{color:var(--success)}
+.api-key-status.missing{color:var(--danger)}
+.api-key-status.pending{color:var(--muted)}
+.capture-default-mode-hint{margin:5px 0 10px}
 .settings-section .text-button{margin-top:2px}
 
 .search-source-excerpt{grid-column:2;min-width:0}
@@ -38,3 +43,27 @@
 .search-source-excerpt[open]>summary .icon{transform:rotate(90deg)}
 .search-source-excerpt .search-source-snippet{margin:0 0 3px}
 .search-protocol-select select{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--field)}
+
+.model-field-row{display:flex;align-items:flex-end;gap:8px;min-width:0}
+.model-field-row>.field-wrap{flex:1;min-width:0}
+.model-fetch-button{flex:none;margin:0 0 5px;white-space:nowrap}
+.model-fetch-hint{margin:4px 0 0;font-size:12px}
+.model-fetch-output{margin-top:5px}
+.model-fetch-output[hidden]{display:none}
+.model-fetch-status{font-size:12px;line-height:1.6;color:var(--muted);margin:4px 0;overflow-wrap:anywhere}
+.model-fetch-status.success{color:var(--success)}
+.model-fetch-status.failure{color:var(--danger)}
+.model-fetch-list{display:flex;flex-wrap:wrap;gap:5px;margin:5px 0 2px}
+.model-option{max-width:100%;overflow-wrap:anywhere;min-height:26px;padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:var(--surface-secondary);font-size:12px;text-align:left}
+.model-option:hover{background:var(--selected)}
+.settings-section .test-result.success{color:var(--success)}
+.settings-section .test-result.failure{color:var(--danger)}
+.settings-section .test-result.pending{color:var(--muted)}
+.settings-section .test-result:empty{display:none}
+@media(max-width:320px){.model-field-row{gap:5px}.model-fetch-button{padding-inline:7px;font-size:12px}}
+
+/* 初始粘贴页的截图操作更紧凑，图标与文字在按钮中垂直居中。 */
+.recognition-body .form-actions{gap:6px}
+.recognition-body .form-actions button{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-height:28px;padding:4px 8px;font-size:12px;line-height:18px}
+.recognition-body .form-actions button>.icon{width:14px;height:14px}
+@media(max-width:320px){.recognition-body .form-actions{gap:4px}.recognition-body .form-actions button{padding-inline:6px;font-size:11px}.recognition-body .form-actions button>.icon{width:13px;height:13px}}
