@@ -28,7 +28,8 @@ async function runSteps(steps, { cwd = process.cwd(), logFile, secrets = [], wri
       else {
         if (typeof step.command !== 'string' || !Array.isArray(step.args)) throw Error('命令需要程序名称及参数数组');
         const child = spawnSync(step.command, step.args, {
-          cwd: step.cwd || cwd, shell: false, windowsHide: true, encoding: 'utf8',
+          // 仅显式获焦的 GUI 专项允许正常显示；其余命令默认隐藏控制台。
+          cwd: step.cwd || cwd, shell: false, windowsHide: step.windowsHide !== false, encoding: 'utf8',
           timeout: step.timeoutMs || 180000, maxBuffer: 16 * 1024 * 1024,
           env: { ...process.env, ...step.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
         });

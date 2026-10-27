@@ -1,12 +1,16 @@
 'use strict';
 // 隐藏的正式渲染器与原生窗口，使用真实设置存储、真实 preload 和虚构会话。
 const { quoteJavaScriptString } = require('./javascript-string.cjs');
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, systemPreferences } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { setTimeout: delay } = require('node:timers/promises');
+const { createUiDriver } = require('./ui-driver.cjs');
+const reducedMotionFixture = process.argv.includes('--reduced-motion');
+const controlledMotion = reducedMotionFixture || process.argv.includes('--normal-motion');
+if (controlledMotion) systemPreferences.getAnimationSettings = () => ({ prefersReducedMotion: reducedMotionFixture, shouldRenderRichAnimation: !reducedMotionFixture });
 const rootIndex = process.argv.indexOf('--app-root');
 const sourceRoot = rootIndex >= 0 ? path.resolve(process.argv[rootIndex + 1]) : path.resolve(__dirname, '..');
 const { createStore } = require(path.join(sourceRoot, 'src/core/store.cjs'));
@@ -24,8 +28,16 @@ async function waitFor(predicate, label) {
   throw Error(`等待${label}超时：${await evaluate('document.body.innerText')}`);
 }
 const ready = () => waitFor(() => evaluate(`Boolean(document.querySelector('.panel'))`), '正式界面');
-async function click(selector) { await evaluate(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]')||node.disabled)throw Error('操作目标不可见或禁用');node.click();})()`); }
-async function input(selector, value) { await evaluate(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});if(!node||!node.getClientRects().length||node.closest('[hidden]'))throw Error('输入目标不可见');node.focus();node.value=${quoteJavaScriptString(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`); }
+const driver = createUiDriver(evaluate);
+async function readyControl(selector) {
+  await driver.waitFor(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});return Boolean(node?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})&&!node.disabled)})()`, '控件可见、启用且进入动画结束', { allowErrors: true });
+}
+async function settledLayout(reading) {
+  await waitFor(async () => !fixture.status.windowTransitioning && await evaluate(`!document.documentElement.classList.contains('layout-preparing') && (innerWidth>=640)===${reading} && document.querySelector('.panel')?.classList.contains('reading-layout')===${reading} && document.querySelector('[data-scroll="body"]')?.classList.contains(${quoteJavaScriptString(reading ? 'answer-pane' : 'explain-body')})`), '原生和渲染器布局均已提交');
+  await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+}
+async function click(selector) { await readyControl(selector); await driver.click(undefined, { selector, allowErrors: true }); }
+async function input(selector, value) { await readyControl(selector); await evaluate(`(()=>{const nodes=document.querySelectorAll(${quoteJavaScriptString(selector)});const node=nodes[0];if(nodes.length!==1||!node.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})||node.disabled)throw Error('输入目标必须唯一、可见且启用');node.focus();node.value=${quoteJavaScriptString(value)};node.dispatchEvent(new Event('input',{bubbles:true}));})()`); }
 async function shot(name) {
   await evaluate(`Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished.catch(()=>{})))`);
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
@@ -43,23 +55,25 @@ async function picker(selector, name) {
   await win.webContents.executeJavaScript(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});node.scrollIntoView({block:'center'});node.focus();node.showPicker()})()`, true);
   await waitFor(()=>evaluate(`document.querySelector(${quoteJavaScriptString(selector)}).matches(':open')`),'主题选择器展开');
   await shot(name);
-  win.webContents.debugger.attach('1.3');
+  const hadDebugger = win.webContents.debugger.isAttached();
+  if (!hadDebugger) win.webContents.debugger.attach('1.3');
   try {
     await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
     await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
-  } finally { win.webContents.debugger.detach(); }
+  } finally { if (!hadDebugger) win.webContents.debugger.detach(); }
   await waitFor(()=>evaluate(`!document.querySelector(${quoteJavaScriptString(selector)}).matches(':open')`),'Esc 收起选择器');
   assert.equal(calls.includes('close'),false,'Esc 只收起选择器，不关闭设置');
 }
 async function keyboardSelectCaptureMode() {
   await win.webContents.executeJavaScript(`document.querySelector('[name="captureDefaultMode"]').showPicker()`,true);
-  win.webContents.debugger.attach('1.3');
+  const hadDebugger = win.webContents.debugger.isAttached();
+  if (!hadDebugger) win.webContents.debugger.attach('1.3');
   try {
     for (const [key,code,virtualKey] of [['ArrowDown','ArrowDown',40],['Enter','Enter',13]]) {
       await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyDown',key,code,windowsVirtualKeyCode:virtualKey});
       await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode:virtualKey});
     }
-  } finally { win.webContents.debugger.detach(); }
+  } finally { if (!hadDebugger) win.webContents.debugger.detach(); }
   await waitFor(async()=>(await store.getSettings()).prefs.captureDefaultMode==='translate','键盘选中翻译并自动保存');
   assert.equal(await evaluate(`document.querySelector('[name="captureDefaultMode"]').value`),'translate');
   observations.push({ 检查: '原生选择器键盘选项触发自动保存，Esc 仅收起弹层', 通过: true });
@@ -107,6 +121,11 @@ app.whenReady().then(async () => {
     desktop.setWide(false); win = BrowserWindow.getAllWindows()[0]; win.webContents.setBackgroundThrottling(false);
     win.webContents.on('console-message', event => { if (event.level === 'error') consoleErrors.push(event.message); });
     await ready();
+    if (controlledMotion) {
+      win.webContents.debugger.attach('1.3');
+      await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: reducedMotionFixture ? 'reduce' : 'no-preference' }] });
+      await waitFor(() => evaluate(`matchMedia("(prefers-reduced-motion: reduce)").matches===${reducedMotionFixture} && document.documentElement.classList.contains("reduced-motion")===${reducedMotionFixture}`), '隔离动态效果条件');
+    }
     assert.equal(win.isVisible(), false, '所有验证窗口保持隐藏');
     assert.equal(await evaluate(`getComputedStyle(document.querySelector('.message')).fontSize`), '14px');
     assert.equal(await evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--paper').trim()`), '#252525');
@@ -121,10 +140,12 @@ app.whenReady().then(async () => {
       assert.equal(await evaluate(`document.querySelector('[data-field="question"]').value`), `快速切换草稿 ${loop}`);
     }
     observations.push({ 检查: '三轮快速反向', 草稿保留: true, 最终尺寸: win.getBounds() });
+    await settledLayout(false);
     await evaluate(`(()=>{window.__anchorTrace=[];const record=kind=>{const scroller=document.querySelector('[data-scroll="body"]'),edge=scroller?.getBoundingClientRect().top,block=[...document.querySelectorAll('.message-content > *')].find(node=>node.getBoundingClientRect().bottom>edge+12);window.__anchorTrace.push({kind,width:innerWidth,scroll:scroller?.scrollTop,owner:scroller?.className,text:block?.textContent,offset:block?.getBoundingClientRect().top-edge,time:performance.now()});if(window.__anchorTrace.length>80)window.__anchorTrace.shift();};document.addEventListener('scroll',()=>record('scroll'),true);window.addEventListener('resize',()=>record('resize'));window.pickgloss.onState(value=>record('state:'+value.status?.windowTransitioning));record('before-scroll');})()`);
     await evaluate(`(()=>{const scroller=document.querySelector('[data-scroll="body"]'),block=[...document.querySelectorAll('.message-content > h3')][3];scroller.scrollTop+=block.getBoundingClientRect().top-scroller.getBoundingClientRect().top-18;})()`);
     await delay(35);
     const beforeAnchor = await evaluate(`(()=>{const scroller=document.querySelector('[data-scroll="body"]'),nodes=[...document.querySelectorAll('.message-content > *')],edge=scroller.getBoundingClientRect().top;const block=nodes.find(node=>node.getBoundingClientRect().bottom>edge+12);return {text:block.textContent,offset:block.getBoundingClientRect().top-edge};})()`);
+    assert.equal(beforeAnchor.text, '阅读段落 4', '阅读位置回归必须先确实滚动到指定段落，不能在顶部假通过');
     await emit();
     await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     const pushedAnchor = await evaluate(`(()=>{const scroller=document.querySelector('[data-scroll="body"]'),nodes=[...document.querySelectorAll('.message-content > *')],edge=scroller.getBoundingClientRect().top;const block=nodes.find(node=>node.getBoundingClientRect().bottom>edge+12);return {text:block.textContent,offset:block.getBoundingClientRect().top-edge};})()`);
@@ -132,7 +153,7 @@ app.whenReady().then(async () => {
     assert.ok(Math.abs(pushedAnchor.offset - beforeAnchor.offset) <= 3, JSON.stringify({ beforeAnchor, pushedAnchor }));
     await click('.layout-toggle'); await waitFor(async () => !fixture.status.windowTransitioning && win.getBounds().width >= 858, '阅读终态');
     await waitFor(()=>evaluate(`document.querySelector('.panel').classList.contains('reading-layout')&&document.querySelector('[data-scroll="body"]').classList.contains('answer-pane')`),'渲染器阅读布局');
-    await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    await settledLayout(true);
     assert.equal(await evaluate(`getComputedStyle(document.querySelector('.message')).fontSize`), '16px');
     const afterAnchor = await evaluate(`(()=>{const scroller=document.querySelector('[data-scroll="body"]'),nodes=[...document.querySelectorAll('.message-content > *')],edge=scroller.getBoundingClientRect().top;const block=nodes.find(node=>node.getBoundingClientRect().bottom>edge+12);return {text:block.textContent,offset:block.getBoundingClientRect().top-edge};})()`);
     const anchorEvidence = JSON.stringify({ beforeAnchor, afterAnchor, bounds: win.getBounds(), trace: await evaluate('window.__anchorTrace') });
@@ -140,10 +161,16 @@ app.whenReady().then(async () => {
     observations.push({ 检查: '跨布局保持同一阅读段落', 之前: beforeAnchor, 之后: afterAnchor });
     await click('.layout-toggle'); await waitFor(async () => !fixture.status.windowTransitioning && win.getBounds().width <= 302, '阅读收回终态');
     await waitFor(()=>evaluate(`!document.querySelector('.panel').classList.contains('reading-layout')&&document.querySelector('[data-scroll="body"]').classList.contains('explain-body')`),'渲染器小窗布局');
-    await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    await settledLayout(false);
     const returnedAnchor = await evaluate(`(()=>{const scroller=document.querySelector('[data-scroll="body"]'),nodes=[...document.querySelectorAll('.message-content > *')],edge=scroller.getBoundingClientRect().top;const block=nodes.find(node=>node.getBoundingClientRect().bottom>edge+12);return {text:block.textContent,offset:block.getBoundingClientRect().top-edge};})()`);
-    assert.equal(returnedAnchor.text, beforeAnchor.text); assert.ok(Math.abs(returnedAnchor.offset - beforeAnchor.offset) <= 3, JSON.stringify({ beforeAnchor, returnedAnchor }));
+    const returnEvidence = { beforeAnchor, afterAnchor, returnedAnchor, trace: await evaluate('window.__anchorTrace'), renderer: await evaluate('({width:innerWidth,height:innerHeight,preparing:document.documentElement.classList.contains("layout-preparing"),reducedMotion:document.documentElement.classList.contains("reduced-motion")})') };
+    await fs.writeFile(path.join(output, '阅读位置往返诊断.json'), JSON.stringify(returnEvidence, null, 2));
+    assert.equal(returnedAnchor.text, beforeAnchor.text, JSON.stringify(returnEvidence)); assert.ok(Math.abs(returnedAnchor.offset - beforeAnchor.offset) <= 3, JSON.stringify(returnEvidence));
     observations.push({ 检查: '状态推送与往返布局不覆盖阅读位置', 推送后: pushedAnchor, 收回后: returnedAnchor });
+    if (process.argv.includes('--anchor-only')) {
+      await fs.writeFile(path.join(output, '阅读位置专项.json'), JSON.stringify({ 通过: true, 减少动态效果: reducedMotionFixture, observations }, null, 2));
+      clearTimeout(timeout); desktop.dispose(); app.exit(0); return;
+    }
     await click('.layout-toggle'); await waitFor(async () => !fixture.status.windowTransitioning && win.getBounds().width >= 858, '再次阅读终态');
     await waitFor(()=>evaluate(`document.querySelector('.panel').classList.contains('reading-layout')&&document.querySelector('[data-scroll="body"]').classList.contains('answer-pane')`),'再次阅读布局');
     await evaluate(`document.querySelector('[data-scroll="body"]').scrollTop=0`); await shot('正式程序-黑银阅读.png');
@@ -181,13 +208,22 @@ app.whenReady().then(async () => {
     await shot('后台服务保存失败-可定位.png');
     await click('[data-settings-save-issues] button:first-of-type');
     await waitFor(() => evaluate(`document.querySelector('[name="text-provider"]').value==='custom' && document.querySelector('[name="text-baseUrl"]').value==='invalid-host'`), '定位失败厂商并保留原输入');
+    const beforeLeave = calls.length;
+    await click('.panel-bar button[title="返回"]');
+    await waitFor(() => evaluate(`document.querySelector('.panel-bar button[title="返回"]')?.disabled===false`), '保存失败后的返回动作结束');
+    assert.equal(fixture.view, 'settings', '设置保存失败必须阻止离页');
+    assert.equal(calls.slice(beforeLeave).includes('navigate'), false, '保存失败不能发送后续导航');
+    await click('.panel-bar button[title="关闭窗口"]');
+    await waitFor(() => evaluate(`document.querySelector('.panel-bar button[title="关闭窗口"]')?.disabled===false`), '保存失败后的关闭动作结束');
+    assert.equal(calls.slice(beforeLeave).includes('close'), false, '保存失败不能发送关闭');
+    assert.equal(await evaluate(`document.querySelector('[name="text-baseUrl"]').value`), 'invalid-host', '离页及关闭被阻断后仍保留失败草稿');
     await click('[data-settings-save-issues] button:nth-of-type(2)');
     await waitFor(() => evaluate(`document.querySelector('[data-settings-save-issues]').hidden && document.querySelector('[name="text-provider"]').value==='mimo'`), '显式恢复后解除保存阻断');
     assert.equal((await store.getSettings()).text.providerId, 'mimo', '放弃未保存修改不改动当前已生效的厂商');
     await input('[name="text-provider"]', 'custom'); await evaluate(`document.querySelector('[name="text-provider"]').dispatchEvent(new Event('change',{bubbles:true}))`);
     await waitFor(async () => (await store.getSettings()).text.providerId === 'custom', '恢复原服务用于后续检查');
     assert.equal((await store.getSettings()).text.baseUrl, savedText.baseUrl);
-    observations.push({ 检查: '后台厂商失败可定位及显式恢复', 草稿保留: true, 有效配置未被恢复动作改写: true });
+    observations.push({ 检查: '后台厂商失败可定位、离页和关闭阻断及显式恢复', 草稿保留: true, 有效配置未被恢复动作改写: true });
     await input('[data-field="text-model"]', '自动保存的服务草稿');
     await click('.settings-navigation button:nth-child(3)');
     await waitFor(async () => fixture.settingsSection === 'appearance', '设置分类同步');

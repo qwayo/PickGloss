@@ -38,12 +38,13 @@ class Element {
 const settle = () => new Promise(resolve => setImmediate(resolve));
 function page({ retryCreatesFailedItem = false } = {}) {
   const root = new Element('div');
+  const frames = new Map(); let frameId = 0;
   const document = {
     createElement: tag => new Element(tag), createElementNS: (_namespace, tag) => new Element(tag),
     documentElement: new Element('html'), body: new Element('body'),
   };
   const context = vm.createContext({ document, window: { addEventListener() {} }, URL,
-    requestAnimationFrame: () => 1, cancelAnimationFrame() {} });
+    requestAnimationFrame: callback => { frames.set(++frameId, callback); return frameId; }, cancelAnimationFrame: id => frames.delete(id) });
   const source = fs.readFileSync(path.resolve(__dirname, '../../src/renderer/translation.js'), 'utf8');
   vm.runInContext(source.replace(/^export /gm, '') + '\nglobalThis.createUI = createTranslationUI;', context);
   let prefs = { sourceLanguage: 'en', targetLanguage: 'zh-Hans', translationMode: 'standard', searchEnabled: false, searchScope: 'deep' };
@@ -80,6 +81,7 @@ function page({ retryCreatesFailedItem = false } = {}) {
     button.events.click[0](); await settle();
   };
   return { root, calls, selectSource, click, source: () => root.querySelectorAll('select')[0].value,
+    flushMeasurements: () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(callback => callback()); },
     succeed: () => { failLanguageSave = false; },
     setPreferences: next => { prefs = { ...prefs, ...next }; render(); },
     nextScreenshot: () => { data = { ...data, id: 'capture-2', options: { ...prefs, displayMode: 'overlay' } }; render(); } };
@@ -118,4 +120,17 @@ test('后续语言成功保存解除草稿保护，后来的真实默认值仍�
   assert.equal(editor.source(), 'ja');
   editor.setPreferences({ sourceLanguage: 'en' });
   assert.equal(editor.source(), 'en', '保存成功后不能永久锁定旧草稿');
+});
+
+test('切换期间旧高度反馈未被宿主应用时，返回对照重新提交同值且普通重绘仍去重', async () => {
+  const editor = page();
+  const measurements = () => editor.calls.filter(call => call.action === 'translation-content-height');
+  await editor.click('对照'); editor.flushMeasurements();
+  assert.equal(measurements().length, 1);
+  // 夹具宿主不应用测量，模拟测量到达时已切到覆盖而被正式主进程忽略。
+  await editor.click('覆盖'); await editor.click('对照'); editor.flushMeasurements();
+  assert.equal(measurements().length, 2, '返回对照必须重新发送相同高度');
+  assert.equal(measurements()[0].payload.contentHeight, measurements()[1].payload.contentHeight);
+  editor.setPreferences({}); editor.flushMeasurements();
+  assert.equal(measurements().length, 2, '同一对照状态的普通重绘仍不能重复反馈');
 });

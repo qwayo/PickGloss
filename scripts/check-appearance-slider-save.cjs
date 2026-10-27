@@ -21,6 +21,7 @@ const current = { view: 'settings', settingsSection: 'appearance', history: [], 
     serviceProfiles: {}, prefs: { appearance, showOrb: true } } };
 let win, phase = '初始化', closed = 0;
 const writes = [], consoleErrors = [], network = [];
+const report = { 通过: false, 要求可见焦点: visible, 证据范围: `正式预加载和${visible ? '实际获得焦点的可见' : '隐藏'} Electron 界面；虚构 IPC，不修改日常设置、登录项、全局快捷键或原生材质` };
 ipcMain.handle('pickgloss:action', async (_, action, payload = {}) => {
   if (action === 'bootstrap') return { ok: true, value: current };
   if (action === 'save-settings') {
@@ -51,8 +52,10 @@ app.whenReady().then(async () => {
     if (visible) {
       win.focus(); win.webContents.focus();
       await driver.waitFor('document.hasFocus()', '可见窗口实际获得焦点');
+      report.输入前窗口状态 = { visible: win.isVisible(), focused: win.isFocused() };
+      assert.equal(win.isVisible() && win.isFocused(), true, '输入前原生窗口必须可见且实际获焦');
     }
-    await evaluate(`window.originalSlider=document.querySelector('[data-field=appearance-opacity]');window.rangeInputs=0;document.addEventListener('input',event=>{if(event.target===window.originalSlider)window.rangeInputs++})`);
+    await evaluate(`window.originalSlider=document.querySelector('[data-field=appearance-opacity]');window.rangeInputs=[];document.addEventListener('input',event=>{if(event.target===window.originalSlider)window.rangeInputs.push({trusted:event.isTrusted,focused:document.hasFocus(),value:Number(event.target.value)})})`);
     phase = '真实鼠标事件拖动不透明度';
     const point = await evaluate(`(()=>{const node=document.querySelector('[data-field=appearance-opacity]');node.scrollIntoView({block:'center'});const rect=node.getBoundingClientRect();return {x:Math.round(rect.x+rect.width/2),y:Math.round(rect.y+rect.height/2)}})()`);
     win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});
@@ -62,7 +65,17 @@ app.whenReady().then(async () => {
     }
     win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,x:point.x+22,y:point.y});
     await delay(400);
-    assert.ok(await evaluate('window.rangeInputs>0'), '真实鼠标事件应触发滑块输入');
+    report.鼠标输入 = await evaluate('window.rangeInputs');
+    report.拖动后窗口状态 = { visible: win.isVisible(), focused: win.isFocused() };
+    assert.ok(report.鼠标输入.some(event => event.trusted), '真实鼠标事件应触发可信滑块输入');
+    if (visible) {
+      assert.equal(win.isVisible(), true, '真实滑块输入必须发生在可见窗口');
+      assert.ok(report.鼠标输入.some(event => event.trusted && event.focused), '实际滑块输入发生时页面必须获焦');
+    }
+    const draggedValue = report.鼠标输入.at(-1).value;
+    await driver.waitFor(`document.querySelector('[data-settings-save-summary]').textContent==='已自动保存' && document.querySelector('.appearance-page').getAttribute('aria-busy')==='false'`, '真实鼠标拖动已保存并解除忙碌');
+    assert.equal(current.settings.prefs.appearance.current.opacity, draggedValue, '真实鼠标输入结果必须保存到隔离状态');
+    report.鼠标拖动保存值 = draggedValue;
     assert.equal(await evaluate('window.originalSlider===document.querySelector("[data-field=appearance-opacity]")'), true, '自动保存不应重建或打断正在操作的滑块');
     phase = '拖动不透明度后保存应结束，界面应继续响应';
     await evaluate(`window.slider=document.querySelector('[data-field=appearance-opacity]');slider.focus();slider.value='90';slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new Event('change',{bubbles:true}));`);
@@ -81,9 +94,14 @@ app.whenReady().then(async () => {
     await driver.waitFor('document.querySelector("button[title=关闭窗口]")?.disabled===false', '关闭动作已结束');
     assert.equal(closed, 1);
     assert.deepEqual(network, []); assert.deepEqual(consoleErrors, []);
-    await fs.writeFile(path.join(output, '磨砂滑块保存检查.json'), JSON.stringify({ 通过: true, 可见窗口焦点验证: visible, 保存请求数: writes.length, 已保存不透明度: current.settings.prefs.appearance.current.opacity,
-      覆盖: ['鼠标拖动磨砂滑块', '保存期间保留滑块节点', '连续编辑和失焦', '保存状态结束', '其他设置及关闭按钮可用'], 证据范围: `正式预加载和${visible ? '实际获得焦点的可见' : '隐藏'} Electron 界面；虚构 IPC，不修改日常设置或原生材质` }, null, 2));
+    Object.assign(report, { 通过: true, 可见窗口焦点验证: visible, 保存请求数: writes.length, 已保存不透明度: current.settings.prefs.appearance.current.opacity,
+      覆盖: ['可信鼠标拖动及保存值', '保存期间保留滑块节点', '连续编辑和失焦', '保存状态结束', '其他设置及关闭按钮可用'] });
+    await fs.writeFile(path.join(output, '磨砂滑块保存检查.json'), JSON.stringify(report, null, 2));
     console.log(`磨砂滑块保存检查通过：${output}`);
     clearTimeout(timeout); win.destroy(); app.exit(0);
-  } catch (error) { console.error(phase, error.stack || error, consoleErrors); clearTimeout(timeout); win?.destroy(); app.exit(1); }
+  } catch (error) {
+    Object.assign(report, { 失败阶段: phase, 错误: error.message, 可见窗口焦点验证: false });
+    await fs.writeFile(path.join(output, '磨砂滑块保存检查.json'), JSON.stringify(report, null, 2));
+    console.error(phase, error.stack || error, consoleErrors); clearTimeout(timeout); win?.destroy(); app.exit(1);
+  }
 });

@@ -86,20 +86,29 @@ app.whenReady().then(async () => {
     await waitFor(`Boolean(document.querySelector('[data-settings-section="general"]'))`, '常规设置');
     win.webContents.debugger.attach('1.3');
     await delay(240);
+    if (process.argv.includes('--inject-misaligned-nav')) await win.webContents.insertCSS('.settings-body>.settings-navigation button>.icon{transform:translateY(3px)}');
 
-    const navigation = await win.webContents.executeJavaScript(`(() => {
+    const measureNavigation = () => win.webContents.executeJavaScript(`(() => {
       const nav=document.querySelector('.settings-navigation'), body=document.querySelector('.settings-body');
       const buttons=[...nav.querySelectorAll('button')];
+      const geometry=buttons.map(button=>{const icon=button.querySelector(':scope > .icon')?.getBoundingClientRect(),box=button.getBoundingClientRect(),style=getComputedStyle(button),range=document.createRange();range.selectNode(button.lastChild);const label=range.getBoundingClientRect();const contentCenter=box.top+(box.height+parseFloat(style.paddingTop)+parseFloat(style.borderTopWidth)-parseFloat(style.paddingBottom)-parseFloat(style.borderBottomWidth))/2;return {button:{x:box.x,y:box.y,width:box.width,height:box.height,right:box.right},icon:icon?{x:icon.x,y:icon.y,width:icon.width,height:icon.height,right:icon.right}:null,label:{x:label.x,y:label.y,width:label.width,height:label.height,right:label.right},font:style.font,paddingTop:style.paddingTop,paddingBottom:style.paddingBottom,contentCenter}});
       return {display:getComputedStyle(buttons[0]).display,align:getComputedStyle(buttons[0]).alignItems,
         iconCount:buttons.filter(button=>button.querySelector(':scope > .icon')).length,
-        iconAndLabel:buttons.every(button=>{const icon=button.querySelector(':scope > .icon')?.getBoundingClientRect(),box=button.getBoundingClientRect(),range=document.createRange();if(!icon||!button.lastChild)return false;range.selectNode(button.lastChild);const label=range.getBoundingClientRect();return icon.right<=label.left+1&&Math.abs(icon.top+icon.height/2-(box.top+box.height/2))<1&&label.right<=box.right+1}),
+        iconAndLabel:geometry.every(item=>item.icon&&item.icon.right<=item.label.x+1&&Math.abs(item.icon.y+item.icon.height/2-item.contentCenter)<1&&item.label.right<=item.button.right+1),
         overflow:buttons.some(button=>button.scrollWidth>button.clientWidth+1) || nav.scrollWidth>body.clientWidth+1,
-        selected:buttons[0].getAttribute('aria-selected')};
+        selected:buttons[0].getAttribute('aria-selected'),geometry,fonts:document.fonts.status,
+        viewport:{width:innerWidth,height:innerHeight,scale:devicePixelRatio},
+        animations:document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>({state:a.playState,target:a.effect.target?.className,time:a.currentTime}))};
     })()`);
+    const beforeNavigation = await measureNavigation();
+    await win.webContents.executeJavaScript('document.fonts.ready.then(()=>Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))).then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))');
+    const navigation = await measureNavigation();
+    await fs.mkdir(artifacts, { recursive: true });
+    await fs.writeFile(path.join(artifacts, '设置导航几何.json'), JSON.stringify({ 就绪前: beforeNavigation, 就绪后: navigation }, null, 2));
     assert.equal(navigation.display, 'flex', '设置分类以图标和文字组成一组');
     assert.equal(navigation.align, 'center', '设置分类图标垂直居中');
     assert.equal(navigation.iconCount, 4, '四个设置分类均带图标');
-    assert.equal(navigation.iconAndLabel, true, '窄窗设置分类图标位于文字左侧并与文字垂直居中');
+    assert.equal(navigation.iconAndLabel, true, `窄窗设置分类图标位于文字左侧并与文字垂直居中：${JSON.stringify(navigation)}`);
     assert.equal(navigation.overflow, false, '300 像素小窗的设置分类不溢出');
     await snapshot('常规设置.png');
 

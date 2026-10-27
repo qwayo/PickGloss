@@ -22,6 +22,8 @@
     "test:history-settings": "electron scripts/check-history-settings-ui.cjs",
     "test:reading": "electron scripts/check-reading-layout.cjs",
     "check:ui": "node scripts/check-ui.cjs",
+    "check:changes": "node scripts/check-changes.cjs",
+    "check:merge": "node scripts/check-changes.cjs --interactive --ocr",
     "check:native-edges": "electron scripts/check-native-edges.cjs",
     "check:portable": "node scripts/check-portable-suite.cjs"
   },

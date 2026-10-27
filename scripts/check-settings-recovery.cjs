@@ -20,7 +20,18 @@ const current = { view: 'settings', settingsSection: 'general', history: [], ses
     launchAtLogin: false, showOrb: true, selectionEnabled: true,
     shortcuts: { ...DEFAULT_SHORTCUTS, capture: 'Ctrl+Alt+X' },
   } } };
-const push = () => win.webContents.send('pickgloss:state', current);
+let statePushes = 0;
+const push = async () => {
+  const expected = ++statePushes;
+  win.webContents.send('pickgloss:state', current);
+  // 此夹具核对保存期间的回声；必须确认正式订阅者已处理，再返回保存响应。
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (await win.webContents.executeJavaScript(`window.__fixtureStateSeen>=${expected}`)) return;
+    await delay(10);
+  }
+  throw Error('隔离状态回声未得到渲染器确认');
+};
 ipcMain.handle('pickgloss:action', async (_, action, payload = {}) => {
   calls.push({ action, payload });
   if (action === 'bootstrap') return { ok: true, value: current };
@@ -28,12 +39,12 @@ ipcMain.handle('pickgloss:action', async (_, action, payload = {}) => {
     await delay(90);
     if (failStartup && payload.prefs?.launchAtLogin !== undefined) return { ok: false, error: '虚构 Windows 登录项写入失败' };
     if (failShortcuts && payload.prefs?.shortcuts) return { ok: false, error: '虚构快捷键无法注册' };
-    current.settings = applySettingsFixture(current.settings, payload); push();
+    current.settings = applySettingsFixture(current.settings, payload); await push();
     return { ok: true, value: current.settings };
   }
-  if (action === 'open-shortcuts') { current.settingsSection = 'shortcuts'; current.view = 'settings'; push(); }
-  if (action === 'open-settings') { current.settingsSection = payload.section === 'general' ? 'general' : 'service'; current.view = 'settings'; push(); }
-  if (action === 'navigate') { current.view = payload.view; push(); }
+  if (action === 'open-shortcuts') { current.settingsSection = 'shortcuts'; current.view = 'settings'; await push(); }
+  if (action === 'open-settings') { current.settingsSection = payload.section === 'general' ? 'general' : 'service'; current.view = 'settings'; await push(); }
+  if (action === 'navigate') { current.view = payload.view; await push(); }
   if (action === 'close') closed++;
   return { ok: true };
 });
@@ -51,6 +62,7 @@ app.whenReady().then(async () => {
     const driver = { ...rawDriver, waitFor: (expression, label, options) => rawDriver.waitFor(expression, label, { allowErrors: true, ...options }) };
     await win.loadFile(path.resolve(__dirname, '../src/renderer/index.html'), { query: { window: 'panel' } });
     await driver.waitFor('Boolean(document.querySelector("[name=launchAtLogin]"))', '常规设置出现');
+    await evaluate('window.__fixtureStateSeen=0;window.pickgloss.onState(()=>window.__fixtureStateSeen++);true');
     await evaluate('Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished.catch(()=>{})))');
     phase = '自启动失败';
     await evaluate('window.originalPanel=document.querySelector(".panel");document.querySelector("[name=launchAtLogin]").click()');
@@ -63,7 +75,7 @@ app.whenReady().then(async () => {
     failStartup = false;
     phase = '节点保留';
     await evaluate('window.originalPanel=document.querySelector(".panel");window.originalOrb=document.querySelector("[name=showOrb]");window.originalOrb.click()');
-    await driver.waitFor('document.querySelector("[data-settings-save-summary]").textContent==="已自动保存"', '开关成功保存');
+    await driver.waitFor('document.querySelector("[data-settings-save-summary]").textContent==="已自动保存" && document.querySelector("[name=showOrb]").closest(".setting-item").querySelector(".setting-save-state").textContent===""', '本次开关成功保存');
     assert.equal(current.settings.prefs.showOrb, false);
     assert.equal(await evaluate('window.originalPanel===document.querySelector(".panel") && window.originalOrb===document.querySelector("[name=showOrb]")'), true, '保存回声保留面板和控件节点');
     assert.equal(await evaluate('document.querySelectorAll(".settings-navigation [role=tab] svg").length'), 4);
@@ -96,7 +108,7 @@ app.whenReady().then(async () => {
     await evaluate('[...document.querySelectorAll(".shortcut-actions button")].find(node=>node.title==="放弃未保存的快捷键修改").click()');
     await driver.waitFor('document.querySelector("[data-settings-save-issues]").hidden', '本页恢复同步解除失败');
     await driver.click('关闭窗口'); await driver.waitFor('document.querySelector("button[title=关闭窗口]")?.disabled===false', '再次关闭回执'); assert.equal(closed, 3);
-    current.view = 'paste'; push();
+    current.view = 'paste'; await push();
     phase = '截图入口';
     await driver.waitFor('Boolean(document.querySelector(".recognition-body form"))', '空会话入口');
     await driver.click('AI 识图'); assert.equal(calls.findLast(item => item.action === 'start-capture').payload.mode, 'explain');
@@ -106,7 +118,7 @@ app.whenReady().then(async () => {
     current.view = 'preview'; current.settings.vision = { baseUrl: 'https://vision.invalid/v1', model: '虚构识图模型' };
     current.session = { id: '提示词图片', kind: 'image', note: '', activeMode: 'visual', webSearchEnabled: false,
       imageData: nativeImage.createFromBitmap(Buffer.alloc(40 * 40 * 4, 255), { width: 40, height: 40 }).toDataURL(),
-      threads: { visual: { status: 'idle', messages: [], draft: '' } } }; push();
+      threads: { visual: { status: 'idle', messages: [], draft: '' } } }; await push();
     await driver.waitFor('Boolean(document.querySelector("[data-field=image-note]"))', '识图提示词输入');
     const beforePrompt = calls.length;
     await evaluate('document.querySelector("[data-field=image-note]").value="请描述图片颜色";document.querySelector("[data-field=image-note]").dispatchEvent(new Event("input",{bubbles:true}))');

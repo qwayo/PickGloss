@@ -10,6 +10,7 @@ const Module = require('node:module');
 const assert = require('node:assert/strict');
 const { setTimeout: delay } = require('node:timers/promises');
 const { createUiDriver } = require('./ui-driver.cjs');
+const { previewSnapshot } = require('./preview-layout.cjs');
 const root = path.resolve(process.argv.find(a => a.startsWith('--source-root='))?.slice(14) || path.join(__dirname, '..'));
 const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/floating-20261021') : path.resolve(process.argv[outputIndex + 1]);
@@ -43,6 +44,35 @@ async function shot(name, win = panel) {
   await fs.writeFile(path.join(output, `${before ? '修复前-' : ''}${name}.png`), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
 }
 function emit() { desktop.broadcast(state); }
+async function checkPreviewLayouts() {
+  const originalSession = state.session, originalVision = state.settings.vision;
+  const rounds = Number(process.argv.find(arg => arg.startsWith('--preview-rounds='))?.split('=')[1] || 1);
+  assert.ok(Number.isInteger(rounds) && rounds >= 1 && rounds <= 500, '采样轮数必须在 1 至 500 之间');
+  const samples = [];
+  const cpuRate = Number(process.argv.find(arg => arg.startsWith('--preview-cpu-rate='))?.split('=')[1] || 1);
+  const imageDelay = Number(process.argv.find(arg => arg.startsWith('--preview-image-delay='))?.split('=')[1] || 0);
+  const viewportHeight = Number(process.argv.find(arg => arg.startsWith('--preview-height='))?.split('=')[1] || 0);
+  assert.ok(Number.isFinite(cpuRate) && cpuRate >= 1 && cpuRate <= 20, 'CPU 降速倍率必须在 1 至 20 之间');
+  assert.ok(Number.isInteger(imageDelay) && imageDelay >= 0 && imageDelay <= 2000, '图片受控延迟必须在 0 至 2000 毫秒之间');
+  assert.ok(Number.isInteger(viewportHeight) && (viewportHeight === 0 || viewportHeight >= 400 && viewportHeight <= 700), '探针视口高度必须在 400 至 700 之间');
+  if (cpuRate !== 1) await panel.webContents.debugger.sendCommand('Emulation.setCPUThrottlingRate', { rate: cpuRate });
+  if (viewportHeight) await panel.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width: 300, height: viewportHeight, deviceScaleFactor: 1, mobile: false });
+  if (imageDelay) await evaluate(`(()=>{const original=Element.prototype.setAttribute;Element.prototype.setAttribute=function(key,value){if(this instanceof HTMLImageElement&&key==='src'){setTimeout(()=>original.call(this,key,value),${imageDelay});return;}return original.call(this,key,value)}})()`);
+  if (process.argv.includes('--preview-inject-overflow')) await panel.webContents.insertCSS('.recognition-preview .form-actions{margin-top:500px!important}');
+  state.settings.vision = { baseUrl: 'http://127.0.0.1/v1', model: '隔离识图模型' };
+  try {
+    for (let round = 0; round < rounds; round++) for (const [width, height] of [[640,180],[180,640]]) {
+      const imageData = await evaluate(`(()=>{const c=document.createElement('canvas');c.width=${width};c.height=${height};const x=c.getContext('2d');x.fillStyle='#e9edf2';x.fillRect(0,0,c.width,c.height);x.fillStyle='#252525';x.font='20px sans-serif';x.fillText('截图验证材料',16,40);return c.toDataURL('image/png')})()`);
+      state.session = { ...originalSession, kind: 'image', imageData }; state.view = 'preview'; emit();
+      await until(() => evaluate('Boolean(document.querySelector(".recognition-preview .preview-image"))'), '截图确认页');
+      const snapshot = await evaluate(`(${previewSnapshot.toString()})()`);
+      samples.push({ round, width, height, window: panel.getBounds(), expectedImage: snapshot.image?.width === width && snapshot.image?.height === height, ...snapshot });
+      await fs.writeFile(path.join(output, '截图预览布局采样.json'), JSON.stringify({ conditions: { cpuRate, imageDelay, viewportHeight }, samples, failures: samples.filter(s => !s.fits).length }, null, 2));
+      if (!process.argv.includes('--preview-probe')) assert.equal(snapshot.fits, true, `截图 ${width}×${height} 默认小窗完整显示`);
+    }
+    assert.equal(samples.filter(s => !s.fits).length, 0, '截图预览采样存在溢出，详见结构化报告');
+  } finally { state.session = originalSession; state.settings.vision = originalVision; }
+}
 async function handle(action, payload = {}) {
   if (action === 'bootstrap') return state;
   if (action === 'save-settings') {
@@ -127,6 +157,10 @@ app.whenReady().then(async () => {
       const poll = setInterval(async () => { if (await fs.stat(stopFile).then(() => true, () => false)) { clearInterval(poll); finish(); } }, 500);
       setTimeout(finish, 180000); return;
     }
+    if (process.argv.includes('--preview-layout-only')) {
+      await checkPreviewLayouts();
+      clearTimeout(timeout); desktop.dispose(); app.exit(0); return;
+    }
     await shot('深色小窗');
     if (before) {
       checks.push({ 背景: await evaluate('getComputedStyle(document.documentElement).getPropertyValue("--paper").trim()'), 原生圆角裁剪: Boolean(panel.testShape) });
@@ -209,16 +243,8 @@ app.whenReady().then(async () => {
     const fit = await evaluate('(()=>{const b=document.querySelector(".panel-body"),r=b.getBoundingClientRect(),a=document.querySelector(".form-actions").getBoundingClientRect();return {高度:b.clientHeight,内容:b.scrollHeight,操作可见:a.bottom<=r.bottom,缩放:document.querySelector("#app").style.zoom,滚动条:getComputedStyle(b).scrollbarWidth}})()');
     assert.ok(fit.内容 <= fit.高度 + 1 && fit.操作可见, JSON.stringify(fit)); assert.equal(fit.缩放, '1'); assert.equal(fit.滚动条, 'none');
     await shot('识别页'); checks.push({ 检查: '300×483 默认缩放识别页完整显示', ...fit });
-    const originalSession = state.session, originalVision = state.settings.vision;
-    state.settings.vision = { baseUrl: 'http://127.0.0.1/v1', model: '隔离识图模型' };
-    for (const [width, height] of [[640,180],[180,640]]) {
-      const imageData = await evaluate(`(()=>{const c=document.createElement('canvas');c.width=${width};c.height=${height};const x=c.getContext('2d');x.fillStyle='#e9edf2';x.fillRect(0,0,c.width,c.height);x.fillStyle='#252525';x.font='20px sans-serif';x.fillText('截图验证材料',16,40);return c.toDataURL('image/png')})()`);
-      state.session = { ...originalSession, kind: 'image', imageData }; state.view = 'preview'; emit();
-      await until(() => evaluate('Boolean(document.querySelector(".recognition-preview .preview-image"))'), '截图确认页');
-      const fits = await evaluate('(()=>{const b=document.querySelector(".panel-body"),a=document.querySelector(".form-actions").getBoundingClientRect();return b.scrollHeight<=b.clientHeight+1&&a.bottom<=b.getBoundingClientRect().bottom})()');
-      assert.equal(fits, true, `截图 ${width}×${height} 默认小窗完整显示`);
-    }
-    await shot('截图确认页'); state.session = originalSession; state.settings.vision = originalVision;
+    await checkPreviewLayouts();
+    await shot('截图确认页');
     checks.push({ 检查: '默认小窗截图确认页横图与竖图均完整显示', 通过: true });
     await handle('navigate', { view: 'explain' });
     await until(() => evaluate('Boolean(document.querySelector(".message"))'), '解释返回');

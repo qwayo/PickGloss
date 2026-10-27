@@ -171,7 +171,8 @@ app.whenReady().then(async () => {
     const sticky = await win.webContents.executeJavaScript(`(()=>{const body=document.querySelector('.panel-body'),node=document.querySelector('[data-history-selection]');return {top:node.getBoundingClientRect().top,body:body.getBoundingClientRect().top+parseFloat(getComputedStyle(body).paddingTop),scroll:body.scrollTop,position:getComputedStyle(node).position,height:node.querySelector('.history-selection-toolbar').getBoundingClientRect().height};})()`);
     assert.equal(sticky.position, 'sticky'); assert.ok(Math.abs(sticky.top-sticky.body) <= 2, '下滑后多选工具条仍固定在滚动区域顶部：'+JSON.stringify(sticky));
     assert.ok(sticky.height <= 30, '300像素小窗的多选工具条保持单行紧凑');
-    const screenshots = path.join(root, 'output/verification/2026-10-25-compact-batch');
+    const outputIndex = process.argv.indexOf('--output-dir');
+    const screenshots = outputIndex < 0 ? path.join(root, 'output/verification/2026-10-25-compact-batch') : path.resolve(process.argv[outputIndex + 1]);
     await fs.mkdir(screenshots, { recursive: true });
     await fs.writeFile(path.join(screenshots, '会话多选-滚动固定.png'), (await win.webContents.capturePage()).toPNG());
     await win.webContents.executeJavaScript('document.querySelector(".panel-body").scrollTop=0'); win.setContentSize(570, 760);

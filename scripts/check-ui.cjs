@@ -3,7 +3,8 @@
 const path = require('node:path');
 const { runSteps } = require('./checked-runner.cjs');
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, 'output', 'verification', `ui-${Date.now()}`);
+const outputIndex = process.argv.indexOf('--output-dir');
+const output = outputIndex < 0 ? path.join(root, 'output', 'verification', `ui-${Date.now()}`) : path.resolve(process.argv[outputIndex + 1]);
 const electron = require('electron');
 runSteps([
   { name: '唯一点击与诊断夹具', command: electron, args: [path.join(__dirname, 'check-ui-driver.cjs')] },
