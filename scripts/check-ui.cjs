@@ -10,4 +10,5 @@ runSteps([
   { name: '唯一点击与诊断夹具', command: electron, args: [path.join(__dirname, 'check-ui-driver.cjs')] },
   { name: '300×483 紧凑界面与服务设置', command: electron, args: [path.join(__dirname, 'check-ai-services-ui.cjs'), '--width', '300', '--height', '483', '--output-dir', path.join(output, 'services')] },
   { name: '正式桌面模块隐藏检查', command: electron, args: [path.join(__dirname, 'check-floating-ui.cjs'), '--output-dir', path.join(output, 'floating')] },
+  { name: '菜单首次导航就绪回归', command: electron, args: [path.join(__dirname, 'check-floating-ui.cjs'), '--menu-only', '--menu-navigation-probe', '--output-dir', path.join(output, 'menu-navigation')] },
 ], { cwd: root, logFile: path.join(output, '受检日志.txt') }).catch(error => { console.error(error.message); process.exitCode = 1; });

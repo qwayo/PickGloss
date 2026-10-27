@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const { setTimeout: delay } = require('node:timers/promises');
 const { createUiDriver } = require('./ui-driver.cjs');
 const { previewSnapshot } = require('./preview-layout.cjs');
+const { redact } = require('./checked-runner.cjs');
 const root = path.resolve(process.argv.find(a => a.startsWith('--source-root='))?.slice(14) || path.join(__dirname, '..'));
 const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/floating-20261021') : path.resolve(process.argv[outputIndex + 1]);
@@ -23,16 +24,38 @@ class TestWindow extends electron.BrowserWindow {
   show() {} showInactive() {} focus() {}
   setBounds(bounds) { this.resizeCalls ||= []; this.resizeCalls.push({ width: bounds.width, height: bounds.height }); super.setBounds(bounds); }
   setShape(rects) { this.testShape = rects; super.setShape(rects); }
+  loadFile(file, options) {
+    if (options?.query?.window === 'menu' && process.argv.includes('--menu-navigation-probe')) {
+      let navigating = true;
+      const execute = this.webContents.executeJavaScript.bind(this.webContents);
+      // 隔离夹具模拟初始导航替换执行上下文；页面就绪后不再注入故障。
+      this.webContents.executeJavaScript = (...args) => navigating ? Promise.reject(Error('隔离菜单导航期间执行上下文不可用')) : execute(...args);
+      return delay(60).then(() => super.loadFile(file, options)).finally(() => { navigating = false; });
+    }
+    return super.loadFile(file, options);
+  }
 }
-let desktop, panel, store, state, failSave = false, fixtureReducedMotion = false;
+let desktop, panel, store, state, failSave = false, fixtureReducedMotion = false, currentPhase = '初始化';
 const errors = [], checks = [];
 const evaluate = code => panel.webContents.executeJavaScript(code);
 const driver = createUiDriver(evaluate, { timeoutMs: 7000, intervalMs: 10 });
 async function until(predicate, label) {
+  currentPhase = label;
+  driver.phase(label);
   const deadline = Date.now() + 7000;
   while (Date.now() < deadline) { if (await predicate()) return; await delay(10); }
   driver.phase(label);
   throw await driver.diagnose(label);
+}
+async function checkMenu() {
+  desktop.menu({ source: 'panel' });
+  const menu = windows.find(win => win.testOptions.webPreferences && win.webContents.getURL().includes('window=menu')) || windows.at(-1);
+  await until(() => menu.webContents.getURL().includes('window=menu') && !menu.webContents.isLoadingMainFrame(), '菜单初始导航完成');
+  await until(() => menu.webContents.executeJavaScript(`Boolean(document.querySelector('[data-menu-command="general-settings"]'))`), '快捷菜单常规设置入口');
+  assert.notEqual(await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="settings"] .icon').innerHTML`), await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"] .icon').innerHTML`), 'AI 图标与常规齿轮区分');
+  await shot('快捷菜单-常规设置入口', menu);
+  await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"]').click()`);
+  await until(() => evaluate(`document.querySelector('[data-settings-section="general"]')?.hidden === false`), '菜单直达常规设置');
 }
 async function click(selector) {
   await driver.waitFor(`Boolean(document.querySelector(${quoteJavaScriptString(selector)})?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))`, '切换动画结束且控件可见', { stage: `点击控件 ${selector}`, allowErrors: true });
@@ -161,6 +184,10 @@ app.whenReady().then(async () => {
       await checkPreviewLayouts();
       clearTimeout(timeout); desktop.dispose(); app.exit(0); return;
     }
+    if (process.argv.includes('--menu-only')) {
+      await checkMenu();
+      clearTimeout(timeout); desktop.dispose(); app.exit(0); return;
+    }
     await shot('深色小窗');
     if (before) {
       checks.push({ 背景: await evaluate('getComputedStyle(document.documentElement).getPropertyValue("--paper").trim()'), 原生圆角裁剪: Boolean(panel.testShape) });
@@ -282,19 +309,16 @@ app.whenReady().then(async () => {
     await shot('深色悬浮球', orb);
     const ball = await orb.webContents.executeJavaScript('({背景:getComputedStyle(document.querySelector(".orb")).backgroundColor,高光:getComputedStyle(document.querySelector(".orb")).backgroundImage})');
     assert.equal(ball.背景, 'rgb(37, 37, 37)'); assert.ok(ball.高光.includes('radial-gradient'));
-    desktop.menu({ source: 'panel' });
-    const menu = windows.find(win => win.testOptions.webPreferences && win.webContents.getURL().includes('window=menu')) || windows.at(-1);
-    await until(() => menu.webContents.executeJavaScript(`Boolean(document.querySelector('[data-menu-command="general-settings"]'))`), '快捷菜单常规设置入口');
-    assert.notEqual(await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="settings"] .icon').innerHTML`),await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"] .icon').innerHTML`),'AI 图标与常规齿轮区分');
-    await shot('快捷菜单-常规设置入口', menu);
-    await menu.webContents.executeJavaScript(`document.querySelector('[data-menu-command="general-settings"]').click()`);
-    await until(() => evaluate(`document.querySelector('[data-settings-section="general"]')?.hidden === false`), '菜单直达常规设置');
+    await checkMenu();
     checks.push({ 检查: '快捷菜单常规设置入口直达对应分类', 通过: true });
     assert.deepEqual(errors, []); assert.ok(windows.every(w => w.isDestroyed() || !w.isVisible()));
     await fs.writeFile(path.join(output, '界面检查.json'), JSON.stringify({ 通过: true, 说明: '真实 Electron 隐藏窗口，虚构会话和隔离存储；不代表真实桌面流畅度或系统磨砂观感验收。', checks }, null, 2));
     console.log('悬浮窗检查通过：圆角、主题、置顶、色板指针、识别页和三轮展开采样。');
     clearTimeout(timeout); desktop.dispose(); app.exit(0);
   } catch (error) {
+    await fs.writeFile(path.join(output, '浮窗失败诊断.json'), redact(JSON.stringify({ 通过: false, 阶段: currentPhase, 类型: error.code || error.name,
+      错误: error.message, 位置: error.stack || '', 窗口: windows.map(win => win.isDestroyed() ? { 已销毁: true } : {
+        页面: new URL(win.webContents.getURL() || 'about:blank').searchParams.get('window'), 主帧加载中: win.webContents.isLoadingMainFrame() }) }, null, 2)));
     console.error(error.message.startsWith('界面检查失败：') ? error.message : (await driver.diagnose('当前浮窗断言或操作通过', '断言或操作失败').catch(() => new Error('界面检查失败：当前窗口状态不可读取'))).message);
     console.error(`失败位置：${error.stack?.split('\n').find(line => line.trim().startsWith('at ')) || '未提供位置'}；异常类型：${error.code || error.name}`);
     clearTimeout(timeout); desktop?.dispose(); app.exit(1);
