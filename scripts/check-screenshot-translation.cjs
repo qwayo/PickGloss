@@ -431,14 +431,16 @@ app.whenReady().then(async () => {
     assert.equal(restoredMeasurement, originalMeasurement, '视口宽度恢复后自然高度恢复');
     report.宽度变化后内容重测 = { narrow: originalWindowWidth - 60, original: originalWindowWidth, narrowMeasurement, restoredMeasurement };
     // 用用户报告的单词核对最终屏幕像素，而非仅检查 canvas 存在或对照文字正确。
-    await fixture.webContents.executeJavaScript('document.querySelector("main").textContent="Desktop";new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-    const desktopImage = (await fixture.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toDataURL();
+    const previousDesktopImage = (await fixture.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toDataURL();
+    const desktopImage = await changedFixture('document.querySelector("main").textContent="Desktop"', previousDesktopImage);
+    assert.notEqual(desktopImage, previousDesktopImage, '单词场景必须使用更新后的固定图片');
     await fs.writeFile(path.join(output, '截图翻译-Desktop原图.png'), Buffer.from(desktopImage.split(',')[1], 'base64'));
     const desktopResult = await translateScreenshot({ imageData: desktopImage, recognize: async input => {
       const recognition = await recognizeFixture(input, true); report.单词识别角度 = recognition.angle; return recognition;
     }, options: { sourceLanguage: 'en' },
       configs: { text: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: '隔离翻译模型' } } });
     assert.equal(desktopResult.blocks[0].text, 'Desktop'); assert.equal(desktopResult.blocks[0].translation, '桌面');
+    if (nativeOcr) assert.equal(desktopResult.method, 'windows-ocr', '单词像素回归必须由本机 OCR 识别，不能让识图回退掩盖错误测试材料');
     assert.equal(desktopResult.overlayAvailable, true, `水平单词应可覆盖；Windows OCR 估计角度=${report.单词识别角度}`);
     // 文字按原始像素显示；不能将整张宽图硬缩为窄选区，使 OCR 核对的汉字小于可识别尺寸。
     const pixelRatio = await overlay.webContents.executeJavaScript('devicePixelRatio');
@@ -565,8 +567,7 @@ app.whenReady().then(async () => {
     await overlayDriver.waitFor('!document.querySelector(".translation-image")', '关闭后同时清除覆盖'); overlay.destroy(); overlay = null;
     win.destroy();
     // 故意提供上一次的全局模式；本次截图绑定的 mode 必须优先，避免复用窗口时串模式。
-    await fixture.webContents.executeJavaScript(`(()=>{document.documentElement.style.background='#000';document.body.style.background='#000';document.body.style.color='#fff';document.querySelector('main').style.cssText='padding:20px;background:#000;color:#fff';return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));})()`);
-    const darkCaptureImage = (await fixture.webContents.capturePage()).toDataURL();
+    const darkCaptureImage = await changedFixture("document.documentElement.style.background='#000';document.body.style.background='#000';document.body.style.color='#fff';document.querySelector('main').style.cssText='padding:20px;background:#000;color:#fff'", desktopImage);
     const captureAppearance = defaultAppearance(); captureAppearance.current.mode = 'dark';
     current = { ...current, settings: { ...current.settings, prefs: { ...current.settings.prefs, appearance: captureAppearance } }, captureMode: 'explain',
       capture: { id: '固定截图预览', mode: 'translate', imageData: darkCaptureImage, width: 860, height: 690 } };
