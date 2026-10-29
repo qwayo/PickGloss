@@ -13,7 +13,7 @@ async function harness(t, { isolated = false, blocked = [], initial = {} } = {})
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), isolated ? 'pickgloss-verification-' : 'pickgloss-shortcut-actions-'));
   if (isolated) await fs.writeFile(path.join(directory, 'verification.marker'), 'PickGloss 隔离验证目录\n', { flag: 'wx' });
   const store = createStore({ directory: path.join(directory, 'data') }); await store.init(); await store.saveSettings(initial);
-  const calls = { registers: [], unregisters: [], pin: [], wide: [], captures: 0, hidden: 0, menu: [], menuClosed: [], quit: 0, aborted: 0, projected: 0 };
+  const calls = { registers: [], unregisters: [], pin: [], wide: [], orbPreferences: [], captures: 0, hidden: 0, menu: [], menuClosed: [], quit: 0, aborted: 0, projected: 0 };
   const registered = new Map([['Ctrl+F1', () => {}]]), unavailable = new Set(blocked);
   let options, handler;
   const globalShortcut = {
@@ -21,7 +21,9 @@ async function harness(t, { isolated = false, blocked = [], initial = {} } = {})
     unregister(accelerator) { calls.unregisters.push(accelerator); registered.delete(accelerator); },
     registerAll() { assert.fail('不能批量修改其它模块快捷键'); }, unregisterAll() { assert.fail('不能注销其它模块快捷键'); },
   };
-  const desktop = { openPanel() {}, captureState: () => null, broadcast() {}, initTray() {}, prepareCapture() {}, setOrb() {}, startSelection() {}, setAppearance() {},
+  const desktop = { openPanel() {}, captureState: () => null, broadcast() {}, initTray() {}, prepareCapture() {}, setOrb() {},
+    setOrbPreferences: prefs => calls.orbPreferences.push({ quietFadeEnabled: prefs.orbQuietFade !== false, edgeCollapseEnabled: prefs.orbEdgeCollapse !== false }),
+    hoverOrb() {}, startSelection() {}, setAppearance() {},
     restoreWindowState: () => false, setPinned: value => calls.pin.push(value), setWide: value => calls.wide.push(value), hidePanel: () => calls.hidden++,
     beginCapture: async () => calls.captures++, menu: payload => calls.menu.push(payload), menuReady: payload => payload,
     closeMenu: payload => { calls.menuClosed.push(payload); return true; }, flushDrafts: async () => true, flushWindowState: async () => true, dispose() {},
@@ -45,6 +47,7 @@ async function harness(t, { isolated = false, blocked = [], initial = {} } = {})
 
 test('快捷功能复用当前窗口与会话，一键置顶产生唯一反馈而bootstrap不重放', async t => {
   const app = await harness(t);
+  assert.deepEqual(app.calls.orbPreferences.at(-1), { quietFadeEnabled: true, edgeCollapseEnabled: true });
   await app.handle('shortcut-command', { command: 'toggle-pin' });
   const first = (await app.state()).pinFeedback;
   assert.equal(first.enabled, true); assert.deepEqual(app.calls.pin, [true]);

@@ -43,9 +43,9 @@ app.whenReady().then(async () => {
     state.settings.prefs.appearance = { current: { mode: 'dark', material: 'solid' }, pinOutline: 'orange' };
     desktop.setAppearance(state.settings.prefs.appearance);
     desktop.setWide(false); panel = made[0]; desktop.setPinned(true); desktop.openPanel(); emit();
-    await driver.waitFor('Boolean(document.querySelector(".native-pin-frame")) && Boolean(document.documentElement.style.getPropertyValue("--native-client-width"))', '原生几何与正式固定窗口就绪');
+    await driver.waitFor('Boolean(document.querySelector(".panel.is-pinned")) && Boolean(document.documentElement.style.getPropertyValue("--native-client-width"))', '原生几何与正式固定窗口就绪');
     if (process.argv.includes('--inject-old-glow')) {
-      await panel.webContents.insertCSS('html.native-rounded-frame .panel.is-pinned::after{inset:0!important;width:auto!important;height:auto!important;border:2px solid transparent!important;border-radius:calc(var(--panel-radius) - var(--actual-panel-border,1px))!important}');
+      await panel.webContents.insertCSS('html.panel-surface .panel.is-pinned::after{inset:3px!important}');
       report.受控旧布局 = true;
     }
     panel.webContents.session.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_details, callback) => callback({ cancel: true }));
@@ -57,11 +57,23 @@ app.whenReady().then(async () => {
         desktop.setAppearance(state.settings.prefs.appearance); emit();
         await driver.waitFor(`document.documentElement.dataset.appearance==='${mode}' && document.documentElement.dataset.material==='${material}'`, '明暗与材质同步');
         await delay(30);
-        const geometry = await evaluate(`(()=>{const p=document.querySelector('.panel'),r=p.getBoundingClientRect(),s=getComputedStyle(p),g=getComputedStyle(p,'::after'),v=document.documentElement.style,n=k=>parseFloat(v.getPropertyValue(k));const origin={x:r.left+parseFloat(s.borderLeftWidth),y:r.top+parseFloat(s.borderTopWidth)};const glow={left:origin.x+parseFloat(g.left)+parseFloat(g.borderLeftWidth),top:origin.y+parseFloat(g.top)+parseFloat(g.borderTopWidth),right:origin.x+parseFloat(g.left)+parseFloat(g.width)-parseFloat(g.borderRightWidth),bottom:origin.y+parseFloat(g.top)+parseFloat(g.height)-parseFloat(g.borderBottomWidth)};const hole={left:n('--native-pin-left'),top:n('--native-pin-top'),right:n('--native-client-width')-n('--native-pin-right'),bottom:n('--native-client-height')-n('--native-pin-bottom')};return {hole,glow,dpr:devicePixelRatio,pseudo:{left:g.left,top:g.top,width:g.width,height:g.height,border:g.borderLeftWidth,radius:g.borderTopLeftRadius},native:Object.fromEntries([...v].filter(k=>k.startsWith('--native-')).map(k=>[k,v.getPropertyValue(k)])),visible:document.visibilityState}})()`);
+        const geometry = await evaluate(`(()=>{
+          const root=document.documentElement,p=document.querySelector('.panel'),r=p.getBoundingClientRect(),s=getComputedStyle(p),g=getComputedStyle(p,'::after'),v=root.style,n=k=>parseFloat(v.getPropertyValue(k)),frame=p.querySelector('.native-pin-frame'),nativeFrame=root.classList.contains('native-rounded-frame');
+          const border={left:parseFloat(s.borderLeftWidth),top:parseFloat(s.borderTopWidth),right:parseFloat(s.borderRightWidth),bottom:parseFloat(s.borderBottomWidth)};
+          const origin={x:r.left+border.left,y:r.top+border.top};
+          const glow={left:origin.x+parseFloat(g.left)+parseFloat(g.borderLeftWidth),top:origin.y+parseFloat(g.top)+parseFloat(g.borderTopWidth),right:origin.x+parseFloat(g.left)+parseFloat(g.width)-parseFloat(g.borderRightWidth),bottom:origin.y+parseFloat(g.top)+parseFloat(g.height)-parseFloat(g.borderBottomWidth)};
+          // 光条宽度直接采用已核验的原生实体带；布局边框为零，内孔与叠画描边从同一条带的内缘开始。
+          const band=n('--native-pin-band'),hole={left:r.left+border.left+band,top:r.top+border.top+band,right:r.left+n('--native-client-width')-border.right-band,bottom:r.top+n('--native-client-height')-border.bottom-band};
+          return {hole,glow,dpr:devicePixelRatio,nativeFrame,pinFrameDisplay:frame?getComputedStyle(frame).display:'none',panel:{width:r.width,height:r.height},panelBorder:border,pseudo:{left:g.left,top:g.top,width:g.width,height:g.height,border:g.borderLeftWidth,radius:g.borderTopLeftRadius,shadow:g.boxShadow,pointerEvents:g.pointerEvents},native:Object.fromEntries([...v].filter(k=>k.startsWith('--native-')).map(k=>[k,v.getPropertyValue(k)])),visible:document.visibilityState};
+        })()`);
         const scale = screen.getDisplayMatching(panel.getBounds()).scaleFactor;
         const gaps = { 左: (geometry.glow.left - geometry.hole.left) * scale, 上: (geometry.glow.top - geometry.hole.top) * scale,
           右: (geometry.hole.right - geometry.glow.right) * scale, 底: (geometry.hole.bottom - geometry.glow.bottom) * scale };
-        const passed = Object.values(gaps).every(gap => Number.isFinite(gap) && Math.abs(gap) <= .1);
+        const expectedPseudoBorder = geometry.nativeFrame ? '0px' : geometry.native['--native-pin-band'];
+        const strokeSourcePresent = geometry.nativeFrame ? geometry.pinFrameDisplay === 'block' : geometry.pseudo.border === expectedPseudoBorder;
+        const passed = Object.values(gaps).every(gap => Number.isFinite(gap) && Math.abs(gap) <= .1) && Object.values(geometry.panelBorder).every(width => width === 0) &&
+          Number.isFinite(parseFloat(geometry.native['--native-pin-band'])) && parseFloat(geometry.native['--native-pin-band']) > 0 && strokeSourcePresent && geometry.pseudo.pointerEvents === 'none' && geometry.pseudo.shadow.includes('inset') &&
+          Math.abs(geometry.panel.width - parseFloat(geometry.native['--native-client-width'])) <= .05 && Math.abs(geometry.panel.height - parseFloat(geometry.native['--native-client-height'])) <= .05;
         report.场景.push({ 名称: `${mode}-${material}-${width}x${height}`, passed, 物理像素间隙: gaps, 几何: geometry });
         if (width === 300 && material === 'solid') {
           const image = await panel.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });

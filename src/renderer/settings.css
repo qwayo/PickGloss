@@ -70,7 +70,7 @@
   .settings-body select option{min-height:29px;padding:5px 7px;gap:8px;border-radius:5px;cursor:pointer;transition:background 100ms}
   .settings-body select option:hover,.settings-body select option:focus-visible{background:var(--soft);outline:none}
   .settings-body select option:checked{background:var(--selected);color:var(--selected-text);font-weight:600}
-  .settings-body select option::checkmark{color:var(--accent-ink)}
+  .settings-body select option::checkmark{display:none}
   .reduced-motion .settings-body select,.reduced-motion .settings-body select::picker-icon,.reduced-motion .settings-body select::picker(select),.reduced-motion .settings-body select option{transition:none}
   @media(prefers-reduced-motion:reduce){.settings-body select,.settings-body select::picker-icon,.settings-body select::picker(select),.settings-body select option{transition:none}}
 }

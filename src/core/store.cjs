@@ -167,7 +167,7 @@ function defaults() {
     search: { providerId: 'exa', baseUrl: SEARCH_PROVIDERS.find(provider => provider.id === 'exa').baseUrl },
     serviceProfiles: { text: providerConfigDefaults('text'), vision: providerConfigDefaults('vision'), translation: providerConfigDefaults('translation'), search: providerConfigDefaults('search') },
     prefs: {
-      showOrb: true, selectionEnabled: true, orbAction: 'chat', autoExplainCapture: false, launchAtLogin: false,
+      showOrb: true, selectionEnabled: true, orbAction: 'chat', orbQuietFade: true, orbEdgeCollapse: true, autoExplainCapture: false, launchAtLogin: false,
       screenshotTranslation: translationOptions(), captureDefaultMode: 'explain', captureExplainMode: 'immediate',
       webSearchEnabled: false, appearance: defaultAppearance(), windowGeometry: defaultWindowGeometry(), shortcuts: { ...DEFAULT_SHORTCUTS }, pinSound: true,
     },
@@ -236,6 +236,8 @@ function settingsShape(input) {
   result.prefs.showOrb = bool(prefs.showOrb, '悬浮球显示状态');
   result.prefs.selectionEnabled = bool(prefs.selectionEnabled, '划词状态');
   result.prefs.orbAction = orbAction(prefs.orbAction === undefined ? 'chat' : prefs.orbAction);
+  result.prefs.orbQuietFade = prefs.orbQuietFade === undefined ? true : bool(prefs.orbQuietFade, '悬浮球静默淡化');
+  result.prefs.orbEdgeCollapse = prefs.orbEdgeCollapse === undefined ? true : bool(prefs.orbEdgeCollapse, '悬浮球贴边收起');
   result.prefs.autoExplainCapture = prefs.autoExplainCapture === undefined ? false : bool(prefs.autoExplainCapture, '截图后自动解释状态');
   result.prefs.launchAtLogin = prefs.launchAtLogin === undefined ? false : bool(prefs.launchAtLogin, '开机自启动状态');
   result.prefs.screenshotTranslation = translationOptions(prefs.screenshotTranslation);
@@ -543,7 +545,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
         synchronizeActiveProfiles(settings);
         if (changes.prefs !== undefined) {
           const prefs = object(changes.prefs, '偏好设置');
-          for (const key of ['showOrb', 'selectionEnabled']) if (prefs[key] !== undefined) settings.prefs[key] = bool(prefs[key], '偏好设置');
+          for (const key of ['showOrb', 'selectionEnabled', 'orbQuietFade', 'orbEdgeCollapse']) if (prefs[key] !== undefined) settings.prefs[key] = bool(prefs[key], '偏好设置');
           if (prefs.orbAction !== undefined) settings.prefs.orbAction = orbAction(prefs.orbAction);
           if (prefs.autoExplainCapture !== undefined) settings.prefs.autoExplainCapture = bool(prefs.autoExplainCapture, '截图后自动解释状态');
           if (prefs.launchAtLogin !== undefined) settings.prefs.launchAtLogin = bool(prefs.launchAtLogin, '开机自启动状态');

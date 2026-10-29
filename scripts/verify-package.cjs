@@ -75,7 +75,12 @@ async function scan(root, relative = '') {
   for (const item of manifest.source) source.push({ path: item.path, sha256: await digest(path.join(packageDirectory, 'resources', 'app', item.path)) });
   if (fingerprint(source) !== manifest.sourceFingerprint || source.some((item, index) => item.sha256 !== manifest.source[index].sha256)) throw new Error('包内源码指纹不匹配。');
   const nativeFiles = manifest.nativeFiles || [{ path: 'resources/native/ContextProbe.exe', sha256: manifest.nativeSha256 }];
-  for (const [bridge, binary] of [['window-appearance.cjs', 'WindowAppearance.exe'], ['screen-capture.cjs', 'ScreenCapture.exe']]) {
+  for (const [bridge, binary] of [
+    ['window-appearance.cjs', 'WindowAppearance.exe'],
+    ['screen-capture.cjs', 'ScreenCapture.exe'],
+    ['translation-source.cjs', 'TranslationSource.exe'],
+    ['browser-context.cjs', 'BrowserContext.exe'],
+  ]) {
     if (manifest.source.some(item => item.path === `src/windows/${bridge}`) &&
         !nativeFiles.some(item => item.path === `resources/native/${binary}`)) throw new Error(`原生助手清单缺少 ${binary}。`);
   }

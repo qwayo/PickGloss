@@ -16,6 +16,7 @@ function renderer(invoke = async () => ({ ok: true })) {
     location: { search: '?window=panel' }, URLSearchParams,
     contextParts: source => [{text: source, selected: false}],
     createAppearanceUI: () => ({ receive() {}, mount() {}, dispose() {} }), brand: () => ({}),
+    mountPanelResize: () => ({ dispose() {} }),
     createShortcutsUI: () => ({ receive() {}, mount() {}, dispose() {}, endRecording: async () => {} }),
     setTimeout: fn => { timer = fn; return 1; }, clearTimeout: () => { timer = null; },
     window: {

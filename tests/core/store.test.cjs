@@ -129,14 +129,22 @@ test('旧设置缺少外观和窗口状态时补齐黑银默认值，读取不�
   assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).text.keyCiphertext, legacy.text.keyCiphertext);
 });
 
-test('悬浮球左键功能保存后重启仍生效，并拒绝未知功能',async()=>{
+test('悬浮球功能与静默、贴边开关重启后保留，非法值不覆盖设置',async()=>{
   const {store,injections}=await setup();
   assert.equal((await store.getSettings()).prefs.orbAction,'chat');
-  await store.saveSettings({prefs:{orbAction:'capture'}});
+  assert.equal((await store.getSettings()).prefs.orbQuietFade,true);
+  assert.equal((await store.getSettings()).prefs.orbEdgeCollapse,true);
+  await store.saveSettings({prefs:{orbAction:'capture',orbQuietFade:false,orbEdgeCollapse:false}});
   const restarted=createStore(injections);await restarted.init();
   assert.equal((await restarted.getSettings()).prefs.orbAction,'capture');
+  assert.equal((await restarted.getSettings()).prefs.orbQuietFade,false);
+  assert.equal((await restarted.getSettings()).prefs.orbEdgeCollapse,false);
   await assert.rejects(restarted.saveSettings({prefs:{orbAction:'other'}}),/悬浮球左键功能无效/);
   assert.equal((await restarted.getSettings()).prefs.orbAction,'capture');
+  for (const name of ['orbQuietFade','orbEdgeCollapse']) {
+    await assert.rejects(restarted.saveSettings({prefs:{[name]:'false'}}),/必须是布尔值/);
+    assert.equal((await restarted.getSettings()).prefs[name],false);
+  }
 });
 
 test('旧外观补齐置顶描边设置，六种颜色和无描边可读回，非法值不覆盖磁盘', async () => {

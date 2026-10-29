@@ -155,15 +155,21 @@ function currentTranslation(id) {
 function layoutTranslation(item, { resetPosition = false, activate = false } = {}) {
   const extraHeight = item.status === 'failed' ? 56 : item.status === 'complete' && (item.method === 'vision' || item.unchangedCount > 0) ? 20 : 0;
   item.layout = desktop.showTranslation(item.placement, item.options.displayMode, { resetPosition, extraHeight,
-    contentHeight: item.options.displayMode === 'compare' ? item.contentHeight : undefined, activate });
+    contentHeight: item.options.displayMode === 'compare' ? item.contentHeight : undefined, controlsPinned: item.controlsPinned === true, activate });
 }
 function startScreenshotTranslation(imageData, placement, input, recognitionMode = 'auto') {
   if (!['auto', 'vision'].includes(recognitionMode)) throw new Error('截图识别模式无效。');
   // 查看原图是本次结果的临时状态；新的翻译必须先呈现译文。
   const options = translationOptions({ ...settings.prefs.screenshotTranslation, ...input, showOriginal: false });
   const resetPosition = translation?.placement !== placement;
+  const controlsPinned = !resetPosition && translation?.controlsPinned === true;
   translationJob?.abort.abort();
-  const item = translation = { id: randomUUID(), imageData, placement, options, status: 'recognizing', method: recognitionMode === 'vision' ? 'vision' : 'windows-ocr', fallbackReason: recognitionMode === 'vision' ? 'manual' : '', blocks: [], error: '', warning: '' };
+  const item = translation = { id: randomUUID(), imageData, placement, options, controlsPinned, status: 'recognizing', method: recognitionMode === 'vision' ? 'vision' : 'windows-ocr', fallbackReason: recognitionMode === 'vision' ? 'manual' : '', blocks: [], error: '', warning: '' };
+  if (placement.sourceBinding && (!placement.source || placement.sourceInvalid)) {
+    item.sourceInvalid = true;
+    item.options = { ...options, displayMode: 'compare' };
+    item.sourceWarning = placement.sourceInvalid ? '来源位置已变化，请重新框选以覆盖译文。' : '未能关联来源窗口，已改为对照显示。';
+  }
   layoutTranslation(item, { resetPosition, activate: true });
   const job = { id: item.id, abort: new AbortController(), promise: null };
   translationJob = job;
@@ -472,6 +478,7 @@ async function handle(action,payload={}) {
         }
       }
       if (previous.prefs.showOrb !== settings.prefs.showOrb) desktop.setOrb(!verificationDirectory && settings.prefs.showOrb!==false);
+      desktop.setOrbPreferences(settings.prefs);
       if (previous.prefs.selectionEnabled !== settings.prefs.selectionEnabled) desktop.startSelection(!verificationDirectory && settings.prefs.selectionEnabled!==false);
       if (JSON.stringify(previous.prefs.appearance) !== JSON.stringify(settings.prefs.appearance)) desktop.setAppearance(settings.prefs.appearance);
       // 外观编辑会连续预览与保存，保存后留在当前页面以便继续调整。
@@ -524,13 +531,18 @@ async function handle(action,payload={}) {
         : await store.saveSettings({ prefs: { screenshotTranslation: { ...payload.options, showOriginal: false } } });
       captureMode = payload.mode ?? settings.prefs.captureDefaultMode ?? 'explain';
       if (translationJob) { translationJob.abort.abort(); if (translation) translation.status='stopped'; }
-      await desktop.beginCapture({ mode: captureMode });break;
-    case 'capture-ready': return desktop.captureReady(payload);
+      await desktop.beginCapture({ mode: captureMode });
+      break;
+    case 'capture-ready': {
+      const ready = desktop.captureReady(payload);
+      return ready;
+    }
     case 'capture-done': {
       if (payload.mode !== undefined && !['explain', 'translate'].includes(payload.mode)) throw new Error('截图模式无效。');
       if (payload.mode === 'translate') {
         const options = translationOptions(payload.options ?? settings.prefs.screenshotTranslation);
-        const captured = desktop.finishCaptureWithPlacement(payload.rect);
+        await desktop.restoreCaptureSource?.(payload.rect);
+        const captured = desktop.finishCaptureWithPlacement(payload.rect, { bindSource: true });
         startScreenshotTranslation(captured.imageData, captured.placement, options);
         break;
       }
@@ -555,8 +567,16 @@ async function handle(action,payload={}) {
       settings = await store.saveSettings({ prefs: { screenshotTranslation: { ...options, showOriginal: false } } });
       break;
     }
+    case 'pin-translation-controls': {
+      const item = currentTranslation(payload.id);
+      if (typeof payload.pinned !== 'boolean') throw new Error('翻译菜单置顶状态无效。');
+      desktop.setTranslationControlsPinned(payload.pinned);
+      item.controlsPinned = payload.pinned;
+      break;
+    }
     case 'set-translation-options': {
       const item = currentTranslation(payload.id), options = translationOptions({ ...item.options, ...payload.options });
+      if (item.sourceInvalid && options.displayMode === 'overlay') throw new Error('来源窗口或位置已变化，请重新框选后覆盖译文。');
       if (options.displayMode === 'compare') options.showOriginal = false;
       if (['sourceLanguage', 'targetLanguage', 'translationMode', 'searchEnabled', 'searchScope'].some(key => options[key] !== item.options[key])) throw new Error('修改翻译设置后请重新翻译。');
       // 显示切换不覆盖下拉框刚保存的语言，也不保存临时的原图状态。
@@ -591,6 +611,22 @@ async function handle(action,payload={}) {
       clipboard.writeText(item.blocks.map(block => payload.includeOriginal ? `${block.text}\n${block.translation}` : block.translation).join('\n\n'));
       return null;
     }
+    case 'translation-source-invalid':
+      if (translation && payload.placement === translation.placement) {
+        translation.sourceInvalid = true;
+        translation.placement.sourceInvalid = true;
+        translation.sourceWarning = payload.reason === 'moved' ? '来源窗口已移动，请重新框选以覆盖译文。'
+          : payload.reason === 'context-invalid' ? '原页面已变化或无法确认，已改为对照显示；请重新框选后覆盖。'
+          : '来源窗口跟踪已中断，已改为对照显示；重启应用后可恢复覆盖。';
+        translation.options = { ...translation.options, displayMode: 'compare', showOriginal: false };
+        layoutTranslation(translation);
+      }
+      break;
+    case 'translation-source-closed':
+      if (translation && payload.placement === translation.placement) {
+        translationJob?.abort.abort(); translation = null; desktop.hideTranslation();
+      }
+      break;
     case 'close-translation':
       currentTranslation(payload.id);translationJob?.abort.abort();translation=null;desktop.hideTranslation();break;
     case 'selection-open': await desktop.acceptSelection();break;
@@ -604,6 +640,8 @@ async function handle(action,payload={}) {
     }
     case 'wide': wide=!!payload.wide;desktop.setWide(wide);break;
     case 'orb-drag': return desktop.dragOrb(payload);
+    case 'orb-hover': return desktop.hoverOrb(payload.active);
+    case 'panel-resize': return desktop.resizePanel(payload);
     case 'reset-window-size': wide=desktop.resetPanelSize();break;
     case 'show-orb': if(verificationDirectory)throw new Error('隔离验证模式不会显示悬浮球。');await store.saveSettings({prefs:{showOrb:!!payload.visible}});settings=await store.getSettings();desktop.setOrb(settings.prefs.showOrb);break;
     case 'toggle-selection': if(verificationDirectory)throw new Error('隔离验证模式不会开启划词入口。');await store.saveSettings({prefs:{selectionEnabled:settings.prefs.selectionEnabled===false}});settings=await store.getSettings();desktop.startSelection(settings.prefs.selectionEnabled!==false);break;
@@ -651,7 +689,8 @@ async function start() {
     decrypt:value=>safeStorage.decryptString(value),trash:target=>shell.trashItem(target)});
   await store.init();settings=await store.getSettings();
   const safeAction=(action,payload)=>void handle(action,payload).catch(error=>{status.error=error.message;scheduleEmit();});
-  desktop=createDesktop({onAction:safeAction,onStatus:patch=>{if(typeof patch.wide==='boolean')wide=patch.wide;Object.assign(status,patch);scheduleEmit();},onWindowState:async geometry=>{
+  desktop=createDesktop({onAction:safeAction,
+    onStatus:patch=>{if(typeof patch.wide==='boolean')wide=patch.wide;Object.assign(status,patch);scheduleEmit();},onWindowState:async geometry=>{
     // 存储队列按最新磁盘设置合并，窗口移动不能覆盖随后保存的服务或外观设置。
     settings=await store.saveSettings({prefs:{windowGeometry:geometry}});
   },onSelection:acceptCapturedSelection,onSelectionContext:applySelectionContext});
@@ -662,10 +701,11 @@ async function start() {
       let value=await handle(action,payload);
       if(action==='bootstrap'&&desktop.stateFor)value=await desktop.stateFor(event,value);
       return{ok:true,value};
-    }catch(error){if(action!=='orb-drag')await emit();return{ok:false,error:error.message||'操作未完成，请重试。'};}
+    }catch(error){if(!['orb-drag','orb-hover','panel-resize'].includes(action))await emit();return{ok:false,error:error.message||'操作未完成，请重试。'};}
   });
   wide=desktop.restoreWindowState(settings.prefs.windowGeometry);
   desktop.setAppearance(settings.prefs.appearance);
+  desktop.setOrbPreferences(settings.prefs);
   if(!verificationDirectory)desktop.initTray();
   if (!process.argv.includes('--autostart') || smoke || verificationDirectory) desktop.openPanel();
   desktop.setOrb(!verificationDirectory && settings.prefs.showOrb!==false);desktop.startSelection(!verificationDirectory && settings.prefs.selectionEnabled!==false);

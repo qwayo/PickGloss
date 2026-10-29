@@ -122,6 +122,8 @@ async function handle(action, payload = {}) {
   else if (action === 'navigate') state.view = payload.view;
   else if (action === 'set-draft') return;
   else if (action === 'orb-drag') return desktop.dragOrb(payload);
+  else if (action === 'orb-hover') return desktop.hoverOrb(payload.active);
+  else if (action === 'panel-resize') return desktop.resizePanel(payload);
   else if (action === 'menu-ready') return desktop.menuReady(payload);
   else if (action === 'menu-close') return desktop.closeMenu(payload);
   else if (action === 'open-settings') { desktop.closeMenu(); state.view = 'settings'; state.settingsSection = payload.section === 'general' ? 'general' : 'service'; }
@@ -214,22 +216,25 @@ app.whenReady().then(async () => {
       assert.equal(checks[0].背景, '#252525', '深色默认背景必须为 #252525');
     }
     assert.equal(await evaluate('getComputedStyle(document.documentElement).getPropertyValue("--paper").trim()'), '#252525');
-    // 材质与明暗切换仍保留系统圆角路径，不恢复有锯齿的原生像素区域。
+    // 透明画布采用与 OCR 工具条相同的 14 DIP 圆角；不恢复旧系统 8 DIP 外框或像素区域裁切。
     for (const mode of ['light', 'dark', 'light', 'dark']) for (const material of ['glass', 'solid']) {
       state.settings.prefs.appearance.current = { ...state.settings.prefs.appearance.current, mode, material };
       desktop.setAppearance(state.settings.prefs.appearance); emit();
       await until(() => evaluate(`document.documentElement.dataset.appearance===${quoteJavaScriptString(mode)}`), '主题切换');
+      await until(() => evaluate(`document.documentElement.dataset.material===${quoteJavaScriptString(material)}`), '材质应答就绪');
       assert.equal(panel.testShape, undefined, '不能再用像素区域裁切');
-      assert.equal(panel.testOptions.transparent, false);
-      assert.equal(await evaluate('getComputedStyle(document.documentElement).getPropertyValue("--panel-radius").trim()'), '8px', '使用系统原生圆角的尺寸');
-      assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderTopLeftRadius'), '0px', '外轮廓只由系统裁切一次');
-      assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).overflow'), 'visible', '光条可覆盖客户区边缘，不在 padding edge 被截短');
-      assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderLeftColor'), 'rgba(0, 0, 0, 0)', '未发光时不绘制左侧和底部的普通灰描边');
+      assert.equal(panel.testOptions.transparent, true);
+      assert.equal(await evaluate('getComputedStyle(document.documentElement).getPropertyValue("--panel-radius").trim()'), '14px', '与 OCR 工具条共用 14 DIP 圆角');
+      assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderTopLeftRadius'), '14px');
+      assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).overflow'), 'hidden', '内容与内侧描边留在圆角内');
+      if (material === 'solid') assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderLeftWidth'), '0px', '实色与磨砂共用无边框盒模型，切换时不挤动正文');
       const rootBackground = await evaluate('getComputedStyle(document.documentElement).backgroundColor');
-      assert.equal(rootBackground, material === 'solid' ? (mode === 'dark' ? 'rgb(37, 37, 37)' : 'rgb(255, 255, 255)') : 'rgba(0, 0, 0, 0)', '仅实色解释窗填充同色根画布，磨砂仍保持透明');
-      if (material === 'glass') assert.equal(panel.getAccentColor(), false, '磨砂普通状态关闭不透明强调边色');
-      else assert.equal(panel.getAccentColor().toLowerCase(), mode === 'dark' ? '#252525' : '#ffffff', '纯色原生边色随纸面切换');
-      await until(() => evaluate(`document.documentElement.style.getPropertyValue('--native-border-suppressed')===${quoteJavaScriptString(material === 'glass' ? '1' : '0')} && parseFloat(document.documentElement.style.getPropertyValue('--native-client-width'))>0`), '原生边色应答与实际客户区几何同步');
+      assert.equal(rootBackground, 'rgba(0, 0, 0, 0)', '实色和磨砂共用透明根画布，底面在圆角内绘制');
+      if (material === 'glass') {
+        assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderLeftWidth'), '0px', '磨砂外沿没有透明边框带');
+        assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).backgroundImage'), 'none', '磨砂外沿没有径向染色色带');
+      }
+      await until(() => evaluate(`document.documentElement.style.getPropertyValue('--native-border-suppressed')==='1' && parseFloat(document.documentElement.style.getPropertyValue('--native-client-width'))>0`), '原生几何应答同步');
       const nativeGeometry = await evaluate('(()=>{const s=document.documentElement.style;return {width:parseFloat(s.getPropertyValue("--native-client-width")),height:parseFloat(s.getPropertyValue("--native-client-height")),band:parseFloat(s.getPropertyValue("--native-pin-band")),left:parseFloat(s.getPropertyValue("--native-pin-left")),top:parseFloat(s.getPropertyValue("--native-pin-top")),right:parseFloat(s.getPropertyValue("--native-pin-right")),bottom:parseFloat(s.getPropertyValue("--native-pin-bottom"))}})()');
       assert.ok(nativeGeometry.width > 0 && nativeGeometry.height > 0 && nativeGeometry.band > 0, '光条采用原生助手返回的有效客户区尺寸');
       assert.ok(['left', 'top', 'right', 'bottom'].every(edge => nativeGeometry[edge] >= 0 && nativeGeometry[edge] <= nativeGeometry.band), '内孔四边扣除非客户区后仍在总色带以内');
@@ -239,28 +244,33 @@ app.whenReady().then(async () => {
     checks.push({ 检查: '八次明暗与材质切换', 通过: true });
     await handle('pin', { pinned: true });
     await until(() => evaluate('Boolean(document.querySelector(".panel-bar .is-pinned"))'), '置顶状态');
-    assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").borderTopWidth'), '0px', '原生路径的柔光从实体光条内孔起光，不用透明边框向内推开');
+    const pinBand = await evaluate('parseFloat(document.documentElement.style.getPropertyValue("--native-pin-band"))');
+    assert.ok(pinBand > 0, '固定描边必须取得原生实体光条厚度');
+    // CSS 边框按渲染器像素向下对齐；离屏渲染比例可能与原生助手的桌面 DPI 不同。
+    const renderScale = await evaluate('devicePixelRatio');
+    assert.equal(await evaluate('parseFloat(getComputedStyle(document.querySelector(".panel"),"::after").borderTopWidth)'), Math.floor(pinBand * renderScale) / renderScale, '固定描边按原生实体光条厚度在渲染器像素对齐后叠画');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel")).borderTopWidth'), '0px', '实体光条不参与正文盒模型');
     const pinShadow = await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").boxShadow');
     assert.ok(pinShadow.includes('0.4') && pinShadow.includes('0.16'), '恢复原有两层柔光强度');
-    assert.equal(await evaluate('getComputedStyle(document.querySelector(".native-pin-frame")).display'), 'block', '固定时绘制原强度光条');
-    assert.equal(await evaluate('getComputedStyle(document.querySelector(".native-pin-frame mask")).maskType'), 'luminance', '内孔透明，不给磨砂铺不透明底板');
-    assert.equal(await evaluate('getComputedStyle(document.querySelector(".native-pin-frame")).pointerEvents'), 'none');
-    await until(() => evaluate('(()=>{const s=document.documentElement.style,r=document.querySelector(".native-pin-frame").getBoundingClientRect();return Math.abs(r.width-parseFloat(s.getPropertyValue("--native-client-width")))<.05&&Math.abs(r.height-parseFloat(s.getPropertyValue("--native-client-height")))<.05})()'), '固定光条尺寸与实际物理客户区同步');
-    assert.equal(panel.getAccentColor().toLowerCase(), '#dc873d', '原生边框与光条同色');
+    assert.equal(await evaluate('document.querySelector(".native-pin-frame")'), null, '不叠加旧系统圆角路径的额外光条');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").pointerEvents'), 'none');
+    await until(() => evaluate('(()=>{const s=document.documentElement.style,r=document.querySelector(".panel").getBoundingClientRect();return Math.abs(r.width-parseFloat(s.getPropertyValue("--native-client-width")))<.05&&Math.abs(r.height-parseFloat(s.getPropertyValue("--native-client-height")))<.05})()'), '面板与描边尺寸采用实际物理客户区');
+    assert.equal(await evaluate('document.documentElement.style.getPropertyValue("--native-border-suppressed")'), '1', '固定时助手仍关闭原生强调边色');
     await shot('置顶-恢复原发光与页面圆角');
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel-bar .is-pinned .icon path")).fill'), await evaluate('getComputedStyle(document.querySelector(".panel-bar .is-pinned .icon")).color'));
     state.view = 'settings'; state.settingsSection = 'appearance'; emit();
     await until(() => evaluate('Boolean(document.querySelector(".appearance-page"))'), '外观设置');
     await click('[data-pin-outline="blue"]');
     await until(async () => (await store.getSettings()).prefs.appearance.pinOutline === 'blue', '置顶颜色写盘');
-    assert.equal(panel.getAccentColor().toLowerCase(), '#5095e8');
+    assert.equal(await evaluate('document.documentElement.style.getPropertyValue("--native-border-suppressed")'), '1');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").borderTopColor'), 'rgb(80, 149, 232)', '固定描边颜色采用已保存的雾蓝');
     assert.equal(windows.some(win => win.webContents.getURL().includes('pin-glow.html')), false);
     assert.equal(await evaluate('getComputedStyle(document.documentElement).getPropertyValue("--pin-glow").trim()'), '80 149 232');
     assert.ok(await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").boxShadow.includes("inset")'));
     await click('[data-pin-outline="none"]');
     await until(async () => (await store.getSettings()).prefs.appearance.pinOutline === 'none', '无描边写盘');
     assert.equal(state.pinned, true);
-    assert.equal(await evaluate('getComputedStyle(document.querySelector(".native-pin-frame")).display'), 'none', '无描边同时关闭硬边缘');
+    assert.equal(await evaluate('document.querySelector(".native-pin-frame")'), null, '无描边不创建额外绘制层');
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".panel"),"::after").content'), 'none');
     await panel.webContents.reload(); await until(() => evaluate('Boolean(document.querySelector("[data-pin-outline=none][aria-pressed=true]"))'), '无描边重载读回');
     failSave = true; await click('[data-pin-outline="violet"]');
@@ -324,7 +334,7 @@ app.whenReady().then(async () => {
     await until(() => orb.webContents.executeJavaScript('Boolean(document.querySelector(".orb"))'), '悬浮球');
     await shot('深色悬浮球', orb);
     const ball = await orb.webContents.executeJavaScript('({背景:getComputedStyle(document.querySelector(".orb")).backgroundColor,高光:getComputedStyle(document.querySelector(".orb")).backgroundImage})');
-    assert.equal(ball.背景, 'rgb(37, 37, 37)'); assert.ok(ball.高光.includes('radial-gradient'));
+    assert.equal(ball.背景, 'rgba(0, 0, 0, 0)', '悬空品牌没有球面底板'); assert.equal(ball.高光, 'none');
     await checkMenu();
     checks.push({ 检查: '快捷菜单常规设置入口直达对应分类', 通过: true });
     assert.deepEqual(errors, []); assert.ok(windows.every(w => w.isDestroyed() || !w.isVisible()));

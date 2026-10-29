@@ -1,0 +1,27 @@
+/* 悬浮球让标准品牌字形直接成为抓握处，48 像素画布留出透明空间。 */
+.orb-surface{width:100%;height:100%;display:grid;place-items:center;background:transparent;overflow:hidden}
+.orb{position:relative;display:grid;width:48px;height:48px;place-items:center;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink);cursor:grab;touch-action:none;user-select:none;-webkit-app-region:no-drag;transition:opacity 150ms ease,transform 120ms ease}
+.orb:hover{background:transparent;filter:none}
+.orb:active{transform:scale(.98)}
+.orb:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;border-radius:10px}
+.orb>.orb-brand{display:block;width:40px;height:40px;overflow:visible;pointer-events:none;color:var(--ink);filter:drop-shadow(0 1px 2px rgb(0 0 0 / 22%))}
+.orb-brand .brand-ink path{stroke:var(--paper);stroke-width:.72px;stroke-linejoin:round;paint-order:stroke fill;vector-effect:non-scaling-stroke}
+.orb.is-dimmed{opacity:.5}
+.orb.is-dragging{cursor:grabbing;transform:rotate(var(--drag-tilt,0deg)) scale(.96)}
+.orb.is-collapsed{width:12px;height:48px;border-radius:0;cursor:pointer}
+.orb.is-collapsed .orb-brand{display:none}
+.orb.is-collapsed::before{content:"";display:block;box-sizing:border-box;width:8px;height:32px;border:1px solid color-mix(in srgb,var(--ink) 58%,transparent);border-radius:0 4px 4px 0;background:var(--paper);box-shadow:none}
+.orb.is-collapsed::after{content:"";position:absolute;left:50%;top:calc(50% - 5px);width:1px;height:10px;border-radius:1px;background:var(--ink);opacity:.7;pointer-events:none}
+.orb.is-collapsed.edge-right::before{border-radius:4px 0 0 4px}
+.orb.is-collapsed.edge-top,.orb.is-collapsed.edge-bottom{width:48px;height:12px}
+.orb.is-collapsed.edge-top::before,.orb.is-collapsed.edge-bottom::before{width:32px;height:8px;border-radius:0 0 4px 4px}
+.orb.is-collapsed.edge-top::after,.orb.is-collapsed.edge-bottom::after{left:calc(50% - 5px);top:50%;width:10px;height:1px}
+.orb.is-collapsed.edge-bottom::before{border-radius:4px 4px 0 0}
+/* 原生透明窗可能保留高 DPI 最小客户区；把点击条贴到对应内边，不留居中空带。 */
+.orb.is-collapsed.edge-left{justify-self:start}
+.orb.is-collapsed.edge-right{justify-self:end}
+.orb.is-collapsed.edge-top{align-self:start}
+.orb.is-collapsed.edge-bottom{align-self:end}
+.orb.is-reduced-motion{transition:none;animation:none}
+.orb.is-reduced-motion.is-dragging{transform:none}
+@media(prefers-reduced-motion:reduce){.orb{transition:none;animation:none}.orb.is-dragging{transform:none}}
