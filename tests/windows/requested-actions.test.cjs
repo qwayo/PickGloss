@@ -10,7 +10,7 @@ const IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAw
 
 async function application() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pickgloss-requested-actions-'));
-  const failures = new Set(), uncertain = new Set(), trashed = [], loginCalls = [], requests = [], captures = [], translationHeightCalls = [];
+  const failures = new Set(), uncertain = new Set(), trashed = [], loginCalls = [], requests = [], captures = [], translationHeightCalls = [], translationPins = [];
   const store = createStore({ directory, encrypt: value => Buffer.from(value), decrypt: value => value.toString(), trash: async target => {
     const id = path.basename(target); if (failures.has(id)) throw Error('模拟回收失败');
     const destination = path.join(directory, '回收保留-' + id); await fs.rename(target, destination); trashed.push(destination);
@@ -23,10 +23,11 @@ async function application() {
     getLoginItemSettings: () => ({ openAtLogin: loginEnabled, executableWillLaunchAtLogin: loginEnabled }),
     setLoginItemSettings(value) { if (loginFailure) throw Error('模拟登录项失败'); loginEnabled = value.openAtLogin; loginCalls.push(value); } };
   const placement = { region: { x: 30, y: 40, width: 20, height: 20 }, displayBounds: { x: 0, y: 0, width: 800, height: 600 } };
-  const desktop = { broadcast() {}, captureState: () => null, finishCapture: () => IMAGE, finishCaptureWithPlacement: () => ({ imageData: IMAGE, placement }),
+  const desktop = { broadcast() {}, captureState: () => null, finishCapture: () => IMAGE, finishCaptureWithPlacement: () => ({ imageData: IMAGE, placement: structuredClone(placement) }),
     showTranslation: () => ({ bounds: { x: 30, y: 40, width: 420, height: 246 }, image: { left: 0, top: 0, width: 20, height: 20 }, controls: { left: 0, top: 26, width: 420, height: 220 } }),
     resizeTranslationHeight: (...args) => { translationHeightCalls.push(args); return { height: Math.min(480, args[1]) }; },
-    hideTranslation() {}, openPanel() {}, setOrb() {}, startSelection() {}, setAppearance() {}, async beginCapture(options) { captures.push(options); } };
+    setTranslationControlsPinned: value => translationPins.push(value),
+    hideTranslation() {}, openPanel() {}, setOrb() {}, setOrbPreferences() {}, hoverOrb() {}, startSelection() {}, setAppearance() {}, async beginCapture(options) { captures.push(options); } };
   const electron = { app, clipboard: { writeText() {} }, net: { fetch: async (url, options) => {
     const request = { url, options }; requests.push(request);
     if (respond) return respond(request);
@@ -40,7 +41,7 @@ async function application() {
     fixture: { store, desktop, settings: await store.getSettings() } };
   vm.createContext(context);
   vm.runInContext(await fs.readFile(target, 'utf8') + '\nstore=fixture.store;desktop=fixture.desktop;settings=fixture.settings;globalThis.testApp={handle,state,drain:async()=>{await translationJob?.promise;await Promise.all([...jobs.values()].map(job=>job.promise));}};', context);
-  return { ...context.testApp, store, failures, uncertain, trashed, loginCalls, requests, captures, translationHeightCalls,
+  return { ...context.testApp, store, failures, uncertain, trashed, loginCalls, requests, captures, translationHeightCalls, translationPins,
     loginFailure: value => { loginFailure = value; }, recognize: value => { recognition = value; }, respond: value => { respond = value; } };
 }
 
@@ -395,4 +396,45 @@ test('截图翻译高度反馈只接受当前截图的有限合法尺寸，旧�
   assert.notEqual(current.id, first.id);
   await app.handle('translation-content-height', { id: first.id, contentHeight: 420 });
   assert.equal(app.translationHeightCalls.length, 1, '迟到旧 id 只被忽略');
+});
+
+test('来源位置失效保留对照译文，不能重新覆盖旧位置；迟到来源事件不关闭新截图', async () => {
+  const app = await application();
+  await app.handle('save-settings', { text: { baseUrl: 'https://text.invalid/v1', model: '测试模型' } });
+  await app.handle('capture-done', { rect: {}, mode: 'translate' }); await app.drain();
+  const first = (await app.state()).translation;
+  await app.handle('translation-source-invalid', { placement: first.placement, reason: 'moved' });
+  const invalid = (await app.state()).translation;
+  assert.equal(invalid.options.displayMode, 'compare'); assert.equal(invalid.blocks[0].translation, '译文');
+  assert.match(invalid.sourceWarning, /来源窗口已移动/);
+  await assert.rejects(app.handle('set-translation-options', { id: invalid.id, options: { displayMode: 'overlay' } }), /重新框选/);
+  await app.handle('translation-source-invalid', { placement: {}, reason: 'unavailable' });
+  assert.match((await app.state()).translation.sourceWarning, /来源窗口已移动/, '过期来源事件不能改动本次状态');
+  await app.handle('translation-source-closed', { placement: {} });
+  assert.equal((await app.state()).translation.id, invalid.id);
+  await app.handle('translation-source-closed', { placement: invalid.placement });
+  assert.equal((await app.state()).translation, null);
+});
+
+test('翻译菜单置顶独立于解释窗口且不产生音效反馈，同图重译保留，新截图复位', async () => {
+  const app = await application();
+  await app.handle('save-settings', { text: { baseUrl: 'https://text.invalid/v1', model: '虚构模型' } });
+  await app.handle('capture-done', { mode: 'translate', rect: {} }); await app.drain();
+  let state = await app.state(), id = state.translation.id;
+  await app.handle('pin-translation-controls', { id, pinned: true });
+  state = await app.state();
+  assert.equal(state.translation.controlsPinned, true);
+  assert.equal(state.pinned, false); assert.equal(state.pinFeedback, null);
+  assert.deepEqual(app.translationPins, [true]);
+  await assert.rejects(app.handle('pin-translation-controls', { id: '过期翻译', pinned: false }), /已关闭或更新/);
+  await assert.rejects(app.handle('pin-translation-controls', { id, pinned: 'true' }), /状态无效/);
+  await app.handle('retry-translation', { id }); await app.drain();
+  state = await app.state(); assert.equal(state.translation.controlsPinned, true);
+  id = state.translation.id;
+  await app.handle('pin-translation-controls', { id, pinned: false });
+  assert.equal((await app.state()).translation.controlsPinned, false);
+  await app.handle('pin-translation-controls', { id, pinned: true });
+  await app.handle('capture-done', { mode: 'translate', rect: {} }); await app.drain();
+  assert.equal((await app.state()).translation.controlsPinned, false, '新截图不继承旧菜单置顶');
+  assert.equal((await app.state()).pinFeedback, null);
 });

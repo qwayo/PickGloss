@@ -19,7 +19,7 @@ async function application(respond, existingDirectory) {
   const store=createStore({directory,encrypt:value=>transform(Buffer.from(value)),decrypt:value=>transform(value).toString('utf8')});
   await store.init();
   const requests=[];
-  const desktop={broadcast(){},captureState:()=>null,finishCapture:()=>IMAGE,openPanel(){},setOrb(){},startSelection(){},setAppearance(){}};
+  const desktop={broadcast(){},captureState:()=>null,finishCapture:()=>IMAGE,openPanel(){},setOrb(){},setOrbPreferences(){},hoverOrb(){},startSelection(){},setAppearance(){}};
   const app={setPath(){},getPath:()=>directory,setName(){},setAppUserModelId(){},requestSingleInstanceLock:()=>true,on(){},whenReady:()=>new Promise(()=>{})};
   const electron={app,net:{fetch:async(url,options)=>{
     const request={url,headers:options.headers,body:JSON.parse(options.body),signal:options.signal};requests.push(request);

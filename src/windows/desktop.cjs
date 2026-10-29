@@ -15,9 +15,20 @@ const DEFAULT_PANEL_SIZES = Object.freeze({
 const { clampWindow, cropPixels, resizePanel, fitWindow, placeMenu, placeSelectionEntry } = require('./geometry.cjs');
 const { MAX_TRANSLATION_HEIGHT, translationLayout } = require('./translation-layout.cjs');
 const { createScreenCapture } = require('./screen-capture.cjs');
+const { sourceForRegion } = require('./translation-source.cjs');
+const { createTranslationTracker } = require('./translation-tracker.cjs');
+const { createOrbController } = require('./orb-controller.cjs');
+const { panelResizeBounds, validResizePayload } = require('./panel-resize.cjs');
 
-function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, onWindowState, captureFactory = createScreenCapture }) {
+function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, onWindowState, captureFactory = createScreenCapture, sourceFactory }) {
   const windows = new Map();
+  let translationBinding = null;
+  let translationControlsPinned = false;
+  let orbController = null;
+  let panelResize = null;
+  let orbPreferences = { quietFadeEnabled: true, edgeCollapseEnabled: true };
+  const sourceWatcher = sourceFactory || typeof BrowserWindow.prototype.getNativeWindowHandle === 'function'
+    ? (sourceFactory || createTranslationTracker)({ onChange: sourceChanged }) : null;
   const html = path.join(__dirname, '..', 'renderer', 'index.html');
   const htmlUrl = pathToFileURL(html).href;
   const preload = path.join(__dirname, '..', 'preload.cjs');
@@ -42,8 +53,9 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   let captureReadyTimer = null;
   let translationPlacement = null;
   let captureReader = null;
-  // Windows 11 由 DWM 同时裁切背景材质和内容；透明分层窗口、HRGN 都会禁用系统抗锯齿圆角。
-  const nativeRoundedFrame = process.platform === 'win32' && Number(os.release().split('.')[2]) >= 22000;
+  // 主窗与 OCR 工具条共用透明内容和 14 DIP 背景裁切，不再叠加 DWM 的 8 DIP 非客户区。
+  const clippedPanelFrame = process.platform === 'win32' && Number(os.release().split('.')[2]) >= 22000;
+  const nativeRoundedFrame = false;
   let layoutSerial = 0;
 
   function captureState() {
@@ -201,6 +213,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     for (const kind of ['panel', 'orb']) {
       const win = windows.get(kind);
       if (!win || win.isDestroyed()) continue;
+      if (kind === 'orb' && orbController) { orbController.refresh(); continue; }
       const bounds = win.getBounds();
       setWindowBounds(win, fitWindow(bounds, screen.getDisplayMatching(bounds).workArea));
       rememberWindow(kind, win, false);
@@ -239,8 +252,10 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       return;
     }
     if (kind !== 'panel') return;
-    if (nativeRoundedFrame && !windowAppearances.has(win)) {
-      const frame = createWindowAppearance(win, { onError() {
+    if (clippedPanelFrame && !windowAppearances.has(win)) {
+      const frame = createWindowAppearance(win, { clipRadius: 14,
+        onReady() { if (!win.isDestroyed()) { applyWindowAppearance(kind, win); onStatus({ appearanceMaterial }); } },
+        onError() {
         if (win.isDestroyed()) return;
         windowAppearances.set(win, null);
         applyWindowAppearance(kind, win);
@@ -249,28 +264,16 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       windowAppearances.set(win, frame);
     }
     const frame = windowAppearances.get(win);
-    let material = appearance.current?.material === 'glass' && glassSupported() && typeof win.setBackgroundMaterial === 'function' ? 'glass' : 'solid';
-    if (nativeRoundedFrame && !frame) material = 'solid';
-    if (windowMaterials.get(win) !== material) {
-      try { win.setBackgroundMaterial?.(material === 'glass' ? 'acrylic' : 'none'); }
-      catch { material = 'solid'; try { win.setBackgroundMaterial?.('none'); } catch {} }
-      windowMaterials.set(win, material);
-    }
+    const requested = appearance.current?.material === 'glass' && glassSupported();
+    frame?.setBackdrop(requested);
+    const material = requested && frame?.isReady ? 'glass' : 'solid';
+    if (!windowMaterials.has(win)) win.setBackgroundMaterial?.('none');
+    windowMaterials.set(win, material);
     // 只让背景层透明，不让文字与控件随整窗 opacity 变淡。系统材质没有可设置的高斯半径。
     win.setOpacity?.(1);
     // DWM 在同一原生圆角内合成实色与 acrylic；旧系统仅用透明画布绘制 CSS 圆角。
-    const base = appearanceDark ? '#252525' : '#ffffff', current = appearance.current || {};
-    const mono = current.accent === '#000000' && current.tint === '#bfc2c8';
-    const paper = !current.tint || mono ? base : '#' + [1,3,5].map(i => Math.round(parseInt(current.tint.slice(i, i + 2), 16) * .06 + parseInt(base.slice(i, i + 2), 16) * .94).toString(16).padStart(2, '0')).join('');
-    win.setBackgroundColor?.(nativeRoundedFrame && material === 'solid' ? paper : '#00000000');
-    // 磨砂的颜色来自桌面合成，不能用不透明纸面色模拟；NONE 仅停止画边，不移除缩放与圆角。
-    const pinColor = PIN_OUTLINE_COLORS[appearance.pinOutline || 'orange'];
-    if (nativeRoundedFrame) {
-      const border = pinned && pinColor ? pinColor : material === 'glass' ? 'none' : paper;
-      const accent = border === 'none' ? false : border;
-      if (windowAccentColors.get(win) !== accent) { win.setAccentColor?.(accent); windowAccentColors.set(win, accent); }
-      frame?.apply(border);
-    }
+    win.setBackgroundColor?.('#00000000');
+    frame?.apply('none');
     appearanceMaterial = material;
   }
 
@@ -285,6 +288,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     const mode = appearance.current?.mode;
     appearanceDark = mode === 'dark' || (mode === 'system' && !!nativeTheme?.shouldUseDarkColors);
     reducedMotion = appearance.reducedMotion === true || systemPrefersReducedMotion();
+    orbController?.configure({ ...orbPreferences, reducedMotion });
     appearanceMaterial = appearance.current?.material === 'glass' && glassSupported() ? 'glass' : 'solid';
     for (const [kind, win] of windows) if (!win.isDestroyed()) applyWindowAppearance(kind, win);
     if (reducedMotion && animation) finishAnimation();
@@ -308,18 +312,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       const b = display.bounds || display.workArea;
       return x >= b.x - 256 && x <= b.x + b.width + 256 && y >= b.y - 256 && y <= b.y + b.height + 256;
     })) throw new Error('悬浮球拖动坐标不在当前屏幕范围。');
-    if (phase === 'start') { orbDrag = { x, y, bounds: { ...win.getBounds() } }; return true; }
-    if (!orbDrag) return false;
-    const bounds = { ...orbDrag.bounds, x: Math.round(orbDrag.bounds.x + x - orbDrag.x), y: Math.round(orbDrag.bounds.y + y - orbDrag.y) };
-    win.setBounds(bounds);
-    rememberWindow('orb', win);
-    // 拖动过程不广播状态，保证 renderer 中的 pointer capture 不被重绘打断。
-    if (phase === 'end') {
-      orbDrag = null;
-      win.setBounds(fitWindow(bounds, screen.getDisplayMatching(bounds).workArea));
-      rememberWindow('orb', win);
-    }
-    return true;
+    return orbController?.drag(payload) || false;
   }
 
   nativeTheme?.on('updated', refreshAppearance);
@@ -332,7 +325,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       backgroundColor: appearanceDark ? '#252525' : '#ffffff', autoHideMenuBar: true, skipTaskbar: true, alwaysOnTop: true,
       webPreferences: { preload, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, autoplayPolicy: 'no-user-gesture-required', ...webPreferences }, ...browserOptions });
     // 当前 Windows 运行时的默认层级可能仍落在普通窗口下；显式设置原生弹出层级。
-    win.setAlwaysOnTop(true, 'pop-up-menu');
+    win.setAlwaysOnTop(browserOptions.alwaysOnTop !== false, browserOptions.alwaysOnTop === false ? undefined : 'pop-up-menu');
     windows.set(kind, win);
     const previousMaterial = appearanceMaterial;
     applyWindowAppearance(kind, win);
@@ -340,7 +333,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
     win.webContents.on('will-attach-webview', event => event.preventDefault());
-    win.on('closed', () => {if(windows.get(kind)===win)windows.delete(kind); if (animation?.win === win) stopAnimation(); if (kind === 'orb') orbDrag = null;});
+    win.on('closed', () => {if(windows.get(kind)===win)windows.delete(kind); if (animation?.win === win) stopAnimation(); if (kind === 'orb') { orbDrag = null; orbController?.dispose(); orbController = null; }});
     win.webContents.on('did-finish-load', () => { if (lastState && !win.isDestroyed()) win.webContents.send('pickgloss:state', surfaceState(kind, win, lastState)); });
     win.webContents.on('render-process-gone', () => {
       if(kind==='capture')cancelCapture();
@@ -360,7 +353,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     if (win && !win.isDestroyed()) return win;
     const size = panelSizes[wide ? 'reading' : 'compact'];
     const bounds = panelPosition ? fitWindow({ ...panelPosition, ...size }, screen.getDisplayMatching({ ...panelPosition, ...size }).workArea) : size;
-    win = windowFor('panel', { ...bounds, transparent: !nativeRoundedFrame, thickFrame: nativeRoundedFrame, backgroundColor: '#00000000', resizable: true, minWidth: 215, minHeight: 260, hasShadow: true, roundedCorners: true });
+    win = windowFor('panel', { ...bounds, transparent: true, thickFrame: false, backgroundColor: '#00000000', resizable: false, minWidth: 215, minHeight: 260, hasShadow: false, roundedCorners: false });
     win.on('move', () => { rememberWindow('panel', win, false); });
     win.on('resize', () => {
       if (animation) return;
@@ -393,6 +386,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   }
 
   function openPanel(point, options = {}) {
+    panelResize = null;
     const existing = windows.get('panel');
     const win = panel();
     // 快捷命令先唤回窗口再反向切换时，保留当前帧，不提前完成或保存中间尺寸。
@@ -422,10 +416,35 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       const initial = { width: 48, height: 48, ...(orbPosition || { x: area.x + area.width - 72, y: area.y + area.height - 76 }) };
       win = windowFor('orb', { ...fitWindow(initial, screen.getDisplayMatching(initial).workArea),
         transparent: true, backgroundColor: '#00000000', resizable: false, focusable: false, hasShadow: false });
-      win.on('move', () => rememberWindow('orb', win));
       rememberWindow('orb', win);
+      orbController = createOrbController({ win, screen, clock: { setTimeout, clearTimeout },
+        onPosition(point) { orbPosition = { ...point }; queueWindowState(); },
+        onState(orbState) { onStatus({ orbState }); } });
+      orbController.configure({ ...orbPreferences, reducedMotion });
+      orbController.refresh();
       win.once('ready-to-show', () => { if (showOrb && !capture) win.showInactive(); });
     } else if (!capture) win.showInactive();
+  }
+
+  function resizePanelGesture(payload) {
+    if (!validResizePayload(payload)) throw new Error('窗口拉伸请求无效。');
+    const win = windows.get('panel');
+    if (!win || win.isDestroyed() || !win.isVisible() || capture) { panelResize = null; return false; }
+    const { phase, edge, token, x, y } = payload;
+    if (phase === 'start') {
+      if (animation) finishAnimation();
+      panelTransition = null;
+      panelResize = { edge, token, x, y, bounds: { ...win.getBounds() } };
+      return true;
+    }
+    if (!panelResize || panelResize.token !== token || panelResize.edge !== edge) return false;
+    const next = panelResizeBounds(panelResize.bounds, edge, x - panelResize.x, y - panelResize.y);
+    // 这是用户手动拉伸，必须进入原有尺寸记忆和单／双栏边界处理。
+    programmedSizes.delete(win);
+    const current = win.getBounds();
+    if (['x','y','width','height'].some(key => current[key] !== next[key])) win.setBounds(next);
+    if (phase === 'end') { panelResize = null; rememberWindow('panel', win); }
+    return true;
   }
 
   function dismiss(cancelWorker = false) {
@@ -512,6 +531,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     if (menuWanted) { closeMenu(); return false; }
     clearTimeout(menuHideTimer); menuHideTimer = null;
     const source = payload.source === 'panel' ? 'panel' : 'orb';
+    if (source === 'orb') orbController?.setMenuOpen(true);
     const sourceWin = windows.get(source);
     const cursor = screen.getCursorScreenPoint();
     let anchor = { ...cursor, width: 1, height: 1 };
@@ -533,7 +553,12 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
         setTimeout(() => { const currentPanel = windows.get('panel'); if (!pinned && !capture && !menuWanted && currentPanel && !currentPanel.isFocused()) currentPanel.hide(); }, 0);
       });
       win.webContents.on('before-input-event', (event, input) => { if (input.type === 'keyDown' && input.key === 'Escape') { event.preventDefault(); closeMenu(); } });
-      win.on('closed', () => { if (windows.get('menu') && windows.get('menu') !== win) return; menuLoaded = false; menuWanted = false; clearTimeout(menuHideTimer); });
+      win.on('closed', () => {
+        if (windows.get('menu') && windows.get('menu') !== win) return;
+        menuLoaded = false; menuWanted = false; clearTimeout(menuHideTimer); menuHideTimer = null;
+        orbController?.setMenuOpen(false);
+        onStatus({ menuOpen: false, menuGeneration, menuOrigin });
+      });
     } else win.setBounds(placement.bounds);
     onStatus({ menuOpen: menuLoaded, menuGeneration, menuOrigin });
     if (menuLoaded) { win.show(); win.focus(); }
@@ -566,7 +591,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       clearTimeout(menuHideTimer); menuHideTimer = null; win?.hide(); return true;
     }
     if (!menuWanted) return false;
-    menuWanted = false; menuCloseReason = reason; onStatus({ menuOpen: false, menuGeneration, menuOrigin });
+    menuWanted = false; orbController?.setMenuOpen(false); menuCloseReason = reason; onStatus({ menuOpen: false, menuGeneration, menuOrigin });
     // 显式收起菜单后把焦点交回仍可见的解释窗，使下一次外部点击能正常触发失焦隐藏。
     const currentPanel = windows.get('panel');
     if (reason === 'explicit' && win?.isFocused() &&
@@ -644,6 +669,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   function prepareCapture() {
     // 只预热空界面，不提前截屏或保存用户画面。
     if (closing || capture) return;
+    sourceWatcher?.prepare?.();
     captureWindow(screen.getDisplayNearestPoint(screen.getCursorScreenPoint()));
     const reader = nativeCaptureReader();
     if (reader) void reader.prepare().catch(() => releaseCaptureReader(reader));
@@ -690,7 +716,13 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     const expected = capture = { id: randomUUID(), mode, previous, display, image: null, imageData: null };
     // 空 renderer 的加载与窗口退隐及屏幕读取并行，取消后复用空窗口，不保留旧图。
     try {
-      captureWindow(display); dismiss(true);
+      // 窗口保持隐藏，仅提前加载空界面；实际读屏仍等待来源页快照。
+      captureWindow(display);
+      // 在框选层夺取前台前确定来源；从本应用菜单触发时由助手使用最后的外部窗口。
+      // 框选工具栏允许从识图切到翻译，两个入口都在夺取前台前保留来源元数据。
+      expected.source = sourceWatcher ? await sourceWatcher.capture() || null : null;
+      if (capture !== expected) { sourceWatcher?.cancelCapture?.(expected.source); return false; }
+      dismiss(true);
       for(const win of windows.values()) win.hide();
       // 有窗口退隐时留三帧合成预算；托盘或快捷键唤起且无自有窗口时直接取图。
       if (hidingVisibleWindow) await new Promise(resolve=>setTimeout(resolve,50));
@@ -698,9 +730,13 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       const image = await captureScreen(display, expected);
       if (capture !== expected) return false;
       if (!image || image.isEmpty()) throw new Error('未能读取当前屏幕，请重试截图。');
+      await sourceWatcher?.sealCapture?.(expected.source);
+      if (capture !== expected) { sourceWatcher?.cancelCapture?.(expected.source); return false; }
       capture.image=image;
       clearTimeout(captureReadyTimer);
-      captureReadyTimer = setTimeout(() => { if (capture === expected) { cancelCapture(); onStatus({ error: '截图预览未能及时准备，请重新截图。' }); } }, 5000);
+      captureReadyTimer = setTimeout(() => { if (capture === expected) {
+        cancelCapture(); onStatus({ error: '截图预览未能及时准备，请重新截图。' });
+      } }, 5000);
       if (lastState) broadcast(lastState);
       return true;
     } catch (error) { if (capture !== expected) return false; cancelCapture(); throw error; }
@@ -721,11 +757,19 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
 
   function cancelCapture() {
     if (!capture) return;
+    capture.restoreAbort?.abort();
+    sourceWatcher?.cancelCapture?.(capture.source);
     const previous=capture.previous; capture=null; clearCaptureWindow();
-    for(const key of previous) { if(key==='selection')continue; const win=windows.get(key); if(win&&!win.isDestroyed()) key==='panel'?win.show():win.showInactive(); }
+    for(const key of previous) {
+      if(key==='selection')continue;
+      if (key === 'translation' || key === 'translation-overlay') {
+        if (!translationPlacement || translationBinding && (translationBinding.state !== 'active' && !(key === 'translation' && translationControlsPinned) || key === 'translation-overlay' && translationBinding.invalid)) continue;
+      }
+      const win=windows.get(key); if(win&&!win.isDestroyed()) key==='panel'?win.show():win.showInactive();
+    }
   }
 
-  function finishCaptureWithPlacement(rect) {
+  function finishCaptureWithPlacement(rect, { bindSource = capture?.mode === 'translate' } = {}) {
     if (!capture?.image) throw new Error('截图已取消，请重新框选。');
     const size = capture.image.getSize(), display = capture.display;
     const pixelRect=cropPixels(rect,display.bounds,size);
@@ -734,37 +778,125 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       region: { x: display.bounds.x + pixelRect.x * display.bounds.width / size.width,
         y: display.bounds.y + pixelRect.y * display.bounds.height / size.height,
         width: pixelRect.width * display.bounds.width / size.width, height: pixelRect.height * display.bounds.height / size.height } };
-    capture=null; clearCaptureWindow(); if(showOrb) setOrb(true);
+    if (bindSource) {
+      placement.sourceBinding = true;
+      try { placement.source = sourceForRegion(capture.source, screen.dipToScreenRect(null, placement.region)); }
+      catch { placement.source = null; }
+    }
+    capture=null; clearCaptureWindow(); sourceWatcher?.prepare?.(); if(showOrb) setOrb(true);
     return { imageData, placement };
+  }
+  async function restoreCaptureSource(rect) {
+    const expected = capture;
+    if (!expected?.image) throw new Error('截图已取消，请重新框选。');
+    if (!sourceWatcher?.restore) return false;
+    const size = expected.image.getSize(), display = expected.display, pixels = cropPixels(rect, display.bounds, size);
+    const region = { x: display.bounds.x + pixels.x * display.bounds.width / size.width,
+      y: display.bounds.y + pixels.y * display.bounds.height / size.height,
+      width: pixels.width * display.bounds.width / size.width, height: pixels.height * display.bounds.height / size.height };
+    let source;
+    try { source = sourceForRegion(expected.source, screen.dipToScreenRect(null, region)); } catch { return false; }
+    if (!source) return false;
+    const abort = expected.restoreAbort = new AbortController();
+    let restored = false;
+    try { restored = await sourceWatcher.restore(source, { capture: windows.get('capture'), signal: abort.signal }); } catch {}
+    finally { if (expected.restoreAbort === abort) delete expected.restoreAbort; }
+    if (capture !== expected) throw new Error('截图已取消或更新，请重新框选。');
+    return restored;
   }
   function finishCapture(rect) { return finishCaptureWithPlacement(rect).imageData; }
 
-  function showTranslation(placement, displayMode, { resetPosition = false, extraHeight = 0, contentHeight, activate = true } = {}) {
+  function showTranslation(placement, displayMode, { resetPosition = false, extraHeight = 0, contentHeight, controlsPinned = false, activate = true } = {}) {
+    translationControlsPinned = controlsPinned === true;
     const workArea = screen.getDisplayMatching(placement.region).workArea;
     const layout = translationLayout(placement, displayMode, { extraHeight, contentHeight, workArea });
     let overlay = windows.get('translation-overlay');
     if (!overlay || overlay.isDestroyed()) {
-      overlay = windowFor('translation-overlay', { ...layout.bounds, transparent: true, backgroundColor: '#00000000', thickFrame: false, resizable: false, movable: false, focusable: false, hasShadow: false, webPreferences: { backgroundThrottling: false } });
+      overlay = windowFor('translation-overlay', { ...layout.bounds, alwaysOnTop: false, transparent: true, backgroundColor: '#00000000', thickFrame: false, resizable: false, movable: false, focusable: false, hasShadow: false, webPreferences: { backgroundThrottling: false } });
       overlay.setIgnoreMouseEvents(true);
     } else setWindowBounds(overlay, layout.bounds);
     let win = windows.get('translation');
     if (!win || win.isDestroyed()) {
-      win = windowFor('translation', { ...layout.controlBounds, transparent: true, backgroundColor: '#00000000', thickFrame: false, resizable: false, roundedCorners: false, hasShadow: false, webPreferences: { backgroundThrottling: false } });
+      win = windowFor('translation', { ...layout.controlBounds, alwaysOnTop: translationControlsPinned, transparent: true, backgroundColor: '#00000000', thickFrame: false, resizable: false, roundedCorners: false, hasShadow: false, webPreferences: { backgroundThrottling: false } });
       win.on('close', event => { if (!closing) { event.preventDefault(); hideTranslation(); if (lastState?.translation) onAction('close-translation', { id: lastState.translation.id }); } });
     } else {
       const bounds = resetPosition || translationPlacement !== placement ? layout.controlBounds : fitWindow({ ...win.getBounds(), width: layout.controlBounds.width, height: layout.controlBounds.height }, screen.getDisplayMatching(win.getBounds()).workArea);
       setWindowBounds(win, bounds);
     }
     translationPlacement = placement;
+    win.setAlwaysOnTop(translationControlsPinned, translationControlsPinned ? 'pop-up-menu' : undefined);
+    if (placement.sourceBinding && translationBinding?.placement !== placement) {
+      sourceWatcher?.clear();
+      translationBinding = { placement, state: 'pending', invalid: false, activate };
+      translationBinding.binding = sourceWatcher?.bind(placement.source, { overlay, controls: win });
+      if (!translationBinding.binding) {
+        translationBinding.state = 'active'; translationBinding.invalid = true;
+        if (placement.source) void Promise.resolve().then(() => onAction('translation-source-invalid', { placement, reason: 'unavailable' })).catch(() => {});
+      }
+    }
+    const sourceActive = !placement.sourceBinding || translationBinding?.state === 'active';
+    const mayShow = !capture && (sourceActive || translationControlsPinned);
     if (activate) for (const value of [overlay, win]) {
-      const show = () => { if (!value.isDestroyed() && translationPlacement === placement) { value === overlay ? value.showInactive() : value.show(); } };
+      const show = () => { if (!value.isDestroyed() && translationPlacement === placement && mayShow &&
+          (value === win && translationControlsPinned || !placement.sourceBinding || translationBinding?.state === 'active') && !(value === overlay && translationBinding?.invalid)) {
+        value === overlay ? value.showInactive() : value.show();
+      } };
       if (value.webContents.isLoading()) value.webContents.once('did-finish-load', show); else show();
     }
-    if (activate) win.focus();
+    if (activate && mayShow) win.focus();
     const actualControlBounds = win.getBounds();
     layout.controlBounds = { ...actualControlBounds };
     layout.controls = { ...layout.controls, width: actualControlBounds.width, height: actualControlBounds.height };
     return layout;
+  }
+
+  function setTranslationControlsPinned(enabled) {
+    if (typeof enabled !== 'boolean') throw new Error('翻译菜单置顶状态无效。');
+    translationControlsPinned = enabled;
+    const win = windows.get('translation');
+    if (!translationPlacement || !win || win.isDestroyed()) return;
+    win.setAlwaysOnTop(enabled, enabled ? 'pop-up-menu' : undefined);
+    if (!capture && (enabled || !translationBinding || translationBinding.state === 'active')) win.showInactive();
+    else win.hide();
+  }
+
+  function sourceChanged(value) {
+    const bound = translationBinding;
+    if (!bound || value.binding !== bound.binding || translationPlacement !== bound.placement) return;
+    const overlay = windows.get('translation-overlay'), controls = windows.get('translation');
+    if (value.state === 'closed') {
+      hideTranslation();
+      void Promise.resolve(onAction('translation-source-closed', { placement: bound.placement })).catch(() => {});
+      return;
+    }
+    if (value.state === 'moved' || value.state === 'unavailable' || value.state === 'context-invalid') {
+      bound.invalid = true; bound.activate = false; overlay?.hide();
+      if (value.state === 'unavailable' || value.state === 'context-invalid') {
+        bound.state = value.state === 'context-invalid' && value.windowActive === false ? 'inactive' : 'active';
+        if (!capture && (bound.state === 'active' || translationControlsPinned)) controls?.showInactive();
+      }
+      void Promise.resolve(onAction('translation-source-invalid', { placement: bound.placement, reason: value.state })).catch(() => {});
+      return;
+    }
+    bound.state = value.state;
+    if (value.state !== 'active') {
+      bound.activate = false; overlay?.hide();
+      if (translationControlsPinned && !capture) controls?.showInactive(); else controls?.hide();
+      return;
+    }
+    if (capture) return;
+    for (const win of [overlay, controls]) {
+      if (!win || win.isDestroyed() || win === overlay && bound.invalid) continue;
+      const show = () => {
+        const allowed = translationBinding === bound && bound.state === 'active' && !win.isDestroyed() && !capture && !(win === overlay && bound.invalid);
+        if (!allowed) return;
+        win.showInactive();
+        if (win === controls && bound.activate) { bound.activate = false; win.focus(); }
+      };
+      if (win.webContents.isLoading()) {
+        win.webContents.once('did-finish-load', show);
+      } else show();
+    }
   }
 
   function resizeTranslationHeight(placement, contentHeight) {
@@ -778,23 +910,27 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   }
 
   function hideTranslation() {
+    translationControlsPinned = false;
+    translationBinding = null; sourceWatcher?.clear();
     translationPlacement = null;
-    windows.get('translation')?.hide(); windows.get('translation-overlay')?.hide();
+    windows.get('translation')?.setAlwaysOnTop(false); windows.get('translation')?.hide(); windows.get('translation-overlay')?.hide();
   }
 
   function authorize(event, action) {
     const kind=surfaceFor(event);
     if (!kind) return false;
-    if(kind==='panel') return !['capture-done','capture-cancel','capture-ready','selection-open','orb-drag','menu-ready','menu-close','translation-content-height'].includes(action);
-    if(kind==='translation') return ['bootstrap','close-translation','retry-translation','set-translation-options','set-translation-preferences','copy-translation','preview-translation-original','translation-content-height','start-capture','open-settings','open-link'].includes(action);
+    if(kind==='panel') return !['capture-done','capture-cancel','capture-ready','selection-open','orb-drag','orb-hover','menu-ready','menu-close','translation-content-height','translation-source-invalid','translation-source-closed','pin-translation-controls'].includes(action);
+    if(kind==='translation') return ['bootstrap','close-translation','retry-translation','set-translation-options','set-translation-preferences','copy-translation','preview-translation-original','translation-content-height','pin-translation-controls','start-capture','open-settings','open-link'].includes(action);
     if(kind==='translation-overlay') return action==='bootstrap';
     if(kind==='orb' && action==='orb-activate') return true;
-    return ({orb:['bootstrap','menu','orb-drag','open-latest-session'], menu:['bootstrap','menu-ready','menu-close','navigate','pin','wide','open-history','open-settings','open-appearance','open-shortcuts','shortcut-command','show-orb','toggle-selection','start-capture','quit'], selection:['bootstrap','selection-open'],capture:['bootstrap','capture-ready','capture-done','capture-cancel','set-translation-preferences']}[kind]||[]).includes(action);
+    return ({orb:['bootstrap','menu','orb-drag','orb-hover','open-latest-session'], menu:['bootstrap','menu-ready','menu-close','navigate','pin','wide','open-history','open-settings','open-appearance','open-shortcuts','shortcut-command','show-orb','toggle-selection','start-capture','quit'], selection:['bootstrap','selection-open'],capture:['bootstrap','capture-ready','capture-done','capture-cancel','set-translation-preferences']}[kind]||[]).includes(action);
   }
 
-  return { initTray, openPanel, startSelection, setOrb, menu, closeMenu, menuReady, prepareCapture, beginCapture, cancelCapture, finishCapture, finishCaptureWithPlacement, showTranslation, resizeTranslationHeight,
-    hideTranslation, captureReady, authorize, stateFor,
-    restoreWindowState, getWindowState, flushWindowState, setAppearance, dragOrb,
+  return { initTray, openPanel, startSelection, setOrb, menu, closeMenu, menuReady, prepareCapture, beginCapture, cancelCapture, finishCapture, finishCaptureWithPlacement, restoreCaptureSource, showTranslation, resizeTranslationHeight,
+    hideTranslation, setTranslationControlsPinned, captureReady, authorize, stateFor,
+    restoreWindowState, getWindowState, flushWindowState, setAppearance, dragOrb, resizePanel: resizePanelGesture,
+    setOrbPreferences(prefs) { orbPreferences = { quietFadeEnabled: prefs?.orbQuietFade !== false, edgeCollapseEnabled: prefs?.orbEdgeCollapse !== false }; orbController?.configure({ ...orbPreferences, reducedMotion }); },
+    hoverOrb(active) { if (typeof active !== 'boolean') throw new Error('悬浮球悬停状态无效。'); orbController?.hover(active); },
     async acceptSelection() {
       const data=pending;if(!data)throw new Error('选区入口已过期，请重新划词。');
       const record = data.requestId && selectionContexts.get(data.requestId);
@@ -823,6 +959,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       return wide;
     },
     setWide(value) {
+      panelResize = null;
       // Windows 的减少动画偏好可能在应用运行期间改变，每次切换前重新查询。
       const nextReduced = appearance.reducedMotion === true || systemPrefersReducedMotion();
       if (nextReduced !== reducedMotion) { reducedMotion = nextReduced; onStatus({ reducedMotion }); }
@@ -857,7 +994,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       });
     },
     async smoke() {const win=panel();await new Promise(resolve=>{if(win.webContents.isLoading())win.webContents.once('did-finish-load',resolve);else resolve();});return {windows:windows.size,displayCount:screen.getAllDisplays().length,rendererLoaded:!win.webContents.isLoading(),selectionWorker:!!worker};},
-    dispose() {closing=true;selectionGeneration++;capture=null;if(captureReader)releaseCaptureReader(captureReader);clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);for(const win of windows.values())win.destroy();}
+    dispose() {closing=true;selectionGeneration++;capture=null;sourceWatcher?.dispose();if(captureReader)releaseCaptureReader(captureReader);clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);for(const win of windows.values())win.destroy();}
   };
 }
 module.exports={createDesktop};
