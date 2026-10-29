@@ -36,7 +36,7 @@ async function appActions(t) {
   const store = createStore({ directory, encrypt: encrypted, decrypt: decrypted });
   await store.init();
   const desktop = { broadcast() {}, captureState: () => ({ outsideMarker: '框外材料⟦OUTSIDE⟧' }), finishCapture: () => IMAGE,
-    openPanel() {}, setOrb() {}, startSelection() {}, setAppearance() {} };
+    openPanel() {}, setOrb() {}, setOrbPreferences() {}, hoverOrb() {}, startSelection() {}, setAppearance() {} };
   const app = { setPath() {}, getPath: () => '', setName() {}, setAppUserModelId() {}, requestSingleInstanceLock: () => true,
     on() {}, whenReady: () => new Promise(() => {}) };
   const electron = { app, net: { fetch: (url, options) => {

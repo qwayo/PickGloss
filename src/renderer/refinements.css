@@ -1,9 +1,5 @@
-/* 炭黑主题中的桌面入口、快捷菜单与快捷键设置。 */
-.orb{width:40px;height:40px;padding:8px;background-color:var(--paper);color:var(--ink);--orb-finish:radial-gradient(ellipse at 30% 18%,#ffffff30,transparent 56%),radial-gradient(ellipse at 75% 85%,#0005,transparent 70%);background-image:var(--orb-finish);border:1px solid color-mix(in srgb,var(--ink) 20%,transparent);box-shadow:inset 0 1px 2px #ffffff35,inset 0 -3px 5px #0004,0 2px 4px #0005;transition:transform 160ms var(--ease),filter 160ms,box-shadow 160ms}
-.orb.dragging{box-shadow:inset 0 1px 2px #ffffff40,inset 0 -2px 4px #0005,0 1px 2px #0006}
-html[data-appearance=light] .orb{--orb-finish:radial-gradient(ellipse at 30% 18%,#fff,transparent 62%),radial-gradient(ellipse at 75% 85%,#0002,transparent 70%);background-image:var(--orb-finish);box-shadow:inset 0 1px 2px #fff,inset 0 -3px 5px #0002,0 2px 4px #0003}
-.orb>.brand{width:25px;height:25px}
-.selection-action{animation:selection-appear 180ms var(--ease) both;transform-origin:50% 65%;width:26px;height:26px;padding:0;gap:0;border-radius:9px;background:var(--paper);color:var(--ink);box-shadow:none;transition:filter var(--fast),transform 100ms var(--ease)}
+/* 炭黑主题中的快捷菜单与快捷键设置。 */
+.selection-action{animation:selection-appear 180ms var(--ease) backwards;transform-origin:50% 65%;transition:transform 100ms var(--ease),opacity 100ms var(--ease)}
 .orb-action-select{width:100%;border:1px solid var(--line);background:var(--field);border-radius:7px;padding:8px 10px}
 .window-settings{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
 .window-settings-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
@@ -12,10 +8,11 @@ html[data-appearance=light] .orb{--orb-finish:radial-gradient(ellipse at 30% 18%
 .window-reset{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:28px;padding:3px 8px;border:1px solid var(--line);background:var(--soft);font-size:12px;line-height:20px;white-space:nowrap}
 .window-reset .icon{width:13px;height:13px}.window-settings>[role=status]{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 0}
 .window-settings>[role=status]:empty,.window-settings>.inline-error:empty{display:none}
-.selection-action>.brand{width:26px;height:26px}
-.selection-action .brand-background{fill:var(--paper);stroke:var(--line);stroke-width:2px}
 .selection-action .brand-ink{fill:var(--ink)}
-.selection-action:hover{background:var(--paper);filter:brightness(1.06)}
+.selection-action .brand-ink path{stroke:var(--paper);stroke-width:1.4px;stroke-linejoin:round;paint-order:stroke fill;vector-effect:non-scaling-stroke}
+.selection-action:hover{background:transparent;opacity:.85}
+.selection-action:active{transform:scale(.94)}
+.selection-action:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 .menu-surface{width:100%;height:100%;padding:7px;background:transparent;display:flex;align-items:stretch}
 .quick-menu{align-self:flex-start;max-height:100%;width:100%;min-width:0;overflow-y:auto;overscroll-behavior:contain;background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:8px 6px 4px;box-shadow:0 3px 8px #0005;color:var(--ink);outline:none}
 .quick-menu-heading{display:flex;align-items:center;gap:6px;padding:1px 6px 6px;margin-bottom:4px;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;user-select:none}
@@ -60,9 +57,6 @@ html[data-appearance=light] .orb{--orb-finish:radial-gradient(ellipse at 30% 18%
 :root{--favorite:#f2c14f;--favorite-outline:#f2c14f}html[data-appearance=light]{--favorite-outline:#9a6a10}.panel-footer .starred .icon,.history-star.starred>.icon{fill:var(--favorite);stroke:var(--favorite-outline)}.history-star.starred{color:var(--favorite)}
 
 @keyframes selection-appear{from{opacity:0;transform:translateY(3px) scale(.82)}to{opacity:1;transform:none}}
-.reduced-motion .orb.dragging{transform:none}
-@media(prefers-reduced-motion:reduce){.orb.dragging{transform:none}}
-.orb:hover{background-color:var(--paper);background-image:var(--orb-finish)}
 
 /* 批量选择会话时，所有危险操作都与筛选和当前分页状态一同呈现。 */
 .history-heading-actions{display:flex;align-items:center;gap:4px;flex:none}
@@ -109,3 +103,6 @@ html[data-appearance=light] .orb{--orb-finish:radial-gradient(ellipse at 30% 18%
 
 /* 白色十字配深色外描边，在压暗画面和明亮原图上均清晰；中心热点对准选区。 */
 .capture-surface{cursor:url("assets/capture-crosshair.svg") 16 16,crosshair}
+/* 标题栏直接显示无底板品牌，深浅主题分别使用白色与深色。 */
+html[data-appearance=dark] .panel-bar>.brand{color:#fff}
+html[data-appearance=light] .panel-bar>.brand{color:#252525}

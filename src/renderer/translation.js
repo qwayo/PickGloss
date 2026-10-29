@@ -75,6 +75,7 @@ function blockLayout(context, block, data) {
 function controlIcon(kind) {
   const paths = {
     close: 'm5 5 14 14M19 5 5 19', retry: 'M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17',
+    pin: 'M9 3h6l-1 6 4 4v2H6v-2l4-4-1-6ZM12 15v6',
     copy: 'M9 8h11v13H9ZM4 16H2V3h11v2', capture: 'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M7 7h10v10H7Z',
     vision: 'M3 5h18v14H3Zm2 12 5-5 3 3 3-4 5 6M8 8h.01', check: 'm5 12 4 4L19 6',
     eye: 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Zm10-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z',
@@ -350,7 +351,9 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
       data.thinking?.status === 'unverified' ? '当前接口未适配思考开关' : '',
       data.search?.status === 'complete' ? '已参考联网资料' : '', data.warning, data.rotationAdjusted ? '文字框已校正' : ''].filter(Boolean).join(' · ');
     status.dataset.busy = String(['recognizing', 'translating', 'preparing-search', 'searching'].includes(data.status));
-    heading.append(node('strong', '', '截图翻译'), status, iconButton('关闭', 'close', () => { endOriginalHold(); return action('close-translation'); }));
+    const pin = iconButton(data.controlsPinned ? '取消翻译菜单置顶' : '置顶翻译菜单', 'pin', () => action('pin-translation-controls', { pinned: !current.controlsPinned }));
+    pin.classList.add('translation-pin'); pin.setAttribute('aria-pressed', String(data.controlsPinned === true));
+    heading.append(node('strong', '', '截图翻译'), status, pin, iconButton('关闭', 'close', () => { endOriginalHold(); return action('close-translation'); }));
     const fields = node('div', 'translation-languages');
     const source = languageSelect(languages, chosen.sourceLanguage, '源语言', true);
     const target = languageSelect(languages, chosen.targetLanguage, '目标语言');
@@ -403,7 +406,7 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
     tools.append(retry, vision, network, copy,
       iconButton('重新框选', 'capture', () => { endOriginalHold(); return action('start-capture', { mode: 'translate', options: { ...selectedOptions(), showOriginal: false } }); }));
     toolbar.append(display, ...(originalPreview ? [originalPreview] : []), tools);
-    const notices = data.status === 'complete' ? [data.method === 'vision' ? '整区覆盖' : '', data.unchangedCount ? `${data.unchangedCount} 处保留原文` : ''].filter(Boolean) : [];
+    const notices = [data.sourceWarning, ...(data.status === 'complete' ? [data.method === 'vision' ? '整区覆盖' : '', data.unchangedCount ? `${data.unchangedCount} 处保留原文` : ''] : [])].filter(Boolean);
     const warning = node('p', 'translation-warning', notices.join(' · ')); warning.hidden = !notices.length;
     warning.title = data.warning || '';
     controls.append(heading, fields, toolbar, warning);

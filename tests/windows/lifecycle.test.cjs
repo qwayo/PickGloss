@@ -26,7 +26,7 @@ function clock(quantum = 0, timerDelays = []) {
 }
 
 // 使用真实桌面模块和假窗口，不创建 Electron 或访问用户桌面。
-function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, windowsBuild = 26100, materialError = false, frameHelperMissing = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, nativeCapture = null, dipScale = 1 } = {}) {
+function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, windowsBuild = 26100, materialError = false, frameHelperMissing = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, nativeCapture = null, dipScale = 1, sourceFactory } = {}) {
   const made = [], messages = [], statuses = [], selections = [], selectionUpdates = [], commands = [], actions = [], trays = [], menus = [], ipcMain = new EventEmitter(), time = clock(timerQuantum, timerDelays);
   const nativeTheme = Object.assign(new EventEmitter(), { shouldUseDarkColors: false, shouldUseDarkColorsForSystemIntegratedUI: false, themeSource: 'system' });
   const animationSettings = { prefersReducedMotion: !animate, shouldRenderRichAnimation: true };
@@ -81,12 +81,22 @@ function desktopHarness({ loading = false, animate = false, blurOnHide = false, 
   vm.runInNewContext(fs.readFileSync(target, 'utf8'), {
     module: mod, exports: mod.exports, __dirname: path.dirname(target),
     require: name => name === 'electron' ? electron : name === 'node:perf_hooks' ? { performance: { now: time.now } } : name === 'node:os' ? { release: () => '10.0.' + windowsBuild } : name === 'node:fs' ? { ...fs, existsSync: () => true } : name === './window-appearance.cjs' ? {
-      createWindowAppearance(win, options) { win.failFrame = options.onError; win.clipRadius = options.clipRadius; return frameHelperMissing || materialError && options.clipRadius ? null : { isReady: true, setBackdrop(value) { win.backdropEnabled = value; }, apply(value) { win.nativeBorder = value; }, dispose() {} }; },
+      createWindowAppearance(win, options) {
+        win.clipRadius = options.clipRadius;
+        let ready = !(frameHelperMissing || materialError && options.clipRadius);
+        let frame = null;
+        win.frameReady = () => !!frame?.isReady;
+        win.failFrame = () => { frame?.dispose(); options.onError(); };
+        if (!ready) return null;
+        frame = { get isReady() { return ready; }, setBackdrop(value) { win.backdropEnabled = value; }, apply(value) { win.nativeBorder = value; },
+          dispose() { ready = false; win.backdropEnabled = false; } };
+        return frame;
+      },
     } : name === './screen-capture.cjs' ? { createScreenCapture: () => null } : name.startsWith('./') ? require(path.resolve(path.dirname(target), name)) : require(name),
-    process: { pid: 1, platform: 'win32' }, Date: { now: time.now },
+    process: { pid: 1, platform: 'win32' }, Date: { now: time.now }, AbortController,
     ...time, clearInterval() {}, setInterval() {},
   });
-  const desktop = mod.exports.createDesktop({ captureFactory: () => nativeCapture, onAction: (...args) => actions.push(args), onSelection: data => { selections.push(data);return onSelection?.(data); },
+  const desktop = mod.exports.createDesktop({ captureFactory: () => nativeCapture, sourceFactory, onAction: (...args) => actions.push(args), onSelection: data => { selections.push(data);return onSelection?.(data); },
     onSelectionContext: data => { selectionUpdates.push(data);return onSelectionContext?.(data); }, onStatus: value => statuses.push(value), onWindowState });
   desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, reducedMotion: false }); statuses.length = 0;
   return { desktop, made, messages, statuses, selections, selectionUpdates, commands, worker, ipcMain, time, nativeTheme, animationSettings, trays, menus, actions,
@@ -113,13 +123,19 @@ test('桌面窗口显式使用原生置顶层级，固定状态切换不退回�
   }
 });
 
-test('系统圆角与材质共用非透明原生边界，不再创建像素区域和第二扇光晕窗', () => {
+test('Windows 11 主窗使用透明 14 DIP 裁切和独立背景助手，不创建第二扇光晕窗', () => {
   const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
   for (const mode of ['light', 'dark']) for (const material of ['solid', 'glass']) {
     desktop.setAppearance({ current: { mode, material }, pinOutline: 'blue' });
-    assert.equal(panel.options.transparent, false, 'Windows 11 由 DWM 合成圆角和材质');
-    assert.equal(panel.options.thickFrame, true);
-    assert.equal(panel.options.roundedCorners, true);
+    assert.equal(panel.options.transparent, true, 'CSS 内容与助手背景使用透明客户区');
+    assert.equal(panel.options.thickFrame, false, '不再叠加系统非客户区边框');
+    assert.equal(panel.options.roundedCorners, false, '圆角由助手背景按同一半径裁切');
+    assert.equal(panel.clipRadius, 14);
+    assert.equal(panel.frameReady(), true);
+    assert.equal(panel.material, 'none', 'BrowserWindow 不再自行合成矩形亚克力');
+    assert.equal(panel.backdropEnabled, material === 'glass');
+    assert.equal(panel.nativeBorder, 'none');
+    assert.equal(panel.background, '#00000000');
     assert.equal(panel.shape, undefined, '像素区域会禁用 DWM 的抗锯齿圆角');
   }
   desktop.setPinned(true); assert.equal(made.length, 1, '边缘光晕必须与主页面共用绘制表面');
@@ -148,15 +164,16 @@ test('旧系统保留 CSS 圆角透明画布，禁用不受支持的系统磨砂
   assert.equal(made[0].shape, undefined); assert.equal(statuses.at(-1).appearanceMaterial, 'solid');
 });
 
-test('磨砂通过 NONE 停止绘制不透明系统边色，固定彩边和纯色窗口仍走原生边框', () => {
+test('磨砂与纯色都由透明主窗和 14 DIP 助手背景呈现，不使用原生不透明边色', () => {
   const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
   desktop.setAppearance({ current: { mode: 'dark', material: 'glass' }, pinOutline: 'orange' });
-  assert.equal(panel.material, 'acrylic'); assert.equal(panel.nativeBorder, 'none'); assert.equal(panel.accent, false);
-  desktop.setPinned(true); assert.equal(panel.nativeBorder, '#dc873d');
+  assert.equal(panel.material, 'none'); assert.equal(panel.backdropEnabled, true); assert.equal(panel.frameReady(), true);
+  assert.equal(panel.nativeBorder, 'none'); assert.equal(panel.clipRadius, 14); assert.equal(panel.options.transparent, true);
+  desktop.setPinned(true); assert.equal(panel.nativeBorder, 'none');
   desktop.setAppearance({ current: { mode: 'dark', material: 'glass' }, pinOutline: 'none' });
-  assert.equal(panel.nativeBorder, 'none');
+  assert.equal(panel.nativeBorder, 'none'); assert.equal(panel.backdropEnabled, true);
   desktop.setAppearance({ current: { mode: 'dark', material: 'solid' }, pinOutline: 'none' });
-  assert.equal(panel.nativeBorder, '#252525'); assert.equal(panel.material, 'none');
+  assert.equal(panel.nativeBorder, 'none'); assert.equal(panel.backdropEnabled, false); assert.equal(panel.material, 'none');
 });
 
 test('窗口外观助手缺失或退出时回退纯色，避免留下无法去除的不透明磨砂边框', () => {
@@ -164,8 +181,10 @@ test('窗口外观助手缺失或退出时回退纯色，避免留下无法去�
     const { desktop, made, statuses } = desktopHarness({ frameHelperMissing: missing });
     desktop.setAppearance({ current: { mode: 'dark', material: 'glass' } }); desktop.openPanel();
     const panel = made[0];
-    if (!missing) { assert.equal(panel.material, 'acrylic'); panel.failFrame(); }
-    assert.equal(panel.material, 'none'); assert.equal(panel.background, '#252525');
+    assert.equal(panel.options.transparent, true); assert.equal(panel.options.thickFrame, false); assert.equal(panel.clipRadius, 14);
+    if (!missing) { assert.equal(panel.frameReady(), true); assert.equal(panel.backdropEnabled, true); panel.failFrame(); }
+    assert.equal(panel.material, 'none'); assert.equal(panel.background, '#00000000');
+    assert.equal(panel.frameReady(), false); assert.notEqual(panel.backdropEnabled, true, '助手缺失或退出后不能继续绘制磨砂背景');
     assert.equal(statuses.at(-1).appearanceMaterial, 'solid');
   }
 });
@@ -288,7 +307,10 @@ test('窗口位置与两种自定义尺寸跨重启恢复，固定窗口的新�
   win.setBounds({ x: 137, y: 93, width: 930, height: 720 });
   first.desktop.setOrb(true);
   const orb = first.made.find(item => item.kind === 'orb');
-  orb.setBounds({ x: 321, y: 211, width: 60, height: 60 });
+  const orbOrigin = { ...orb.getBounds() };
+  first.desktop.dragOrb({ phase: 'start', x: orbOrigin.x + 20, y: orbOrigin.y + 20 });
+  first.desktop.dragOrb({ phase: 'end', x: 341, y: 231 });
+  assert.deepEqual({ ...orb.getBounds() }, { x: 321, y: 211, width: 48, height: 48 });
   assert.equal(await first.desktop.flushWindowState(), true);
   const second = desktopHarness();
   assert.equal(second.desktop.restoreWindowState(saved.at(-1)), true);
@@ -424,11 +446,14 @@ test('悬浮球拖动依据原生起始位置计算，拒绝非数值与越界�
   const origin = { ...orb.getBounds() };
   assert.equal(desktop.dragOrb({ phase: 'move', x: 1000, y: 500 }), false);
   desktop.dragOrb({ phase: 'start', x: origin.x + 30, y: origin.y + 30 });
+  const statusCount = statuses.length, messageCount = messages.length;
   desktop.dragOrb({ phase: 'move', x: origin.x - 103, y: origin.y - 57 });
   assert.equal(orb.getBounds().x, origin.x - 133); assert.equal(orb.getBounds().y, origin.y - 87);
+  assert.deepEqual({ ...desktop.getWindowState().orb }, { x: origin.x, y: origin.y }, '拖动过程不持久化临时位置');
   desktop.dragOrb({ phase: 'move', x: origin.x - 93, y: origin.y - 47 });
   assert.equal(orb.getBounds().x, origin.x - 123, '多次 move 不能累计同一段位移');
-  assert.equal(statuses.length, 0); assert.equal(messages.length, 0);
+  assert.equal(statuses.length, statusCount, 'move 不重复发布悬浮球状态'); assert.equal(messages.length, messageCount, 'move 不广播全局窗口状态');
+  assert.ok(statuses.every(status => Object.keys(status).length === 1 && status.orbState), '悬浮球状态不混入全局状态');
   for (const x of [NaN, Infinity, '1', 100001, -5000]) assert.throws(() => desktop.dragOrb({ phase: 'move', x, y: 10 }));
   assert.throws(() => desktop.dragOrb({ phase: 'unknown', x: 1, y: 1 }));
   const event = win => ({ sender: win.webContents, senderFrame: win.webContents.mainFrame });
@@ -436,6 +461,7 @@ test('悬浮球拖动依据原生起始位置计算，拒绝非数值与越界�
   assert.equal(desktop.authorize(event(panel), 'orb-drag'), false);
   assert.equal(desktop.authorize({ sender: orb.webContents, senderFrame: { url: orb.webContents.mainFrame.url } }, 'orb-drag'), false);
   desktop.dragOrb({ phase: 'end', x: 701, y: 501 });
+  assert.deepEqual({ ...desktop.getWindowState().orb }, { x: 671, y: 471 }, '松手后保存最终展开位置');
   assert.equal(desktop.dragOrb({ phase: 'move', x: 703, y: 503 }), false);
 });
 
@@ -444,14 +470,16 @@ test('原生主题跟随系统，托盘使用系统任务栏明暗并提供外�
   desktop.openPanel(); desktop.setOrb(true); desktop.initTray();
   const win = made[0];
   desktop.setAppearance({ current: { mode: 'system', material: 'glass', tint: '#bfc2c8', opacity: 82, blur: 26 }, reducedMotion: false });
-  assert.equal(win.material, 'acrylic'); assert.equal(win.opacity, 1); assert.equal(win.background, '#00000000');
+  assert.equal(win.material, 'none'); assert.equal(win.opacity, 1); assert.equal(win.background, '#00000000');
+  assert.equal(win.clipRadius, 14); assert.equal(win.frameReady(), true); assert.equal(win.backdropEnabled, true);
   nativeTheme.shouldUseDarkColors = true; nativeTheme.shouldUseDarkColorsForSystemIntegratedUI = true; nativeTheme.emit('updated');
   assert.equal(statuses.at(-1).appearanceDark, true); assert.equal(statuses.at(-1).appearanceMaterial, 'glass');
   assert.match(trays[0].image, /pickgloss-tray-dark\.png$/); assert.equal(trays[0].tooltip, 'PickGloss');
   nativeTheme.shouldUseDarkColorsForSystemIntegratedUI = false; nativeTheme.emit('updated');
   assert.match(trays[0].image, /pickgloss-tray-light\.png$/);
   desktop.setAppearance({ current: { mode: 'dark', material: 'solid' }, reducedMotion: false });
-  assert.equal(win.material, 'none'); assert.equal(win.background, '#252525'); assert.equal(win.opacity, 1); assert.equal(win.options.transparent, false);
+  assert.equal(win.material, 'none'); assert.equal(win.background, '#00000000'); assert.equal(win.opacity, 1); assert.equal(win.options.transparent, true);
+  assert.equal(win.backdropEnabled, false);
   assert.equal(made.find(item => item.kind === 'orb').options.transparent, true);
   assert.equal(win.options.title, 'PickGloss'); assert.match(win.options.icon, /pickgloss-app\.png$/);
   trays[0].emit('click');
@@ -511,6 +539,25 @@ test('悬浮球与划词入口保留阴影空间，菜单首次等 renderer 就�
   assert.equal(menu.isVisible(), true); assert.equal(statuses.at(-1).menuOpen, true);
   assert.equal(menu.options.webPreferences.autoplayPolicy, 'no-user-gesture-required');
   assert.equal(menu.options.webPreferences.backgroundThrottling, false); assert.equal(menu.options.webPreferences.sandbox, true); assert.equal(menu.options.webPreferences.contextIsolation, true);
+});
+
+test('菜单渲染器崩溃后解除悬浮球暂停，重新允许贴边收起和静默淡化', () => {
+  const { desktop, made, statuses, time } = desktopHarness();
+  desktop.restoreWindowState({ orb: { x: 0, y: 200 } });
+  desktop.setOrb(true);
+  const orb = made.find(win => win.kind === 'orb');
+  time.advance(1000);
+  assert.equal(orb.getBounds().width, 12);
+  desktop.menu({ source: 'orb' });
+  assert.equal(orb.getBounds().width, 48);
+  assert.equal(statuses.filter(value => value.orbState).at(-1).orbState.menuOpen, true);
+  made.find(win => win.kind === 'menu').webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+  time.advance(16000);
+  const state = statuses.filter(value => value.orbState).at(-1).orbState;
+  assert.equal(state.menuOpen, false);
+  assert.equal(state.collapsed, true);
+  assert.equal(state.dimmed, true);
+  assert.equal(orb.getBounds().width, 12);
 });
 
 test('菜单按内容高度收紧，只接纳本轮尺寸并在小屏幕内避让', () => {
@@ -638,14 +685,18 @@ test('菜单 surface 只授权有限动作，快捷键录制期间主窗 Esc 交
   desktop.setPinned(false); assert.equal(panel.alwaysOnTop, true);
 });
 
-test('不支持磨砂或系统减少透明时回退实色，状态广播覆盖所有窗口与迟到加载', () => {
+test('不支持磨砂或系统减少透明时关闭助手背景并回退 CSS 实色，迟到加载仍收到状态', () => {
   for (const options of [{ windowsBuild: 19045 }, { materialError: true }, {}]) {
     const { desktop, made, nativeTheme, statuses, messages } = desktopHarness({ ...options, loading: true });
     if (!Object.keys(options).length) nativeTheme.prefersReducedTransparency = true;
     desktop.setAppearance({ current: { mode: 'light', material: 'glass' }, reducedMotion: false });
     desktop.openPanel(); desktop.setOrb(true);
-    assert.equal(made[0].material, 'none'); assert.equal(made[0].background, options.windowsBuild === 19045 ? '#00000000' : '#ffffff'); assert.equal(made[0].options.transparent, options.windowsBuild === 19045);
-    assert.equal(statuses.at(-1).appearanceMaterial, 'solid');
+    const panel = made[0];
+    assert.equal(panel.material, 'none'); assert.equal(panel.background, '#00000000'); assert.equal(panel.options.transparent, true);
+    assert.notEqual(panel.backdropEnabled, true, '不支持磨砂时不能留下助手背景');
+    if (options.windowsBuild === 19045) assert.equal(panel.clipRadius, undefined, '旧系统使用 CSS 圆角，不创建裁切助手');
+    else { assert.equal(panel.clipRadius, 14); assert.equal(panel.frameReady(), options.materialError !== true); }
+    assert.ok(statuses.some(status => status.appearanceMaterial === 'solid'), '当前主窗回退状态应单独广播');
     const state = { settings: { prefs: { appearance: { current: { mode: 'dark' } } } } };
     desktop.broadcast(state); assert.equal(messages.length, 0);
     for (const win of made) { win.loading = false; win.webContents.emit('did-finish-load'); }
@@ -731,6 +782,147 @@ test('翻译状态调整高度不重新显示隐藏窗口或夺取其他窗口�
   assert.equal(controls.getBounds().height, before.height);
 });
 
+test('覆盖译文离开截图来源后隐藏，返回时恢复且后台结果不把它带到其他应用', () => {
+  let notify;
+  const { desktop, made, focusOutside } = desktopHarness({ sourceFactory: ({ onChange }) => {
+    notify = onChange;
+    return { capture: async () => null, bind: () => 7, clear() {}, dispose() {} };
+  } });
+  const placement = { sourceBinding: true, source: { handle: '99', pid: 42, bounds: { x: 100, y: 100, width: 1000, height: 700 } },
+    region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay');
+  const overlay = made.find(win => win.kind === 'translation-overlay'), controls = made.find(win => win.kind === 'translation');
+  notify?.({ binding: 7, state: 'active' });
+  focusOutside();
+  notify?.({ binding: 7, state: 'inactive' });
+  assert.equal(overlay.isVisible(), false, '切到其他应用或桌面后不能继续覆盖');
+  assert.equal(controls.isVisible(), false, '控制窗应随来源一起隐藏');
+  desktop.showTranslation(placement, 'overlay', { extraHeight: 20, activate: false });
+  assert.equal(overlay.isVisible(), false, '后台翻译完成不能重显覆盖');
+  notify?.({ binding: 6, state: 'active' });
+  assert.equal(overlay.isVisible(), false, '过期来源事件不能恢复新结果');
+  notify?.({ binding: 7, state: 'active' });
+  assert.equal(overlay.isVisible(), true); assert.equal(controls.isVisible(), true);
+  assert.equal(controls.isFocused(), false, '恢复来源时不得抢走原软件焦点');
+  desktop.hideTranslation();
+  notify?.({ binding: 7, state: 'active' });
+  assert.equal(overlay.isVisible(), false, '关闭后迟到事件不得重显');
+});
+
+test('截图来源移动后停止旧位置覆盖，来源关闭后关闭本次翻译', () => {
+  let notify;
+  const { desktop, made, actions } = desktopHarness({ sourceFactory: ({ onChange }) => {
+    notify = onChange; return { capture: async () => null, bind: () => 8, clear() {}, dispose() {} };
+  } });
+  const placement = { sourceBinding: true, source: { handle: '99', pid: 42, bounds: { x: 100, y: 100, width: 1000, height: 700 } },
+    region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay');
+  const overlay = made.find(win => win.kind === 'translation-overlay');
+  notify?.({ binding: 8, state: 'active' });
+  notify?.({ binding: 8, state: 'moved' });
+  assert.equal(overlay.isVisible(), false, '移动来源后不能覆盖旧坐标');
+  assert.ok(actions.some(([name]) => name === 'translation-source-invalid'), '应保留对照译文并报告旧位置失效');
+  notify?.({ binding: 8, state: 'active' });
+  assert.equal(overlay.isVisible(), false, '旧位置失效后返回来源也不能恢复覆盖');
+});
+
+test('页面先失效、覆盖renderer后加载完成时，迟到显示回调不能复活旧覆盖', () => {
+  let notify;
+  const { desktop, made, actions } = desktopHarness({ loading: true, sourceFactory: ({ onChange }) => {
+    notify = onChange; return { capture: async () => null, bind: () => 17, clear() {}, dispose() {} };
+  } });
+  const placement = { sourceBinding: true, source: { handle: '99', pid: 42, bounds: { x: 100, y: 100, width: 1000, height: 700 } },
+    region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay', { activate: false, controlsPinned: true });
+  const overlay = made.find(win => win.kind === 'translation-overlay'), controls = made.find(win => win.kind === 'translation');
+  notify({ binding: 17, state: 'active', windowActive: true });
+  notify({ binding: 17, state: 'context-invalid', windowActive: true });
+  overlay.loading = false; overlay.webContents.emit('did-finish-load');
+  controls.loading = false; controls.webContents.emit('did-finish-load');
+  assert.equal(overlay.isVisible(), false, '导航后旧的加载回调不能重显覆盖');
+  assert.equal(controls.isVisible(), true, '置顶菜单仍然保留');
+  assert.ok(actions.some(([name, payload]) => name === 'translation-source-invalid' && payload.reason === 'context-invalid'));
+  desktop.dispose();
+});
+
+test('新截图期间仍处理旧来源失效，取消框选不能恢复跨应用或已经关闭的覆盖', async () => {
+  for (const state of ['inactive','closed','moved','unavailable']) {
+    let notify;
+    const image = { isEmpty: () => false, toJPEG: () => Buffer.from('固定测试图像') };
+    const { desktop, made, time, actions } = desktopHarness({
+      getSources: async () => [{ display_id: '1', thumbnail: image }],
+      sourceFactory: ({ onChange }) => { notify = onChange; return { capture: async () => null, bind: () => 9, clear() {}, dispose() {} }; },
+    });
+    const placement = { sourceBinding: true, source: { handle: '99', pid: 42, bounds: { x: 100, y: 100, width: 1000, height: 700 } },
+      region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+    desktop.showTranslation(placement, 'overlay'); notify({ binding: 9, state: 'active' });
+    const pending = desktop.beginCapture({ mode: 'explain' });
+    notify({ binding: 9, state });
+    await new Promise(resolve => setImmediate(resolve));
+    time.advance(50); await pending;
+    desktop.cancelCapture();
+    assert.equal(made.find(win => win.kind === 'translation-overlay').isVisible(), false, `${state} 后取消截图不能重显旧覆盖`);
+    if (state === 'inactive' || state === 'closed') assert.equal(made.find(win => win.kind === 'translation').isVisible(), false);
+    if (state === 'closed') assert.ok(actions.some(([action]) => action === 'translation-source-closed'));
+    if (state === 'moved' || state === 'unavailable') assert.ok(actions.some(([action]) => action === 'translation-source-invalid'));
+    desktop.dispose();
+  }
+});
+
+test('截图开始为识图但最终翻译仍恢复来源，恢复期间取消不会提交下一张截图', async () => {
+  let release, restoreSignal, calls = 0;
+  const source = { handle: '99', pid: 42, bounds: { x: 0, y: 0, width: 2880, height: 1800 } };
+  const image = { isEmpty: () => false, getSize: () => ({ width: 1440, height: 900 }), toJPEG: () => Buffer.from('固定测试图像') };
+  const { desktop } = desktopHarness({ getSources: async () => [{ display_id: '1', thumbnail: image }],
+    sourceFactory: () => ({ capture: async () => source, restore(_source, { signal }) {
+      calls++; restoreSignal = signal; return new Promise(resolve => { release = resolve; });
+    }, clear() {}, dispose() {} }) });
+  await desktop.beginCapture({ mode: 'explain' });
+  // 初始模式可在框选工具栏切换，因此来源快照也必须在识图入口预先采集。
+  const pending = desktop.restoreCaptureSource({ x: 100, y: 100, width: 100, height: 60 });
+  assert.equal(calls, 1);
+  desktop.cancelCapture(); assert.equal(restoreSignal.aborted, true);
+  await desktop.beginCapture({ mode: 'translate' });
+  release(true);
+  await assert.rejects(pending, /取消或更新/);
+  assert.ok(desktop.captureState(), '下一张截图仍保留，不被旧提交裁剪或清空');
+  desktop.dispose();
+});
+
+test('首次来源绑定回复前已经切走，返回来源只恢复译文而不抢焦点', () => {
+  let notify;
+  const { desktop, made, focusOutside } = desktopHarness({ sourceFactory: ({ onChange }) => {
+    notify = onChange; return { capture: async () => null, bind: () => 12, clear() {}, dispose() {} };
+  } });
+  const placement = { sourceBinding: true, source: { handle: '99', pid: 42, bounds: { x: 100, y: 100, width: 1000, height: 700 } },
+    region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay');
+  notify({ binding: 12, state: 'inactive' }); focusOutside();
+  notify({ binding: 12, state: 'active' });
+  const controls = made.find(win => win.kind === 'translation');
+  assert.equal(controls.isVisible(), true); assert.equal(controls.isFocused(), false);
+  desktop.dispose();
+});
+
+test('透明主窗的手动拖边进入原有尺寸记忆，过期手势不能覆盖新拉伸', async () => {
+  const { desktop, made } = desktopHarness(); desktop.openPanel();
+  const win = made.find(value => value.kind === 'panel'), before = { ...win.getBounds() };
+  assert.equal(desktop.resizePanel({ phase: 'start', edge: 'e', token: 'resize-1', x: 300, y: 200 }), true);
+  desktop.resizePanel({ phase: 'move', edge: 'e', token: 'resize-1', x: 340, y: 200 });
+  assert.equal(win.getBounds().width, before.width + 40);
+  desktop.resizePanel({ phase: 'start', edge: 's', token: 'resize-2', x: 340, y: 200 });
+  assert.equal(desktop.resizePanel({ phase: 'end', edge: 'e', token: 'resize-1', x: 400, y: 200 }), false);
+  desktop.resizePanel({ phase: 'end', edge: 's', token: 'resize-2', x: 340, y: 230 });
+  assert.equal(win.getBounds().width, before.width + 40); assert.equal(win.getBounds().height, before.height + 30);
+  assert.equal(desktop.getWindowState().sizes.compact.width, before.width + 40);
+  const event = value => ({ sender: value.webContents, senderFrame: value.webContents.mainFrame });
+  assert.equal(desktop.authorize(event(win), 'panel-resize'), true);
+  desktop.setOrb(true); const orb = made.find(value => value.kind === 'orb');
+  assert.equal(desktop.authorize(event(orb), 'panel-resize'), false);
+  assert.throws(() => desktop.resizePanel({ phase: 'start', edge: 'e', token: 'bad', x: Infinity, y: 200 }), /请求无效/);
+  desktop.dispose();
+});
+
 test('内容高度反馈保留拖动位置，不聚焦或重显窗口、不移动覆盖层且不保存偏好', () => {
   let settingsWrites = 0;
   const { desktop, made, focusOutside } = desktopHarness({ onWindowState: async () => { settingsWrites++; } });
@@ -784,6 +976,20 @@ test('截图界面可预热且不读取屏幕，无自有可见窗口时直接�
   time.advance(0); await new Promise(resolve => setImmediate(resolve));
   assert.equal(reads, 1, '没有可见自有窗口时，不应支付固定退隐等待');
   await pending; assert.equal(made.filter(win => win.kind === 'capture').length, 1);
+});
+
+test('来源页面核对期间并行加载空框选界面，取得可信来源前不读取屏幕', async () => {
+  let resolveSource, reads = 0;
+  const image = { isEmpty: () => false, toJPEG: () => Buffer.from('虚构预览') };
+  const { desktop, made } = desktopHarness({
+    sourceFactory: () => ({ capture: () => new Promise(resolve => { resolveSource = resolve; }), dispose() {} }),
+    getSources: async () => { reads++; return [{ display_id: '1', thumbnail: image }]; },
+  });
+  const pending = desktop.beginCapture({ mode: 'translate' });
+  assert.ok(made.find(win => win.kind === 'capture'), '来源检查与空 renderer 冷启动不得串行等待。');
+  assert.equal(reads, 0, '并行准备不能把实际截图提前到来源快照之前。');
+  resolveSource(null); await pending;
+  assert.equal(reads, 1); desktop.dispose();
 });
 
 test('原生截图预热不采屏，采用物理显示器矩形并在销毁时停止助手', async () => {
@@ -1095,7 +1301,7 @@ function mainHarness() {
     requestSingleInstanceLock: () => true, on: events.on.bind(events), whenReady: () => new Promise(() => {}), quit: () => calls.quit++ };
   const desktop = { flushDrafts: async () => flags.ack, flushWindowState: async () => true, restoreWindowState: () => false, setAppearance() {}, openPanel: () => {calls.open++;flags.visible=true;}, dispose: () => calls.dispose++, captureState: () => null,
     isPanelVisible:()=>flags.visible, hidePanel(){calls.hide++;flags.visible=false;}, async beginCapture(){if(flags.capturing)return false;flags.capturing=true;calls.capture++;return true;},
-    broadcast() {}, initTray() {}, setOrb() {}, startSelection() {}, prepareCapture() {} };
+    broadcast() {}, initTray() {}, setOrb() {}, setOrbPreferences() {}, hoverOrb() {}, startSelection() {}, prepareCapture() {} };
   const persistedSettings = { prefs: { orbAction: 'chat' }, text: {}, vision: {} };
   const store = { init: async () => {}, getSettings: async () => structuredClone(persistedSettings),
     updateSession: async () => { calls.writes++; if (!flags.save) throw new Error('测试磁盘写入失败'); }, listSessions: async () => [] };
@@ -1201,26 +1407,87 @@ test('退出仍在等待草稿 ACK 时，重复退出不能绕过保存', async 
   assert.equal(ready.prevented, false);
 });
 
-test('Windows 11 原生边色随纸面切换，置顶光条外不保留系统默认暗边', () => {
+test('Windows 11 主窗跨主题保持透明的 14 DIP 裁切，不显示原生系统边色', () => {
   const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
   for (const mode of ['dark', 'light', 'dark']) {
     desktop.setAppearance({ current: { mode, material: 'solid', accent: '#000000', tint: '#bfc2c8' } });
-    assert.equal(panel.accent, mode === 'dark' ? '#252525' : '#ffffff');
-    assert.equal(panel.accent, panel.background);
-    assert.equal(panel.shape, undefined, '保留系统抗锯齿边界');
+    assert.equal(panel.options.transparent, true);
+    assert.equal(panel.options.thickFrame, false);
+    assert.equal(panel.clipRadius, 14);
+    assert.equal(panel.frameReady(), true);
+    assert.equal(panel.material, 'none');
+    assert.equal(panel.nativeBorder, 'none');
+    assert.equal(panel.background, '#00000000');
+    assert.equal(panel.shape, undefined, '不使用像素裁剪区域');
   }
 });
 
-test('固定窗口的系统边框与光条同色，换色和无描边立即同步，取消固定恢复纸面', () => {
+test('固定与取消固定不改变透明裁切边界，轮廓颜色由页面绘制而非原生系统边框', () => {
   const { desktop, made } = desktopHarness(); desktop.openPanel(); const panel = made[0];
   desktop.setPinned(true);
-  assert.equal(panel.accent, '#dc873d');
-  for (const [pinOutline, expected] of [['blue', '#5095e8'], ['mint', '#4db393'], ['none', '#252525']]) {
-    desktop.setAppearance({ current: { mode: 'dark', material: 'solid' }, pinOutline });
-    assert.equal(panel.accent, expected);
+  for (const [pinOutline, material] of [['blue', 'glass'], ['mint', 'solid'], ['none', 'glass']]) {
+    desktop.setAppearance({ current: { mode: 'dark', material }, pinOutline });
+    assert.equal(panel.nativeBorder, 'none');
+    assert.equal(panel.options.transparent, true);
+    assert.equal(panel.clipRadius, 14);
+    assert.equal(panel.frameReady(), true);
+    assert.equal(panel.backdropEnabled, material === 'glass');
   }
-  desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, pinOutline: 'orange' });
-  assert.equal(panel.accent, '#dc873d');
   desktop.setPinned(false);
-  assert.equal(panel.accent, '#ffffff');
+  assert.equal(panel.nativeBorder, 'none');
+  assert.equal(panel.options.transparent, true);
+  assert.equal(panel.clipRadius, 14);
+});
+
+test('浏览器仍在前台但页面无法确认时，正式跟踪器与桌面联动必须显示对照菜单', async () => {
+  const { createTranslationTracker } = require('../../src/windows/translation-tracker.cjs');
+  let tracker, pageChanged, windowChanged;
+  const source = { handle: '99', pid: 42, browserContextRequired: true, bounds: { x: 100, y: 100, width: 1000, height: 700 } };
+  const { desktop, made, actions } = desktopHarness({ sourceFactory: ({ onChange }) => tracker = createTranslationTracker({ onChange,
+    windowFactory(options) { windowChanged=options.onChange; return { capture: async()=>source, bind:()=>41, clear(){}, dispose(){} }; },
+    browserFactory(options) { pageChanged=options.onChange; return { capture:async()=>({key:1,state:'active',revision:0}),
+      checkpoint:async()=>({state:'active',revision:0}), dispose(){}, invalidate(){} }; },
+  }) });
+  const captured=await tracker.capture(); await tracker.sealCapture(captured);
+  pageChanged({key:1,state:'inactive',reason:'unknown',revision:1});
+  const placement={ sourceBinding:true,source:captured,region:{x:240,y:200,width:200,height:80},displayBounds:{x:0,y:0,width:1440,height:900} };
+  desktop.showTranslation(placement,'overlay'); windowChanged({binding:41,state:'active'});
+  assert.equal(made.find(win=>win.kind==='translation').isVisible(),true,'页面确认失败不能吞掉整个翻译菜单。');
+  assert.equal(made.find(win=>win.kind==='translation-overlay').isVisible(),false,'未确认页面仍禁止显示旧覆盖。');
+  assert.ok(actions.some(([name])=>name==='translation-source-invalid'),'交给正式主进程保留对照并显示来源提示。');
+  windowChanged({binding:41,state:'inactive'});
+  assert.equal(made.find(win=>win.kind==='translation').isVisible(),false,'来源真正离开前台时，未置顶菜单仍隐藏。');
+  pageChanged({key:1,state:'active',reason:'tab',revision:2}); windowChanged({binding:41,state:'active'});
+  assert.equal(made.find(win=>win.kind==='translation').isVisible(),true);
+  assert.equal(made.find(win=>win.kind==='translation-overlay').isVisible(),false,'降级后迟到的页面确认不能复活旧覆盖。');
+  desktop.dispose();
+});
+
+test('翻译菜单独立置顶，跨应用只保留菜单，取消后重新跟随来源', () => {
+  let notify;
+  const { desktop, made, focusOutside } = desktopHarness({ sourceFactory: ({ onChange }) => {
+    notify = onChange; return { capture: async () => null, bind: () => 41, clear() {}, dispose() {} };
+  } });
+  const placement = { sourceBinding: true, source: { handle: '99', pid: 42, bounds: { x: 100, y: 100, width: 1000, height: 700 } },
+    region: { x: 240, y: 200, width: 200, height: 80 }, displayBounds: { x: 0, y: 0, width: 1440, height: 900 } };
+  desktop.showTranslation(placement, 'overlay');
+  const overlay = made.find(win => win.kind === 'translation-overlay'), controls = made.find(win => win.kind === 'translation');
+  notify({ binding: 41, state: 'active' });
+  desktop.setTranslationControlsPinned(true);
+  assert.equal(controls.alwaysOnTop, true);
+  assert.equal(overlay.alwaysOnTop, false, '覆盖层不能获得系统置顶');
+  focusOutside(); notify({ binding: 41, state: 'inactive' });
+  assert.equal(controls.isVisible(), true, '固定菜单在来源失去前台后仍可见');
+  assert.equal(controls.isFocused(), false, '菜单保持可见不能抢焦点');
+  assert.equal(overlay.isVisible(), false, '覆盖层仍随来源隐藏');
+  desktop.showTranslation(placement, 'overlay', { controlsPinned: true, activate: false });
+  assert.equal(overlay.isVisible(), false, '后台翻译完成不能带出覆盖层');
+  desktop.setTranslationControlsPinned(false);
+  assert.equal(controls.alwaysOnTop, false);
+  assert.equal(controls.isVisible(), false);
+  notify({ binding: 41, state: 'active' });
+  assert.equal(controls.isVisible(), true);
+  assert.equal(overlay.isVisible(), true);
+  desktop.hideTranslation(); notify({ binding: 41, state: 'active' });
+  assert.equal(controls.isVisible(), false, '关闭后置顶也不能重新带出旧菜单');
 });

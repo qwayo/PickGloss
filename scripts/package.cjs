@@ -67,7 +67,7 @@ function fingerprint(entries) {
     source.push({ path: relative, sha256: packaged });
   }
   const nativeFiles = [];
-  for (const name of ['ContextProbe.exe', 'WindowAppearance.exe', 'ScreenCapture.exe']) {
+  for (const name of ['ContextProbe.exe', 'WindowAppearance.exe', 'ScreenCapture.exe', 'TranslationSource.exe', 'BrowserContext.exe']) {
     const relative = `resources/native/${name}`, sha256 = await hashFile(path.join(packageDirectory, relative));
     if (sha256 !== await hashFile(path.join(root, 'build', 'native', name))) throw new Error(`原生助手与本轮构建结果不同：${name}`);
     nativeFiles.push({ path: relative, sha256 });

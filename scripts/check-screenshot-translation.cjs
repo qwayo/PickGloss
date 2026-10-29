@@ -111,6 +111,11 @@ const emit = () => { win.webContents.send('pickgloss:state', current); if (overl
 ipcMain.handle('pickgloss:action', async (_event, action, payload) => {
   calls.push({ action, payload });
   if (action === 'bootstrap') return { ok: true, value: current };
+  if (action === 'pin-translation-controls') {
+    if (payload.id !== current.translation?.id || typeof payload.pinned !== 'boolean') return { ok: false, error: '翻译菜单已更新' };
+    current.translation.controlsPinned = payload.pinned;
+    emit(); return { ok: true };
+  }
   if (action === 'set-translation-preferences') {
     if (failLanguageSave) return { ok: false, error: '虚构语言保存失败' };
     current.settings.prefs.screenshotTranslation = translationOptions({ ...current.settings.prefs.screenshotTranslation, ...payload.options, showOriginal: false });
@@ -247,6 +252,13 @@ app.whenReady().then(async () => {
     }
     assert.equal(await evaluate('document.querySelector(".translation-warning").hidden'), true, '正常完成不显示常驻帮助小字');
     await fs.writeFile(path.join(output, '截图翻译-紧凑菜单.png'), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
+    await clickAction('置顶翻译菜单', '翻译菜单置顶完成');
+    assert.equal(current.translation.controlsPinned, true);
+    assert.equal(await evaluate('document.querySelector(".translation-pin").getAttribute("aria-pressed")'), 'true');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector(".translation-pin path")).fill===getComputedStyle(document.querySelector(".translation-pin path")).color'), true, '置顶图标填充');
+    await fs.writeFile(path.join(output, '截图翻译-菜单置顶.png'), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
+    await clickAction('取消翻译菜单置顶', '翻译菜单取消置顶完成');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector(".translation-pin path")).fill'), 'none', '取消后只保留图标描边');
     await clickAction('识图重试', '识图重试操作结束');
     assert.equal(calls.findLast(call => call.action === 'retry-translation').payload.recognitionMode, 'vision', '漏字时可直接使用识图重试');
     assert.equal(await evaluate('document.querySelectorAll(".translation-display button").length'), 2, '主模式只有互斥的覆盖和对照');

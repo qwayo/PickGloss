@@ -25,6 +25,7 @@
     "check:changes": "node scripts/check-changes.cjs",
     "check:merge": "node scripts/check-changes.cjs --interactive --ocr",
     "check:native-edges": "electron scripts/check-native-edges.cjs",
+    "check:translation-source": "electron scripts/check-translation-source.cjs",
     "check:portable": "node scripts/check-portable-suite.cjs"
   },
   "dependencies": {

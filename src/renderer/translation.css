@@ -30,6 +30,10 @@ html[data-material=glass] .translation-controls{background-image:linear-gradient
 .translation-controls .translation-original-preview{touch-action:none;user-select:none}
 .translation-icon-button svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .translation-heading>.translation-icon-button{width:20px;height:20px;min-height:20px;padding:3px}
+/* 翻译菜单置顶只改变图标填充，不采用解释窗口的描边或音效反馈。 */
+.translation-controls .translation-pin[aria-pressed=true]{color:var(--ink);background:transparent}
+.translation-pin[aria-pressed=true] svg path{fill:currentColor}
+.translation-controls .translation-pin[aria-pressed=true]:hover{background:color-mix(in srgb,var(--soft) 80%,transparent)}
 .translation-status,.translation-warning,.translation-error{margin:0;font-size:10.5px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}
 .translation-status{margin-left:auto;text-align:right;min-width:0}
 .translation-status[data-busy=true]{color:var(--accent-ink)}

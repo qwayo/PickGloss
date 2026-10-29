@@ -17,6 +17,30 @@ test('固定光条按物理客户区与四边非客户区补偿，覆盖分数�
   }
 });
 
+test('原生裁切半径决定固定光条的圆角内弧', () => {
+  const metrics = { width: 748, height: 1209, left: 0, top: 0, right: 0, bottom: 0, dpi: 240 };
+  assert.equal(frameCssValues(metrics)['--native-pin-radius'], '4.8px', '未裁切的原生旧路径继续与 8 DIP DWM 圆角对齐');
+  assert.equal(frameCssValues(metrics, 14)['--native-pin-radius'], '10.8px', '14 DIP 磨砂裁切路径扣除 3 DIP 实体光条后仍与外弧同心');
+});
+
+test('面板仅沿用小于一 DIP 的客户区取整补偿，旧尺寸应答不能锁住新视口', () => {
+  for (const dpi of [96, 115, 120, 144, 168, 192, 239, 240, 288, 960]) {
+    for (const width of [300, 748, 803, 860, 2149]) {
+      const css = frameCssValues({ width, height: width + 7, left: 0, top: 0, right: 0, bottom: 0, dpi });
+      for (const axis of ['width', 'height']) {
+        const client = parseFloat(css[`--native-client-${axis}`]);
+        const rounding = parseFloat(css[`--native-client-${axis}-rounding`]);
+        assert.ok(rounding >= 0 && rounding < 1, `${dpi} DPI ${axis} 的补偿必须在取整范围内`);
+        assert.ok(Math.abs(Math.ceil(client) - rounding - client) < .000002, '当前视口必须仍精确覆盖物理客户区');
+        for (const viewport of [300, 322, 860]) assert.ok(viewport - rounding > viewport - 1 && viewport - rounding <= viewport, '旧 ACK 只能保留小数补偿，不能带回旧的绝对尺寸');
+      }
+    }
+  }
+  const fractional = frameCssValues({ width: 803, height: 1209, left: 0, top: 0, right: 0, bottom: 0, dpi: 240 });
+  assert.equal(fractional['--native-client-width'], '321.2px');
+  assert.equal(fractional['--native-client-width-rounding'], '0.8px');
+});
+
 test('无效原生几何不能变成页面样式', () => {
   const valid = { width: 748, height: 1209, left: 3, top: 0, right: 3, bottom: 3, dpi: 240 };
   for (const bad of [null, {}, { ...valid, width: -1 }, { ...valid, dpi: 0 }, { ...valid, left: 0.5 }, { ...valid, top: '0; color:red' }]) assert.equal(frameCssValues(bad), null);
@@ -86,6 +110,34 @@ test('默认解释窗口保持两字段协议，不启用翻译工具条背景�
   h.controller.dispose();
 });
 
+test('旧的磨砂应答不能替新的开关请求提前报告就绪', () => {
+  const h = harness({ clipRadius: 14 });
+  const metrics = { width: 700, height: 280, left: 0, top: 0, right: 0, bottom: 0, dpi: 240,
+    backdrop: { handle: '456', pid: 5678, enabled: true, visible: true, radius: 14 } };
+  h.controller.apply('none');
+  h.child.stdout.emit('data', JSON.stringify({ ...metrics, sequence: 1, backdrop: { ...metrics.backdrop, enabled: false, visible: false } }) + '\n');
+  assert.equal(h.controller.isReady, true);
+  h.controller.setBackdrop(true);
+  assert.equal(h.controller.isReady, false, '切换材质后必须等新请求的应答');
+  assert.equal(h.controller.getBackdropInfo(), null, '切换期间不能把旧材质的取证状态冒充为当前状态');
+  const writeCount = h.writes.length;
+  assert.equal(h.controller.setBackdrop(true), true);
+  assert.equal(h.writes.length, writeCount, '重复应用相同材质不应制造新的待确认序号');
+  h.child.stdout.emit('data', JSON.stringify({ ...metrics, sequence: 1, backdrop: { ...metrics.backdrop, enabled: false, visible: false } }) + '\n');
+  assert.equal(h.controller.isReady, false, '旧序号应答不能恢复上次就绪状态');
+  h.child.stdout.emit('data', JSON.stringify({ ...metrics, sequence: 2 }) + '\n');
+  assert.equal(h.controller.isReady, true);
+  assert.equal(h.controller.getBackdropInfo().enabled, true);
+  h.controller.setBackdrop(false);
+  assert.equal(h.controller.isReady, false, '关闭材质也需等待对应应答');
+  h.child.stdout.emit('data', JSON.stringify({ ...metrics, sequence: 2 }) + '\n');
+  assert.equal(h.controller.isReady, false);
+  h.child.stdout.emit('data', JSON.stringify({ ...metrics, sequence: 3, backdrop: { ...metrics.backdrop, enabled: false, visible: false } }) + '\n');
+  assert.equal(h.controller.isReady, true);
+  assert.equal(h.controller.getBackdropInfo().enabled, false);
+  h.controller.dispose();
+});
+
 test('仅显式圆角背景参数启动独立材质，启停与取证信息绑定当前助手进程', () => {
   const h = harness({ clipRadius: 14 });
   assert.equal(h.controller.isReady, false);
@@ -96,13 +148,15 @@ test('仅显式圆角背景参数启动独立材质，启停与取证信息绑�
     backdrop: { handle: '456', pid: 5678, enabled: false, visible: false, radius: 14 } };
   h.child.stdout.emit('data', JSON.stringify({ ...metrics, sequence: 1 }) + '\n');
   assert.equal(h.controller.isReady, true); assert.equal(h.readyCalls.length, 1);
+  assert.equal(h.values.get('--native-pin-radius'), '10.8px', '材质助手回传的光条内弧跟随 14 DIP 裁切');
   assert.deepEqual(h.controller.getBackdropInfo(), metrics.backdrop);
   h.controller.setBackdrop(true);
+  assert.equal(h.controller.isReady, false, '旧的关闭材质应答不能让新开启请求提前就绪');
   assert.equal(h.writes.at(-1), '2 none 1\n');
   h.child.stdout.emit('data', JSON.stringify({ ...metrics, sequence: 2, backdrop: { ...metrics.backdrop, enabled: true, visible: true } }) + '\n');
   const snapshot = h.controller.getBackdropInfo(); snapshot.visible = false;
   assert.equal(h.controller.getBackdropInfo().visible, true, '调用者不能改写已核验的助手状态');
-  assert.equal(h.readyCalls.length, 1, '重复几何响应不能重复触发就绪');
+  assert.equal(h.readyCalls.length, 2, '首次就绪与新材质请求确认各触发一次；相同状态重复设置不重发');
   h.controller.dispose();
   assert.equal(h.controller.isReady, false); assert.equal(h.controller.getBackdropInfo(), null);
   assert.equal(h.controller.setBackdrop(true), false);
@@ -138,6 +192,12 @@ test('无效圆角参数和伪造的背景归属不能启动或留下材质', ()
     assert.equal(h.errors.length, 1); assert.equal(h.child.killed, true);
     assert.equal(h.controller.getBackdropInfo(), null); assert.equal(h.controller.isReady, false);
   }
+  const h = harness({ clipRadius: 14 });
+  h.controller.setBackdrop(true);
+  h.child.stdout.emit('data', JSON.stringify({ ...metrics, backdrop: { ...metrics.backdrop, enabled: false, visible: false } }) + '\n');
+  assert.equal(h.errors.length, 1, '当前序号的 ACK 也必须确认请求的材质值');
+  assert.equal(h.controller.isReady, false);
+  h.controller.dispose();
 });
 
 test('就绪回调更改材质或关闭助手时，当前响应不能再恢复旧样式', () => {

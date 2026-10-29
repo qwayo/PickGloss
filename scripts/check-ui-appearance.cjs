@@ -9,6 +9,7 @@ const os = require('node:os');
 const { setTimeout: delay } = require('node:timers/promises');
 const { createUiDriver } = require('./ui-driver.cjs');
 const reducedMotionFixture = process.argv.includes('--reduced-motion');
+const fractionalClientFixture = process.argv.includes('--fractional-client');
 const controlledMotion = reducedMotionFixture || process.argv.includes('--normal-motion');
 if (controlledMotion) systemPreferences.getAnimationSettings = () => ({ prefersReducedMotion: reducedMotionFixture, shouldRenderRichAnimation: !reducedMotionFixture });
 const rootIndex = process.argv.indexOf('--app-root');
@@ -141,6 +142,25 @@ app.whenReady().then(async () => {
     }
     observations.push({ 检查: '三轮快速反向', 草稿保留: true, 最终尺寸: win.getBounds() });
     await settledLayout(false);
+    if (fractionalClientFixture) {
+      // 仅在夹具内重放 250% 缩放的 803 物理像素客户区；原生 ACK 仍按正式窗口链路异步发布。
+      const originalExecute = win.webContents.executeJavaScript.bind(win.webContents);
+      win.webContents.executeJavaScript = (source, ...args) => {
+        if (win.getBounds().width === 322 && source.startsWith('for(const [key,value] of Object.entries(')) {
+          source = source.replace(/"--native-client-width":"[^"]*"/, '"--native-client-width":"321.2px"')
+            .replace(/"--native-client-width-rounding":"[^"]*"/, '"--native-client-width-rounding":"0.8px"');
+        }
+        return originalExecute(source, ...args);
+      };
+      win.setBounds({ ...win.getBounds(), width: 322 });
+      await waitFor(() => evaluate('innerWidth===322'), '小数客户区视口');
+      await settledLayout(false);
+      await evaluate(`document.documentElement.style.setProperty('--native-client-width','321.2px');document.documentElement.style.setProperty('--native-client-width-rounding','0.8px')`);
+      const geometry = await evaluate(`({ viewport:innerWidth, panel:document.querySelector('.panel').getBoundingClientRect().width })`);
+      assert.equal(geometry.viewport, 322);
+      assert.ok(Math.abs(geometry.panel - 321.2) < .02, JSON.stringify(geometry));
+      observations.push({ 检查: '小数物理客户区321.2与322视口', 几何: geometry });
+    }
     await evaluate(`(()=>{window.__anchorTrace=[];const record=kind=>{const scroller=document.querySelector('[data-scroll="body"]'),edge=scroller?.getBoundingClientRect().top,block=[...document.querySelectorAll('.message-content > *')].find(node=>node.getBoundingClientRect().bottom>edge+12);window.__anchorTrace.push({kind,width:innerWidth,scroll:scroller?.scrollTop,owner:scroller?.className,text:block?.textContent,offset:block?.getBoundingClientRect().top-edge,time:performance.now()});if(window.__anchorTrace.length>80)window.__anchorTrace.shift();};document.addEventListener('scroll',()=>record('scroll'),true);window.addEventListener('resize',()=>record('resize'));window.pickgloss.onState(value=>record('state:'+value.status?.windowTransitioning));record('before-scroll');})()`);
     await evaluate(`(()=>{const scroller=document.querySelector('[data-scroll="body"]'),block=[...document.querySelectorAll('.message-content > h3')][3];scroller.scrollTop+=block.getBoundingClientRect().top-scroller.getBoundingClientRect().top-18;})()`);
     await delay(35);
@@ -159,7 +179,7 @@ app.whenReady().then(async () => {
     const anchorEvidence = JSON.stringify({ beforeAnchor, afterAnchor, bounds: win.getBounds(), trace: await evaluate('window.__anchorTrace') });
     assert.equal(afterAnchor.text, beforeAnchor.text, anchorEvidence); assert.ok(Math.abs(afterAnchor.offset - beforeAnchor.offset) <= 3, anchorEvidence);
     observations.push({ 检查: '跨布局保持同一阅读段落', 之前: beforeAnchor, 之后: afterAnchor });
-    await click('.layout-toggle'); await waitFor(async () => !fixture.status.windowTransitioning && win.getBounds().width <= 302, '阅读收回终态');
+    await click('.layout-toggle'); await waitFor(async () => !fixture.status.windowTransitioning && Math.abs(win.getBounds().width - (fractionalClientFixture ? 322 : 300)) <= 2, '阅读收回终态');
     await waitFor(()=>evaluate(`!document.querySelector('.panel').classList.contains('reading-layout')&&document.querySelector('[data-scroll="body"]').classList.contains('explain-body')`),'渲染器小窗布局');
     await settledLayout(false);
     const returnedAnchor = await evaluate(`(()=>{const scroller=document.querySelector('[data-scroll="body"]'),nodes=[...document.querySelectorAll('.message-content > *')],edge=scroller.getBoundingClientRect().top;const block=nodes.find(node=>node.getBoundingClientRect().bottom>edge+12);return {text:block.textContent,offset:block.getBoundingClientRect().top-edge};})()`);

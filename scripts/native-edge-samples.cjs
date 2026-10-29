@@ -1,6 +1,21 @@
 'use strict';
-// 从 DWM 可见边界采样，包含独立系统边色；只跳过圆角和窗外阴影。
-function sampleEdges({ width, height, pixel, scale, pinned, nativeBorder, client = { left: 0, top: 0, width, height } }) {
+// 检查 14 DIP 圆角应当露出自有背景的位置，区分系统默认 8 DIP 裁切。
+function sampleCornerFootprint({ width, height, pixel, scale, radiusDip, background, probeDip = 3.5, tolerance = 10 }) {
+  if (!Number.isFinite(radiusDip) || radiusDip <= 0 || !Array.isArray(background) || background.length !== 3) return null;
+  const probe = Math.round(probeDip * scale);
+  const distance = (a, b) => Math.max(...a.map((value, index) => Math.abs(value - b[index])));
+  const samples = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]].map(([x, y], index) => {
+    const actualX = x === 0 ? probe : x - probe, actualY = y === 0 ? probe : y - probe;
+    const actual = pixel(actualX, actualY), delta = distance(actual, background);
+    return { corner: ['左上', '右上', '左下', '右下'][index], x: actualX, y: actualY, actual, background, delta };
+  });
+  const probeIsOutside = (radiusDip - probeDip) * Math.SQRT2 > radiusDip;
+  return { passed: probeIsOutside && samples.every(sample => sample.delta <= tolerance), radiusDip, scale, probeDip, probeIsOutside, tolerance, samples };
+}
+
+// 从 DWM 可见边界采样，包含独立系统边色与外圆角；只跳过窗外阴影。
+function sampleEdges({ width, height, pixel, scale, pinned, nativeBorder, client = { left: 0, top: 0, width, height },
+  cornerRadiusDip, cornerBackground, maxOuterDelta = 8 }) {
   const distance = (a, b) => Math.max(...a.map((value, i) => Math.abs(value - b[i])));
   const points = (fraction, depth, bounds = { left: 0, top: 0, width, height }) => [
     ['左缘', bounds.left + depth, bounds.top + Math.floor(bounds.height * fraction)],
@@ -30,8 +45,10 @@ function sampleEdges({ width, height, pixel, scale, pinned, nativeBorder, client
         outerSamples.push({ edge, fraction, actual, reference, delta: distance(actual, reference) });
       }
     }
-    return { passed: samples.every(sample => sample.delta <= 6) && outerSamples.every(sample => sample.delta <= 8),
-      method: '包含独立系统边色；原生设置成功应答为 NONE 时检查客户区表面，否则检查完整 DWM 外缘。顶部始终覆盖系统实体黑边；外侧 1 物理像素与内侧表面最大通道差不超过 8', samples, outerSamples };
+    const cornerFootprint = sampleCornerFootprint({ width, height, pixel, scale, radiusDip: cornerRadiusDip, background: cornerBackground });
+    const outerBand = { passed: outerSamples.every(sample => sample.delta <= maxOuterDelta), maxDelta: Math.max(...outerSamples.map(sample => sample.delta)), maxDeltaAllowed: maxOuterDelta };
+    return { passed: samples.every(sample => sample.delta <= 6) && outerBand.passed && (cornerFootprint?.passed ?? true),
+      method: '包含独立系统边色；检查 14 DIP 轮廓内的实屏客户区边缘、四个外圆角及 NONE 以外的系统边色。', samples, outerSamples, outerBand, cornerFootprint };
   }
   const straightEdges = [], expectedBandWidth = Math.round(3 * scale);
   for (const fraction of [.3, .5, .7]) {
@@ -49,10 +66,13 @@ function sampleEdges({ width, height, pixel, scale, pinned, nativeBorder, client
     }
   }
   const widths = straightEdges.map(edge => edge.width), widthSpread = Math.max(...widths) - Math.min(...widths);
+  const measuredStrokeColors = straightEdges.filter(edge => edge.strokeColors.length > 1).map(edge => edge.strokeColors.at(-1));
+  const strokeCandidates = measuredStrokeColors.length ? measuredStrokeColors : straightEdges.map(edge => edge.strokeColors.at(-1));
+  const cornerStrokeColor = [0, 1, 2].map(channel => Math.round(strokeCandidates.reduce((sum, color) => sum + color[channel], 0) / strokeCandidates.length));
   // 贴合的内发光从实体光条后立即衰减；先退回纸面、再突然变暖表示二者之间留缝。
   const glowSamples = straightEdges.map(({ edge, fraction, width: band, strokeColors, pixels }) => {
-    // 只取紧邻光条的 3 DIP，避免更内侧的顶部固定按钮背景干扰柔光衰减。
-    const profile = pixels.slice(band, band + Math.max(4, Math.round(3 * scale)))
+    // 只采样实体光条内侧紧邻的 2 DIP，避免采样窗延伸到顶部固定按钮的填充背景。
+    const profile = pixels.slice(band, band + Math.max(4, Math.round(2 * scale)))
       .map((rgb, offset) => ({ depth: band + offset, rgb, fromStroke: Math.min(...strokeColors.map(color => distance(rgb, color))) }));
     let furthest = 0, rebound = 0;
     for (const sample of profile) { rebound = Math.max(rebound, furthest - sample.fromStroke); furthest = Math.max(furthest, sample.fromStroke); }
@@ -60,7 +80,7 @@ function sampleEdges({ width, height, pixel, scale, pinned, nativeBorder, client
     return { edge, fraction, rebound, decay, passed: profile.length >= 4 && rebound <= 6 && decay >= 10, profile };
   });
   const glowContact = { passed: glowSamples.every(sample => sample.passed), method: '实体光条后的首个像素立即接上柔光，再向内衰减；不得先回到纸面后再起光。最大反向跳变 6，衰减幅度至少 10 个通道值', samples: glowSamples };
-  const radius = 8 * scale, corners = [];
+  const radius = (cornerRadiusDip ?? 8) * scale, corners = [];
   for (const [flipX, flipY] of [[false, false], [true, false], [false, true], [true, true]]) {
     const samples = [];
     for (let y = 0; y < Math.ceil(radius); y++) for (let x = 0; x < Math.ceil(radius); x++) {
@@ -68,11 +88,13 @@ function sampleEdges({ width, height, pixel, scale, pinned, nativeBorder, client
       if (r < radius - 2 * scale || r > radius - .8 * scale) continue;
       const px = flipX ? width - 1 - x : x, py = flipY ? height - 1 - y : y;
       const rgb = pixel(px, py);
-      samples.push({ x: px, y: py, rgb, dark: rgb[0] < 200 });
+      // 14 DIP 的圆弧有一列抗锯齿像素会与纸面混色；按实测直边色判断它是否仍属于描边。
+      samples.push({ x: px, y: py, rgb, strokeDelta: distance(rgb, cornerStrokeColor), dark: distance(rgb, cornerStrokeColor) > 32 });
     }
     corners.push({ corner: `${flipY ? '下' : '上'}${flipX ? '右' : '左'}`, count: samples.length, dark: samples.filter(sample => sample.dark).length, samples });
   }
-  return { passed: corners.every(corner => corner.count > 0 && corner.dark === 0) && widths.every(value => Math.abs(value - expectedBandWidth) <= 1) && widthSpread <= 1 && glowContact.passed,
-    method: '默认暖橙光条同时检查四角暗纹、约 3 DIP 实体厚度与内发光贴合；使用相邻实体色校准原生和页面色差，四边厚度最大差不超过 1 物理像素', straightEdges, expectedBandWidth, widthSpread, glowContact, corners };
+  const cornerFootprint = sampleCornerFootprint({ width, height, pixel, scale, radiusDip: cornerRadiusDip, background: cornerBackground });
+  return { passed: corners.every(corner => corner.count > 0 && corner.dark === 0) && widths.every(value => Math.abs(value - expectedBandWidth) <= 1) && widthSpread <= 1 && glowContact.passed && (cornerFootprint?.passed ?? true),
+    method: '默认暖橙光条同时检查四角描边颜色、约 3 DIP 实体厚度、内发光贴合与 14 DIP 外圆角；按实测直边描边色容纳圆弧抗锯齿', straightEdges, expectedBandWidth, widthSpread, glowContact, corners, cornerStrokeColor, cornerStrokeTolerance: 32, cornerFootprint };
 }
-module.exports = { sampleEdges };
+module.exports = { sampleCornerFootprint, sampleEdges };

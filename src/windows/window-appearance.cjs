@@ -3,16 +3,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const FRAME_CSS_KEYS = ['--native-client-width', '--native-client-height', '--native-pin-band', '--native-pin-radius',
+  '--native-client-width-rounding', '--native-client-height-rounding',
   '--native-pin-left', '--native-pin-top', '--native-pin-right', '--native-pin-bottom', '--native-border-suppressed'];
 
 // 按真实物理客户区定位光条；Electron 的整数 DIP 视口可能比客户区多出一两个物理像素。
-function frameCssValues(metrics) {
+function frameCssValues(metrics, clipRadius = 8) {
   if (!metrics || !['width', 'height'].every(key => Number.isInteger(metrics[key]) && metrics[key] > 0 && metrics[key] <= 65536) ||
       !['left', 'top', 'right', 'bottom'].every(key => Number.isInteger(metrics[key]) && metrics[key] >= 0 && metrics[key] <= 128) ||
       !Number.isInteger(metrics.dpi) || metrics.dpi < 72 || metrics.dpi > 960) return null;
   const scale = metrics.dpi / 96, band = Math.round(3 * scale);
-  const css = { '--native-client-width': metrics.width / scale, '--native-client-height': metrics.height / scale,
-    '--native-pin-band': band / scale, '--native-pin-radius': Math.max(0, 8 - band / scale) };
+  const css = { '--native-client-width': metrics.width * 96 / metrics.dpi, '--native-client-height': metrics.height * 96 / metrics.dpi,
+    '--native-pin-band': band / scale, '--native-pin-radius': Math.max(0, clipRadius - band / scale) };
+  // 视口向上取整，面板只补偿不足一个 DIP 的余量；异步 ACK 的绝对旧尺寸不能参与当前排版。
+  for (const axis of ['width', 'height']) {
+    const client = css[`--native-client-${axis}`];
+    css[`--native-client-${axis}-rounding`] = Math.ceil(client) - client;
+  }
   for (const edge of ['left', 'top', 'right', 'bottom']) css[`--native-pin-${edge}`] = Math.max(0, band - metrics[edge]) / scale;
   return { ...Object.fromEntries(Object.entries(css).map(([key, value]) => [key, `${Number(value.toFixed(6))}px`])),
     '--native-border-suppressed': metrics.suppressed === true ? '1' : '0' };
@@ -28,7 +34,7 @@ function createWindowAppearance(win, { helperPath, clipRadius, onReady = () => {
   if (typeof win.getNativeWindowHandle !== 'function' || !exists(helper)) return null;
   const bytes = win.getNativeWindowHandle(), handle = String(bytes.length === 8 ? bytes.readBigUInt64LE() : bytes.readUInt32LE());
   const contents = win.webContents;
-  let child, disposed = false, timer = null, sequence = 0, border = 'none', output = '', previousCss = '';
+  let child, disposed = false, timer = null, sequence = 0, border = 'none', borderApplied = false, output = '', previousCss = '';
   let backdropEnabled = false, backdrop = null, ready = false, responseTimer = null;
   const events = clipped ? ['focus', 'blur', 'show', 'hide', 'resize', 'move', 'minimize', 'restore'] : ['focus', 'blur', 'show', 'resize'];
   const hooks = [0x02e0, 0x031a, 0x031e, 0x0320];
@@ -55,6 +61,7 @@ function createWindowAppearance(win, { helperPath, clipRadius, onReady = () => {
   function fail(error) { if (disposed) return; dispose(); onError(error); }
   function send() {
     if (disposed || win.isDestroyed()) return;
+    borderApplied = true;
     if (clipped && !responseTimer) {
       responseTimer = setTimeout(() => fail(new Error('窗口外观助手未及时应答。')), 5000);
       responseTimer.unref?.();
@@ -76,13 +83,13 @@ function createWindowAppearance(win, { helperPath, clipRadius, onReady = () => {
       let metrics;
       try { metrics = JSON.parse(line); } catch { fail(new Error('窗口外观助手返回了无效几何。')); return; }
       if (metrics.sequence !== sequence) continue;
-      const values = frameCssValues(metrics), serialized = JSON.stringify(values);
+      const values = frameCssValues(metrics, clipped ? clipRadius : undefined), serialized = JSON.stringify(values);
       if (!values) { fail(new Error('窗口外观助手返回了无效几何。')); return; }
       if (clipped) {
         const value = metrics.backdrop;
         if (!value || typeof value.handle !== 'string' || !/^[1-9]\d{0,19}$/.test(value.handle) || BigInt(value.handle) > 0xffffffffffffffffn ||
             !Number.isInteger(value.pid) || value.pid < 1 || value.pid > 0xffffffff || (child.pid !== undefined && value.pid !== child.pid) ||
-            typeof value.enabled !== 'boolean' || typeof value.visible !== 'boolean' || value.radius !== clipRadius) {
+            typeof value.enabled !== 'boolean' || typeof value.visible !== 'boolean' || value.enabled !== backdropEnabled || value.radius !== clipRadius) {
           fail(new Error('窗口外观助手返回了无效背景窗口。')); return;
         }
         backdrop = { handle: value.handle, pid: value.pid, enabled: value.enabled, visible: value.visible, radius: value.radius };
@@ -105,9 +112,22 @@ function createWindowAppearance(win, { helperPath, clipRadius, onReady = () => {
   contents.on('did-finish-load', loaded);
   for (const message of hooks) win.hookWindowMessage?.(message, refresh);
   return {
-    apply(value) { if (disposed || (value !== 'none' && !/^#[a-f\d]{6}$/i.test(value))) return false; border = value.replace('#', ''); send(); return true; },
+    apply(value) {
+      if (disposed || (value !== 'none' && !/^#[a-f\d]{6}$/i.test(value))) return false;
+      const next = value.replace('#', '');
+      if (borderApplied && border === next) return true;
+      border = next; send(); return true;
+    },
     // 背景窗只提供实时模糊；既有 CSS 决定深浅色。减少透明、高对比与故障回退由调用者关闭背景并显示实色。
-    setBackdrop(value) { if (!clipped || disposed || typeof value !== 'boolean') return false; backdropEnabled = value; send(); return true; },
+    setBackdrop(value) {
+      if (!clipped || disposed || typeof value !== 'boolean') return false;
+      if (backdropEnabled === value) return true;
+      backdropEnabled = value;
+      // 上一次材质状态的应答不能代表本次请求已完成原生合成。
+      ready = false;
+      backdrop = null;
+      send(); return true;
+    },
     get isReady() { return ready && !disposed; },
     getBackdropInfo() { return backdrop && !disposed ? { ...backdrop } : null; },
     dispose,

@@ -19,6 +19,7 @@ function renderer(invoke = async () => ({ ok: true })) {
     },
     location: { search: '?window=panel' },
     createAppearanceUI: () => ({ receive() {}, mount() {}, dispose() {} }),
+    mountPanelResize: () => ({ dispose() {} }),
     createShortcutsUI: () => ({ receive() {}, mount() {}, dispose() {}, endRecording: async () => {} }),
     contextParts: source => [{ text: source, selected: false }],
     setTimeout: () => 1, clearTimeout() {},

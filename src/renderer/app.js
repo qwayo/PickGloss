@@ -4,11 +4,15 @@ import { createShortcutsUI } from './shortcuts.js';
 import { contextParts } from './context-highlight.mjs';
 import { createTranslationUI, languageSelect } from './translation.js';
 import { createSettingsAutosave } from './settings-autosave.js';
+import { mountOrb } from './orb.js';
+import { mountPanelResize } from './panel-resize.js';
 
 const root = document.getElementById('app');
+let orbUI = null;
 let captureTranslationMode = 'explain', captureTranslationOptions = null, captureLanguageSaves = 0;
 let captureLanguageDraft = false, captureLanguageRevision = 0;
 const surface = new URLSearchParams(location.search).get('window') || 'panel';
+if (surface === 'panel') mountPanelResize({ root: document.body, invoke: payload => window.pickgloss.invoke('panel-resize', payload) });
 const translationUI = ['translation', 'translation-overlay'].includes(surface)
   ? createTranslationUI({ root, invoke: (...args) => call(...args), role: surface === 'translation-overlay' ? 'overlay' : 'controls' })
   : null;
@@ -289,7 +293,7 @@ const iconPaths = {
   trash: ['M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7'],
   retry: ['M20 10a8 8 0 1 0-1.8 7.5M20 4v6h-6'],
   chevron: ['m9 5 7 7-7 7'],
-  copy: ['M9 9h12v12H9ZM15 9V3H3v12h6'],
+  copy: ['M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2ZM15 9V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h4'],
   keyboard: ['M3 6h18v13H3ZM6 9h1m3 0h1m3 0h1m3 0h1M6 12h1m3 0h1m3 0h1m3 0h1M8 16h8'],
   pause: ['M8 4v16M16 4v16'],
   orb: ['M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M12 7v10M7 12h10'],
@@ -764,7 +768,7 @@ function render() {
 function header(view) {
   const back = ['settings', 'history', 'context'].includes(view);
   return el('header', { class: 'panel-bar' },
-    back ? button('返回', () => navigate(view === 'context' ? 'explain' : lastContentView), { icon: 'back', iconOnly: true, class: 'icon-button', busy: 'navigate' }) : brand({ small: true, tile: true }),
+    back ? button('返回', () => navigate(view === 'context' ? 'explain' : lastContentView), { icon: 'back', iconOnly: true, class: 'icon-button', busy: 'navigate' }) : brand({ small: true }),
     el('span', { class: 'name' }, 'PickGloss'),
     el('span', { class: 'spacer' }),
     button('更多操作', () => call('menu', { source: 'panel' }), { icon: 'menu', iconOnly: true, class: 'icon-button', busy: 'menu' }),
@@ -1690,6 +1694,8 @@ function generalSettingsView(body) {
   const desktop = group('桌面入口');
   toggle(desktop, 'showOrb', '显示悬浮球', '桌面上的快捷入口', prefs.showOrb !== false);
   select(desktop, 'orbAction', '悬浮球左键功能', '右键始终打开菜单', prefs.orbAction || 'chat', [['chat', '最新会话'], ['capture', '截图框选']]);
+  toggle(desktop, 'orbQuietFade', '静默时淡化悬浮球', '15 秒未操作后保持 50% 可见，移入恢复', prefs.orbQuietFade !== false);
+  toggle(desktop, 'orbEdgeCollapse', '悬浮球贴边收起', '靠近边缘收成细条，悬停展开', prefs.orbEdgeCollapse !== false);
   toggle(desktop, 'selectionEnabled', '启用划词入口', '选中文字后显示解释入口', prefs.selectionEnabled !== false);
   const capture = group('截图与翻译');
   select(capture, 'captureDefaultMode', '截图默认模式', '用于悬浮球和截图快捷键，松开即处理', prefs.captureDefaultMode || 'explain', [['explain', '识图'], ['translate', '翻译']]);
@@ -1975,55 +1981,13 @@ function renderHistoryList(list, count = root.querySelector('.history-count'), s
 }
 
 function renderOrb() {
-  // 状态推送不替换正在捕获指针的球，拖动中也能接收主题变化。
-  const label = state.settings?.prefs?.orbAction === 'capture' ? '截图框选；右键打开菜单，拖动移动悬浮球' : '打开或关闭最新会话；右键打开菜单，拖动移动悬浮球';
-  const existing = root.querySelector('.orb');
-  if (existing) { existing.title=label;existing.setAttribute('aria-label',label);return; }
-  let gesture = null, suppressClick = false, moveFrame = null, latest = null;
-  let dragWork = Promise.resolve();
-  const send = payload => { dragWork = dragWork.then(() => window.pickgloss.invoke('orb-drag', payload)).catch(() => ({ ok: false })); return dragWork; };
-  const orb = button(label, () => {
-    if (suppressClick) { suppressClick = false; return; }
-    void call('orb-activate', {}, { render: false, lock: false });
-  }, { class: 'orb', iconOnly: true });
-  orb.append(brand());
-  orb.addEventListener('contextmenu', event => {
-    event.preventDefault();
-    void call('menu', { source: 'orb' }, { render: false });
+  if (!orbUI) orbUI = mountOrb({ root, createBrand: brand,
+    onActivate: () => void call('orb-activate', {}, { render: false, lock: false }),
+    onMenu: () => void call('menu', { source: 'orb' }, { render: false }),
+    onDrag: payload => window.pickgloss.invoke('orb-drag', payload),
+    onHover: active => void window.pickgloss.invoke('orb-hover', { active }),
   });
-  orb.addEventListener('pointerdown', event => {
-    if (event.button !== 0) return;
-    suppressClick = false;
-    gesture = { id: event.pointerId, x: event.screenX, y: event.screenY, dragging: false };
-    orb.setPointerCapture(event.pointerId);
-  });
-  orb.addEventListener('pointermove', event => {
-    if (!gesture || event.pointerId !== gesture.id) return;
-    if (!gesture.dragging && Math.hypot(event.screenX - gesture.x, event.screenY - gesture.y) >= 5) {
-      gesture.dragging = true; suppressClick = true; orb.classList.add('dragging');
-      void send({ phase: 'start', x: gesture.x, y: gesture.y });
-    }
-    if (!gesture.dragging) return;
-    orb.style.setProperty('--drag-tilt', `${Math.max(-9, Math.min(9, (event.screenX - gesture.x) * .1))}deg`);
-    latest = { phase: 'move', x: event.screenX, y: event.screenY };
-    if (moveFrame === null) moveFrame = requestAnimationFrame(() => { moveFrame = null; void send(latest); });
-  });
-  const finish = event => {
-    if (!gesture || event.pointerId !== gesture.id) return;
-    const current = gesture, dragging = current.dragging; gesture = null;
-    if (moveFrame !== null) { cancelAnimationFrame(moveFrame); moveFrame = null; }
-    orb.classList.remove('dragging');
-    orb.style.removeProperty('--drag-tilt');
-    if (dragging) {
-      const point = event.type === 'pointerup' ? event : latest || { screenX: current.x, screenY: current.y };
-      void send({ phase: 'end', x: point.screenX ?? point.x, y: point.screenY ?? point.y });
-      setTimeout(() => { suppressClick = false; }, 0);
-    }
-    if (orb.hasPointerCapture(event.pointerId)) orb.releasePointerCapture(event.pointerId);
-  };
-  orb.addEventListener('pointerup', finish); orb.addEventListener('pointercancel', finish);
-  orb.addEventListener('lostpointercapture', event => { if (gesture) finish(event); });
-  root.replaceChildren(el('main', { class: 'orb-surface' }, orb));
+  orbUI.update({ ...state.status?.orbState, action: state.settings?.prefs?.orbAction, reducedMotion: state.status?.reducedMotion });
 }
 
 function renderSelection() {

@@ -12,11 +12,13 @@ const { defaultAppearance, defaultWindowGeometry } = require('../../src/core/app
 async function harness(t, timers = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pickgloss-appearance-actions-'));
   const store = createStore({ directory }); await store.init();
-  const calls = { orb: [], selection: [], appearance: [], broadcasts: 0, quit: 0, disposed: 0, restored: null };
+  const calls = { orb: [], orbPreferences: [], hover: [], selection: [], appearance: [], broadcasts: 0, quit: 0, disposed: 0, restored: null };
   let options, handler;
   const desktop = {
     captureState: () => null, broadcast: () => calls.broadcasts++, openPanel() {}, initTray() {}, prepareCapture() {},
     setOrb: value => calls.orb.push(value), startSelection: value => calls.selection.push(value),
+    setOrbPreferences: prefs => calls.orbPreferences.push({ quietFadeEnabled: prefs.orbQuietFade !== false, edgeCollapseEnabled: prefs.orbEdgeCollapse !== false }),
+    hoverOrb: active => calls.hover.push(active),
     setAppearance: value => calls.appearance.push(value), restoreWindowState: geometry => { calls.restored = geometry; return geometry.wide; },
     flushDrafts: async () => true, flushWindowState: async () => true, dispose: () => calls.disposed++,
     authorize: (event, action) => action !== 'orb-drag' || event.orb === true,
@@ -55,6 +57,22 @@ test('外观独立保存留在外观页，不重新启停悬浮球或划词监�
   await app.handle('save-settings', { text: { model: '测试模型' }, prefs: { selectionEnabled: false } });
   assert.equal((await app.state()).view, 'paste'); assert.deepEqual(app.calls.selection, [true, false]);
   assert.equal('apiKey' in (await app.state()).settings.text, false);
+});
+
+test('悬浮球静默淡化和贴边设置默认开启，并按保存值下发到控制器', async t => {
+  const app = await harness(t);
+  assert.deepEqual(app.calls.orbPreferences.at(-1), { quietFadeEnabled: true, edgeCollapseEnabled: true });
+  await app.handle('save-settings', { prefs: { orbQuietFade: false, orbEdgeCollapse: true } });
+  assert.deepEqual(app.calls.orbPreferences.at(-1), { quietFadeEnabled: false, edgeCollapseEnabled: true });
+  await app.handle('save-settings', { prefs: { orbQuietFade: true, orbEdgeCollapse: false } });
+  assert.deepEqual(app.calls.orbPreferences.at(-1), { quietFadeEnabled: true, edgeCollapseEnabled: false });
+});
+
+test('悬浮球进入和离开通过新增 hoverOrb 接口通知控制器', async t => {
+  const app = await harness(t);
+  await app.handle('orb-hover', { active: true });
+  await app.handle('orb-hover', { active: false });
+  assert.deepEqual(app.calls.hover, [true, false]);
 });
 
 test('主进程恢复窗口状态，持久回调保留随后保存的外观并同步原生阅读状态', async t => {
@@ -116,13 +134,14 @@ test('退出前已有待广播计时器，任一保存失败取消退出后仍�
   });
 });
 
-test('预加载只将外观入口与悬浮球拖动加入既有白名单', async () => {
+test('预加载仅开放外观与悬浮球拖动、悬停接口', async () => {
   const calls = []; let bridge;
   const context = { require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } },
     ipcRenderer: { invoke: (...args) => { calls.push(args); return Promise.resolve({ ok: true }); } } }) };
   vm.createContext(context);
   vm.runInContext(await fs.readFile(path.join(__dirname, '../../src/preload.cjs'), 'utf8'), context);
   await bridge.invoke('open-appearance'); await bridge.invoke('orb-drag', { phase: 'start', x: 0, y: 0 });
-  assert.equal(calls.length, 2); assert.equal(calls[0][1], 'open-appearance'); assert.equal(calls[1][1], 'orb-drag');
-  assert.equal((await bridge.invoke('任意未授权动作')).ok, false); assert.equal(calls.length, 2);
+  await bridge.invoke('orb-hover', { active: true });
+  assert.equal(calls.length, 3); assert.equal(calls[0][1], 'open-appearance'); assert.equal(calls[1][1], 'orb-drag'); assert.equal(calls[2][1], 'orb-hover');
+  assert.equal((await bridge.invoke('任意未授权动作')).ok, false); assert.equal(calls.length, 3);
 });
