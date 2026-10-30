@@ -1,0 +1,170 @@
+name: 发布
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '确认发布版本（不含 v，例如 0.1.16）'
+        required: true
+        type: string
+      commit:
+        description: '要发布的 main 提交 SHA（留空取最新 main）'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: 构建并验证候选包
+    runs-on: windows-latest
+    timeout-minutes: 35
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - name: 检出选定提交
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.commit || 'main' }}
+          fetch-depth: 0
+      - name: 确认发布来源
+        id: source
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') { throw '发布工作流必须从 main 分支手动触发。' }
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw '选定提交尚未包含在 main 中。' }
+          $commit = (git rev-parse HEAD).Trim()
+          "commit=$commit" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Output "发布来源：$commit"
+      - name: 校验版本与发布说明
+        run: node scripts/release.cjs validate --version="$env:RELEASE_VERSION"
+      - name: 拒绝已有标签或 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release.cjs assert-unpublished --version="$env:RELEASE_VERSION"
+      - name: 安装 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 脚本编码检查
+        run: npm run check:script-encoding
+      - name: 原生助手编译检查
+        run: npm run build:native
+      - name: 安装 Electron 运行时
+        run: npx --no-install install-electron
+      - name: 公开内容检查
+        run: npm run check:publication
+      - name: 自动化测试
+        run: npm test -- --test-concurrency=1
+      - name: 执行全部隐藏界面与功能专项
+        run: npm run check:changes -- --ui-all --output-dir output/verification/release
+      - name: 构建并验证冻结便携包
+        run: npm run package
+      - name: 冻结候选发布资产
+        env:
+          RELEASE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: node scripts/release.cjs stage --version="$env:RELEASE_VERSION" --commit="$env:RELEASE_COMMIT" --dist=dist --output=output/release
+      - name: 保留候选包 14 天
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: PickGloss-${{ inputs.version }}-candidate
+          path: output/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: 审批并公开发布
+    needs: candidate
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_COMMIT: ${{ needs.candidate.outputs.commit }}
+    steps:
+      - name: 检出选定提交
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.candidate.outputs.commit }}
+          fetch-depth: 0
+      - name: 安装 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+      - name: 取回同一个候选包
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: PickGloss-${{ inputs.version }}-candidate
+          path: output/release
+      - name: 复核冻结资产
+        run: node scripts/release.cjs verify-staged --version="$env:RELEASE_VERSION" --commit="$env:RELEASE_COMMIT" --directory=output/release
+      - name: 复核当前 main 仍包含候选提交
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') { throw '发布工作流必须从 main 分支手动触发。' }
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git merge-base --is-ancestor $env:RELEASE_COMMIT FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw '候选提交已不再包含在当前 main 中。' }
+          Write-Output "当前 main 仍包含候选提交：$env:RELEASE_COMMIT"
+      - name: 发布前再次拒绝版本碰撞
+        run: node scripts/release.cjs assert-unpublished --version="$env:RELEASE_VERSION"
+      - name: 创建标签与正式 Release
+        run: node scripts/release.cjs create-release --version="$env:RELEASE_VERSION" --commit="$env:RELEASE_COMMIT" --directory=output/release
+      - name: 记录公开 Release 元数据
+        shell: pwsh
+        run: |
+          $release = Get-Content -LiteralPath 'output/release/release.json' -Raw | ConvertFrom-Json
+          & gh release view $release.tag --repo $env:GITHUB_REPOSITORY `
+            --json tagName,name,isDraft,isPrerelease,assets,url | Out-File -LiteralPath 'output/release-metadata.json' -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 核验标签指向
+        run: node scripts/release.cjs verify-tag --version="$env:RELEASE_VERSION" --commit="$env:RELEASE_COMMIT"
+      - name: 重新下载公开资产
+        shell: pwsh
+        run: |
+          $release = Get-Content -LiteralPath 'output/release/release.json' -Raw | ConvertFrom-Json
+          & gh release download $release.tag --repo $env:GITHUB_REPOSITORY --dir 'output/published' `
+            --pattern $release.archive --pattern 'release-checksum.json' --pattern 'SHA256SUMS.txt'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 核验公开资产与候选包一致
+        run: node scripts/release.cjs verify-published --version="$env:RELEASE_VERSION" --commit="$env:RELEASE_COMMIT" --directory=output/release --published=output/published --metadata=output/release-metadata.json
+      - name: 记录发布成功
+        if: success()
+        shell: pwsh
+        run: |
+          $release = Get-Content -LiteralPath 'output/release/release.json' -Raw | ConvertFrom-Json
+          $metadata = Get-Content -LiteralPath 'output/release-metadata.json' -Raw | ConvertFrom-Json
+          @"
+          ## 发布完成
+
+          - 版本：$($release.tag)
+          - 提交：$env:RELEASE_COMMIT
+          - Release：$($metadata.url)
+          - 公开资产已重新下载并与候选包逐字节核对。
+          "@ | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+      - name: 记录发布或核验失败
+        if: failure()
+        shell: pwsh
+        run: |
+          @'
+          ## 发布需要人工处理
+
+          发布或发布后核验失败。请检查标签、Release 和资产实际状态；不要自动删除、覆盖或重发相同版本。
+          '@ | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

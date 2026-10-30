@@ -10,11 +10,11 @@
   <p>
     在阅读现场选中文字或框选截图，立即获得解释，继续追问，并在本地留下可回访的阅读笔记。
     <br />
-    Windows x64 · Electron · 本地优先 · 0.1.12
+    Windows x64 · Electron · 本地优先
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Electron-44.7.2-1f2937?style=for-the-badge&logo=electron&logoColor=9FEAF9" alt="Electron 44.7.2">
+    <img src="https://img.shields.io/badge/Electron-45.0.0-1f2937?style=for-the-badge&logo=electron&logoColor=9FEAF9" alt="Electron 45.0.0">
     <img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js">
     <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows x64">
     <img src="https://img.shields.io/badge/Markdown-markdown--it-000000?style=for-the-badge&logo=markdown&logoColor=white" alt="markdown-it">
@@ -305,6 +305,8 @@ npm run package
 ```
 
 `npm run package` 会使用白名单裁剪运行文件，并核对源码、原生助手和包内文件摘要。不要手工修改打包目录中的 `candidate-manifest.json`；如果包内容变化，应重新打包并生成新的清单和校验和。
+
+正式发布使用 Actions 中的 **发布** 工作流：手动选定 `main` 提交并构建候选包，完成真机验收和 `release` 环境审批后，公开已验证的同一个 ZIP。版本与发布说明先在普通 PR 中更新，禁止覆盖已有 Release。完整配置、验收和失败处理见 `docs/releasing.md`；当前流程不包含应用内自动更新或正式代码签名。
 
 ### 目录约定
 
