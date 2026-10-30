@@ -327,11 +327,12 @@ function onlyArgs(args, allowed) {
   if (unknown.length) throw new Error(`未知参数：${unknown.map(key => `--${key}`).join('、')}`);
 }
 
-async function main() {
-  const [command, ...values] = process.argv.slice(2);
+async function main(argv = process.argv.slice(2), environment = process.env, dependencies = {}) {
+  const [command, ...values] = argv;
   const args = parseArgs(values);
-  const root = path.resolve(__dirname, '..');
-  const repository = args.repository || process.env.GITHUB_REPOSITORY;
+  const root = dependencies.root || path.resolve(__dirname, '..');
+  const createReleaseImpl = dependencies.createReleaseImpl || createRelease;
+  const repository = args.repository || environment.GITHUB_REPOSITORY;
   if (command === 'validate') {
     onlyArgs(args, ['version']);
     const context = await releaseContext(root, args.version);
@@ -351,7 +352,7 @@ async function main() {
     verifyTag(args.version, args.commit, repository);
   } else if (command === 'create-release') {
     onlyArgs(args, ['version', 'commit', 'directory', 'repository']);
-    await createRelease(root, { ...args, directory: path.resolve(args.directory) });
+    await createReleaseImpl(root, { ...args, directory: path.resolve(args.directory), repository });
   } else if (command === 'verify-published') {
     onlyArgs(args, ['version', 'commit', 'directory', 'published', 'metadata']);
     await verifyPublished(root, {
@@ -368,6 +369,7 @@ async function main() {
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
 
 module.exports = {
+  main,
   assertVersion,
   extractChangelog,
   composeReleaseNotes,
