@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const {
+  main,
   extractChangelog,
   compareVersions,
   assertUnpublished,
@@ -78,6 +79,20 @@ test('发布版本顺序只允许高于当前正式版', () => {
   assert.equal(compareVersions('1.10.0', '1.9.9'), 1);
   assert.equal(compareVersions('2.0.0', '10.0.0'), -1);
   assert.equal(compareVersions('1.2.3', '1.2.3'), 0);
+});
+
+test('create-release CLI 将从 GITHUB_REPOSITORY 得到的仓库传给 createRelease', async () => {
+  let received;
+  const directory = path.join(os.tmpdir(), 'pickgloss-release-cli-forward');
+  const root = path.join(os.tmpdir(), 'pickgloss-release-cli-root');
+  await main(
+    ['create-release', `--version=${version}`, `--commit=${commit}`, `--directory=${directory}`],
+    { GITHUB_REPOSITORY: 'qwayo/PickGloss' },
+    { root, createReleaseImpl: async (actualRoot, options) => { received = { actualRoot, options }; } },
+  );
+  assert.equal(received.actualRoot, root);
+  assert.equal(received.options.directory, directory);
+  assert.equal(received.options.repository, 'qwayo/PickGloss');
 });
 
 test('候选资产冻结后保留同一 ZIP、标准摘要和固定发布说明', async () => {
