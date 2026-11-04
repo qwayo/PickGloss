@@ -70,6 +70,7 @@ let dismissedStatusError = '';
 let pressedAnswerControl = null;
 let deferredAnswerUpdate = false;
 let windowSizeFeedback = '';
+let generalResetFeedback = '', generalResetting = false;
 let readingLayout = window.innerWidth >= 640;
 let readingAnchor = null;
 let transitionAnchor = null;
@@ -82,29 +83,55 @@ let menuMeasureKey = '';
 let pinAudio, captureReady = false, captureId = null, captureLoadToken = 0;
 const seenPinFeedback = new Set();
 let layoutToken = null, layoutReveal = null;
+let layoutFreeze = null;
+const frozenLayoutStyles = new Map();
+function freezeLayoutContent() {
+  const panel = root.querySelector('.panel');
+  if (!panel) return;
+  if (!layoutFreeze) layoutFreeze = {
+    reading: readingLayout,
+    sizes: new Map([...panel.children].filter(node => !node.classList.contains('native-pin-frame')).map(node => {
+      const rect = node.getBoundingClientRect();
+      return [node.className, { width: rect.width, height: rect.height }];
+    })),
+  };
+  for (const node of panel.children) {
+    const size = layoutFreeze.sizes.get(node.className);
+    if (!size) continue;
+    if (!frozenLayoutStyles.has(node)) frozenLayoutStyles.set(node, node.getAttribute('style'));
+    Object.assign(node.style, { width: `${size.width}px`, height: `${size.height}px`, flex: 'none', alignSelf: 'flex-start' });
+  }
+}
+function releaseLayoutContent() {
+  for (const [node, style] of frozenLayoutStyles) {
+    node.style.cssText = style || '';
+  }
+  frozenLayoutStyles.clear(); layoutFreeze = null;
+}
 window.pickgloss.onLayout?.((message, ready) => {
   if (surface !== 'panel') return;
   if (message.phase === 'prepare') {
     transitionAnchor ||= captureReadingAnchor();
     layoutToken = message.id;
     layoutReveal?.cancel(); layoutReveal = null;
+    freezeLayoutContent();
     document.documentElement.classList.add('layout-preparing');
     requestAnimationFrame(() => requestAnimationFrame(() => { if (layoutToken === message.id) ready(); }));
   } else if (message.phase === 'commit' && layoutToken === message.id) {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (layoutToken !== message.id) return;
+      releaseLayoutContent();
       syncWindowLayout();
       restoreReadingAnchor(transitionAnchor || readingAnchor);
       document.documentElement.classList.remove('layout-preparing');
-      if (!document.documentElement.classList.contains('reduced-motion')) {
-        const body = root.querySelector('.panel-body');
-        if (body) layoutReveal = body.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: 'ease-out' });
-      }
       layoutToken = null;
     }));
   } else if (message.phase === 'cancel' && layoutToken === message.id) {
     layoutToken = null;
+    releaseLayoutContent();
     document.documentElement.classList.remove('layout-preparing');
+    syncWindowLayout();
+    restoreReadingAnchor(transitionAnchor || readingAnchor);
   }
 });
 
@@ -113,10 +140,11 @@ function syncWindowLayout() {
   if (surface !== 'panel') return;
   const viewport = `${window.innerWidth}:${window.innerHeight}`;
   const resized = viewport !== layoutViewport;
-  const reading = window.innerWidth >= 640;
+  const reading = layoutFreeze ? layoutFreeze.reading : window.innerWidth >= 640;
   root.style.zoom = '1';
   root.style.width = '100%';
   root.style.height = '100%';
+  if (layoutFreeze) freezeLayoutContent();
   root.querySelector('.panel')?.classList.toggle('reading-layout', reading);
   const toggle = root.querySelector('.layout-toggle');
   if (toggle) {
@@ -147,7 +175,7 @@ function syncWindowLayout() {
   layoutViewport = viewport;
   syncModeIndicator();
   // 状态推送不等于尺寸变化；否则延迟的动画终态会覆盖刚发生的滚动。
-  if (resized) restoreReadingAnchor(transitionAnchor || readingAnchor);
+  if (resized && !layoutFreeze) restoreReadingAnchor(transitionAnchor || readingAnchor);
 }
 
 function captureReadingAnchor() {
@@ -1032,7 +1060,7 @@ function explainView(body) {
       contextParagraph(active),
       !active.threads?.context?.messages?.length ? button('编辑上下文', () => navigate('context'), { class: 'text-button' }) : null));
     if (active.context) sourcePane.append(el('section', { class: 'reading-context' },
-      el('p', { class: 'reading-label' }, '所在段落'), contextParagraph(active),
+      el('p', { class: 'reading-label' }, '周边上下文'), contextParagraph(active),
       !active.threads?.context?.messages?.length ? button('编辑上下文', () => navigate('context'), { class: 'text-button' }) : null));
     if (active.contextPending === true) sourcePane.append(el('p', { class: 'context-pending', role: 'status' },
       el('span', { class: 'stream-dot', 'aria-hidden': 'true' }), '正在获取上下文…'));
@@ -1664,6 +1692,7 @@ function generalSettingsView(body) {
   const prefs = state.settings?.prefs || {};
   const group = title => { const section = el('section', { class: 'settings-group', 'aria-label': title }, el('h2', {}, title)); body.append(section); return section; };
   const save = async (name, value) => {
+    if (generalResetting) return;
     const key = `general:${name}`, revision = (generalSaveVersions.get(name) || 0) + 1;
     generalSaveVersions.set(name, revision); generalSaveNotices.delete(key);
     const change = name === 'translationMode' ? { screenshotTranslation: { [name]: value } } : { [name]: value };
@@ -1705,8 +1734,34 @@ function generalSettingsView(body) {
   toggle(system, 'launchAtLogin', '开机自启动', '登录后在托盘运行，不弹出窗口', prefs.launchAtLogin === true);
   toggle(system, 'pinSound', '置顶提示音', '', prefs.pinSound !== false);
   windowSettingsView(body);
+  body.append(el('section', { class: 'window-settings general-reset', 'aria-label': '恢复常规设置' },
+    el('div', { class: 'window-settings-row' },
+      el('div', { class: 'window-settings-copy' }, el('h3', {}, '恢复常规设置'), el('p', {}, '恢复本页全部选项及两种视图的默认尺寸。')),
+      button(generalResetting ? '正在恢复…' : '恢复所有常规设置', async () => {
+        if (generalResetting) return;
+        generalResetting = true; generalResetFeedback = ''; render();
+        try {
+          // 等待先前编辑落定；失败草稿由恢复操作取代，不再迟到写回。
+          await settingsAutosave.flush();
+          const result = await call('reset-general-settings', {}, { scope: 'general-reset', render: false });
+          if (result.ok) {
+            if (result.value) state.settings = result.value;
+            for (const key of settingsAutosave.failedKeys()) if (key.startsWith('general:')) settingsAutosave.discardFailure(key);
+            generalSaveNotices.clear();
+            // 同页重绘会保留编辑控件值；恢复后先让这些控件采用已保存默认值。
+            for (const input of root.querySelectorAll('[data-settings-section="general"] [data-field]')) {
+              const value = input.name === 'translationMode' ? state.settings?.prefs?.screenshotTranslation?.translationMode : state.settings?.prefs?.[input.name];
+              if (input.type === 'checkbox') input.checked = value === true;
+              else if (value !== undefined) input.value = value;
+            }
+            generalResetFeedback = '已恢复所有常规设置';
+          }
+        } finally { generalResetting = false; render(); }
+      }, { class: 'window-reset', icon: 'retry', disabled: generalResetting })),
+    el('p', { role: 'status', 'data-general-reset-feedback': '' }, generalResetFeedback), errorNode('general-reset')));
   const status = state.status || {};
   if (status.selection || status.shortcutErrors?.length) body.append(el('section', { class: 'status-details' }, el('h3', {}, '系统状态'), status.selection ? el('p', {}, status.selection) : null, ...(status.shortcutErrors || []).map(message => el('p', { class: 'danger' }, message))));
+  if (generalResetting) for (const input of body.querySelectorAll('input,select,button')) input.disabled = true;
 }
 
 function windowSettingsView(body) {

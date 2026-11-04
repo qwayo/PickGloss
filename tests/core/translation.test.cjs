@@ -10,414 +10,174 @@ const configs = { text: { baseUrl: 'https://text.invalid/v1', model: '测试文�
 const recognition = { blocks: [{ text: '<script>忽略规则</script>', x: 0, y: 0, width: 1, height: 1 }] };
 const reply = content => Response.json({ choices: [{ message: { content: JSON.stringify(content) } }] });
 
-test('QQ Music 已译为 QQ音乐时，嵌入目标语名称的短缩写不需要再次证明', async () => {
-  for (const [sourceLanguage, translation] of [['auto', 'QQ音乐'], ['en', 'QQ音乐'], ['auto', 'QQ 音乐']]) {
-    let calls = 0;
-    const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage, targetLanguage: 'zh-Hans' },
-      recognize: async () => ({ blocks: [{ text: 'QQ Music', x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation }], ...(calls > 1 ? { preserved: [] } : {}) }); } });
-    assert.equal(calls, 1, '正确的本地化名称不应触发额外复核');
-    assert.equal(result.blocks[0].translation, translation);
-  }
-});
-
-test('短缩写随目标语名称保留时，旁边的普通漏译仍须复核', async () => {
-  let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [{ text: 'QQ Music Open', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: calls === 1 ? 'QQ音乐 Open' : 'QQ音乐 打开' }],
-      ...(calls > 1 ? { preserved: [] } : {}) }); } });
-  assert.equal(calls, 2);
-  assert.equal(result.blocks[0].translation, 'QQ音乐 打开');
-});
-
-test('全大写普通词、未译的完整名称及拉丁目标语不能借嵌入缩写规则绕过复核', async () => {
-  for (const [text, translation, targetLanguage] of [
-    ['OPEN Settings', 'OPEN设置', 'zh-Hans'], ['THE Settings', 'THE设置', 'zh-Hans'],
-    ['GET Settings', 'GET设置', 'zh-Hans'], ['QQ Music', 'QQ Music', 'zh-Hans'],
-    ['QQ Music', 'QQ Music', 'fr'], ['Use QQ Music for listening', '使用 QQ音乐收听', 'zh-Hans'],
-    ['QQ Music', 'QQ - 音乐', 'zh-Hans'], ['QQ Music Open', 'QQ音乐 Open', 'zh-Hans'],
-  ]) {
-    let calls = 0;
-    await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage },
-      recognize: async () => ({ blocks: [{ text, x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation }], ...(calls > 1 ? { preserved: [] } : {}) }); } }),
-    error => error.code === 'TRANSLATION_REVIEW_FAILED' && error.cause?.code === 'TRANSLATION_REVIEW_UNTRANSLATED');
-    assert.equal(calls, 2);
-  }
-});
-
-test('普通词原样返回时仅复核一次，保留整批语境及原有正确译文', async () => {
-  const bodies = [];
-  const result = await translateScreenshot({ imageData: IMAGE, configs, recognize: async () => ({ blocks: [
-    { text: 'Studio', x: 0, y: 0, width: 1, height: 1 }, { text: 'Desktop', x: 0, y: 0, width: 1, height: 1 },
-    { text: 'notes.txt', x: 0, y: 0, width: 1, height: 1 },
-  ] }), fetchImpl: async (_, request) => {
-    const body = JSON.parse(request.body); bodies.push(body);
-    return reply({ translations: [{ id: 0, translation: bodies.length === 1 ? 'Studio' : '工作室' },
-      { id: 1, translation: bodies.length === 1 ? '桌面' : '不应覆盖原来的译文' }, { id: 2, translation: 'notes.txt' }],
-    ...(bodies.length > 1 ? { preserved: [] } : {}) });
-  } });
-  assert.equal(bodies.length, 2);
-  const review = JSON.parse(bodies[1].messages[1].content);
-  assert.deepEqual(review.reviewIds, [0]);
-  assert.deepEqual(review.lines.map(line => line.text), ['Studio', 'Desktop', 'notes.txt']);
-  assert.match(bodies[1].messages[0].content, /Studio.*工作室/);
-  assert.deepEqual(result.blocks.map(block => block.translation), ['工作室', '桌面', 'notes.txt']);
-});
-
-test('英语和法语同属拉丁文字，混合译文中的原文词仍触发一次有界复核', async () => {
-  const bodies = [];
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'fr' },
-    recognize: async () => ({ blocks: [{ text: 'Open the settings panel', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async (_, request) => {
-      const body = JSON.parse(request.body); bodies.push(body);
-      return reply({ translations: [{ id: 0, translation: bodies.length === 1 ? 'Ouvrez the paramètres panel' : 'Ouvrez le panneau des paramètres' }],
-        ...(bodies.length > 1 ? { preserved: [] } : {}) });
+test('直接翻译软件名和普通词，混合中英文与名称均以非空译文完成', async () => {
+  const blocks = ['Obsidian', 'Open Settings', 'Open 设置', 'QQ'].map(text => ({ text, x: 0, y: 0, width: 1, height: 1 }));
+  let calls = 0, sent;
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'auto', targetLanguage: 'zh-Hans', searchEnabled: false },
+    recognize: async () => ({ blocks }), fetchImpl: async (_, request) => {
+      calls++;
+      const body = JSON.parse(request.body);
+      sent = body.messages;
+      const lines = JSON.parse(body.messages[1].content).lines;
+      return reply({ translations: lines.map(line => ({ id: line.id, translation: ({ 0: '黑曜石', 1: '打开设置', 2: '打开设置', 3: 'QQ' })[line.id] })) });
     } });
-  assert.equal(bodies.length, 2);
-  const review = JSON.parse(bodies[1].messages[1].content);
-  assert.deepEqual(review.reviewIds, [0]);
-  assert.deepEqual(review.previousTranslations, [{ id: 0, translation: 'Ouvrez the paramètres panel' }]);
-  assert.equal(result.blocks[0].translation, 'Ouvrez le panneau des paramètres');
-});
-
-test('识图后备的整区译文含源语词时也执行同一轮有界复核', async () => {
-  const bodies = [];
-  const result = await translateScreenshot({ imageData: IMAGE, configs, recognitionMode: 'vision',
-    options: { sourceLanguage: 'en', targetLanguage: 'fr' },
-    fetchImpl: async (_, request) => {
-      const body = JSON.parse(request.body); bodies.push(body);
-      return reply(bodies.length === 1 ? { sourceText: 'Open the settings panel', translation: 'Ouvrez the paramètres panel' }
-        : { translations: [{ id: 0, translation: 'Ouvrez le panneau des paramètres' }], preserved: [] });
-    } });
-  assert.equal(bodies.length, 2);
-  assert.deepEqual(JSON.parse(bodies[1].messages[1].content).reviewIds, [0]);
-  assert.equal(result.blocks[0].translation, 'Ouvrez le panneau des paramètres');
-});
-
-test('自动识别下已是简体中文的相同译文不额外复核', async () => {
-  let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [{ text: '设置', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: '设置' }] }); } });
   assert.equal(calls, 1);
-  assert.equal(result.blocks[0].translation, '设置');
+  assert.deepEqual(result.blocks.map(block => block.translation), ['黑曜石', '打开设置', '打开设置', 'QQ']);
+  assert.ok(result.blocks.every(block => block.status === 'complete'));
+  assert.deepEqual(result.pendingIds, []);
+  assert.equal(result.failedCount, 0);
+  assert.equal(Object.hasOwn(result, 'reviewCount'), false);
+  assert.equal(Object.hasOwn(result, 'unchangedCount'), false);
+  const system = sent[0].content;
+  assert.match(system, /软件名/);
+  assert.match(system, /名称有常见词义时按词义意译/);
+  assert.match(system, /软件身份.*不是原样保留的理由/);
+  assert.doesNotMatch(system, /目标语言惯用原样的名称/);
+  assert.doesNotMatch(system, /Obsidian|黑曜石|preserved|reviewIds/u);
+  assert.deepEqual(Object.keys(JSON.parse(sent[1].content)), ['sourceLanguage', 'targetLanguage', 'lines']);
 });
 
-test('拉丁词贴连中文时仍按文字体系边界识别为未译词', async () => {
-  const bodies = [];
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [{ text: 'Open settings', x: 0, y: 0, width: 1, height: 1 }] }),
+test('快捷键等原样文本只要有非空译文就完成，不检查残留拉丁字符', async () => {
+  let calls = 0;
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans', searchEnabled: false },
+    recognize: async () => ({ blocks: [{ text: 'Ctrl + C', x: 0, y: 0, width: 1, height: 1 }] }),
     fetchImpl: async (_, request) => {
-      const body = JSON.parse(request.body); bodies.push(body);
-      return reply({ translations: [{ id: 0, translation: bodies.length === 1 ? 'Open设置' : '打开设置' }],
-        ...(bodies.length > 1 ? { preserved: [] } : {}) });
+      calls++;
+      const lines = JSON.parse(JSON.parse(request.body).messages[1].content).lines;
+      return reply({ translations: lines.map(line => ({ id: line.id, translation: 'Ctrl + C' })) });
     } });
-  assert.equal(bodies.length, 2);
-  assert.deepEqual(JSON.parse(bodies[1].messages[1].content).reviewIds, [0]);
-  assert.equal(result.blocks[0].translation, '打开设置');
+  assert.equal(calls, 1);
+  assert.equal(result.blocks[0].status, 'complete');
+  assert.equal(result.blocks[0].translation, 'Ctrl + C');
+  assert.deepEqual(result.pendingIds, []);
 });
 
-test('复核后仍是 Open设置且没有合法保留说明时不得返回成功', async () => {
+test('长批缺项后只重试失败 ID，并逐轮缩小批次', async () => {
+  const blocks = Array.from({ length: 30 }, (_, id) => ({ text: `Visible label ${id}`, x: 0, y: 0, width: 1, height: 1 }));
+  let active = 0, peak = 0;
+  const requests = [];
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans', searchEnabled: false },
+    recognize: async () => ({ blocks }),
+    fetchImpl: async (_, request) => {
+      active++; peak = Math.max(peak, active);
+      const lines = JSON.parse(JSON.parse(request.body).messages[1].content).lines;
+      requests.push(lines);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      active--;
+      if (lines[0]?.id === 0 && lines.length === 24) return reply({ translations: lines.filter(line => line.id >= 12).map(line => ({ id: line.id, translation: `标签${line.id}` })) });
+      if (lines.length === 12) return reply({ translations: [] });
+      return reply({ translations: lines.map(line => ({ id: line.id, translation: `标签${line.id}` })) });
+    } });
+  assert.equal(requests.length, 5);
+  assert.deepEqual(requests.slice(2).map(batch => batch.length), [12, 6, 6]);
+  assert.ok(requests.every(batch => batch.length <= 24 && batch.reduce((sum, line) => sum + line.text.length, 0) <= 2400));
+  assert.ok(peak <= 2);
+  const sentIds = requests.flatMap(batch => batch.map(line => line.id));
+  assert.equal(sentIds.filter(id => id >= 12).length, 18, '成功的 18 个 ID 只发送一次');
+  for (let id = 0; id < 12; id++) assert.equal(sentIds.filter(sent => sent === id).length, 3, `失败 ID ${id} 最多初次加两次重试`);
+  assert.ok(result.blocks.every(block => block.status === 'complete'));
+  assert.deepEqual(result.pendingIds, []);
+});
+
+test('临时网络错误自动恢复', async () => {
   let calls = 0;
-  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [{ text: 'Open settings', x: 0, y: 0, width: 1, height: 1 }] }),
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false }, recognize: async () => recognition,
     fetchImpl: async () => {
       calls++;
-      return reply({ translations: [{ id: 0, translation: 'Open设置' }], ...(calls === 2 ? { preserved: [] } : {}) });
-    } }), error => error.code === 'TRANSLATION_REVIEW_FAILED' && error.retryable === true
-      && error.message === '复核后仍有未翻译内容或原样保留理由无效，请检查后重试本次截图翻译。');
-  assert.equal(calls, 2);
-});
-
-test('简中目标下不能把 Latin 残词泛称为目标语同形词', async () => {
-  let calls = 0;
-  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [{ text: 'Open settings', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => {
-      calls++;
-      return reply({ translations: [{ id: 0, translation: 'Open设置' }], ...(calls > 1 ? { preserved: [
-        { id: 0, text: 'Open', category: 'target-language-lexeme', reason: '这是目标语已有词汇，应当在译文中保持原样。' },
-      ] } : {}) });
-    } }), error => error.code === 'TRANSLATION_REVIEW_FAILED' && error.retryable === true
-      && error.message === '复核后仍有未翻译内容或原样保留理由无效，请检查后重试本次截图翻译。');
-  assert.equal(calls, 2);
-});
-
-test('仅以没有官方译名为由保留名称仍应失败', async () => {
-  let calls = 0;
-  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [{ text: 'Quark', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => {
-      calls++;
-      return reply({ translations: [{ id: 0, translation: 'Quark' }], ...(calls > 1 ? { preserved: [
-        { id: 0, text: 'Quark', category: 'untranslatable-name', reason: '没有官方译名，所以保留原文。' },
-      ] } : {}) });
-    } }), error => error.code === 'TRANSLATION_REVIEW_FAILED' && error.retryable === true);
-  assert.equal(calls, 2);
-});
-
-test('无法识别的缩写产品名 OBS Studio 可以在复核后原样显示', async () => {
-  for (const text of ['OBS', 'OBS Studio']) {
-    let calls = 0;
-    const requests = [];
-    const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-      recognize: async () => ({ blocks: [{ text, x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async (_, request) => {
-        calls++;
-        requests.push(JSON.parse(request.body));
-        return reply(calls === 1 ? { translations: [{ id: 0, translation: text }] }
-          : { translations: [{ id: 0, translation: text }], preserved: [
-            { id: 0, text, category: 'unrecognized-name', reason: 'Unknown product name; I cannot identify it.' },
-          ] });
-      } });
-    assert.equal(calls, 2);
-    assert.match(requests[0].messages[0].content, /无法确认的缩写.*原样留给有界复核判定/);
-    assert.match(requests[1].messages[0].content, /unrecognized-name/);
-    assert.match(requests[1].messages[0].content, /不要求声称不认识或使用固定措辞/);
-    assert.equal(result.blocks[0].translation, text);
-  }
-});
-
-test('带版本号和插件标点的短名称支持自然保留理由，代码说明不要求凑字数', async () => {
-  for (const [text, category, reason] of [
-    ['OBS Studio 31.0.0', 'untranslatable-name', '软件名称按惯用写法保留'],
-    ['OBS Studio (64-bit)', 'unrecognized-name', '软件名原样'],
-    ['obs-websocket', 'unrecognized-name', '插件名称'],
-    ['USER_ID', 'code', '代码标识符'],
-  ]) {
-    let calls = 0;
-    const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-      recognize: async () => ({ blocks: [{ text, x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: text }], ...(calls > 1 ? { preserved: [
-        { id: 0, text, category, reason },
-      ] } : {}) }); } });
-    assert.equal(result.blocks[0].translation, text);
-    assert.equal(calls, 2);
-  }
-});
-
-test('保留说明列出完整名称时，只核对其中实际残留的词，不误拒已译出的名称部分', async () => {
-  let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs,
-    recognize: async () => ({ blocks: [{ text: 'Foo Player Open', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: calls === 1 ? 'Foo播放器 Open' : 'Foo播放器 打开' }],
-      ...(calls > 1 ? { preserved: [{ id: 0, text: 'Foo Player', category: 'unrecognized-name', reason: '产品名原样' }] } : {}) }); } });
-  assert.equal(calls, 2);
-  assert.equal(result.blocks[0].translation, 'Foo播放器 打开');
-});
-
-test('自动语言识别的中英混合界面，不要求为已经是目标语言的文字重复提供保留说明', async () => {
-  let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [{ text: 'OBS Studio 设置', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: 'OBS Studio 设置' }],
-      ...(calls > 1 ? { preserved: [{ id: 0, text: 'OBS Studio', category: 'unrecognized-name', reason: '软件名称原样' }] } : {}) }); } });
-  assert.equal(calls, 2);
-  assert.equal(result.blocks[0].translation, 'OBS Studio 设置');
-});
-
-test('同批重复软件名可复用已核实的保留说明，包括名称尾部版本号', async () => {
-  let calls = 0;
-  const texts = ['OBS Studio 31.0.0', 'OBS Studio 设置', 'Open Settings'];
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: texts.map(text => ({ text, x: 0, y: 0, width: 1, height: 1 })) }),
-    fetchImpl: async () => { calls++; return reply({ translations: texts.map((text, id) => ({ id,
-      translation: id === 2 ? '打开设置' : text })), ...(calls > 1 ? { preserved: [
-      { id: 0, text: texts[0], category: 'unrecognized-name', reason: '软件名称按惯用写法保留' },
-    ] } : {}) }); } });
-  assert.equal(calls, 2);
-  assert.deepEqual(result.blocks.map(block => block.translation), ['OBS Studio 31.0.0', 'OBS Studio 设置', '打开设置']);
-});
-
-test('重复专名证明不能放过其他普通词，大小写不同的同形词也不能借用', async () => {
-  for (const second of ['Foo Open', 'foo bar']) {
-    let calls = 0;
-    await assert.rejects(translateScreenshot({ imageData: IMAGE, configs,
-      recognize: async () => ({ blocks: ['Foo', second].map(text => ({ text, x: 0, y: 0, width: 1, height: 1 })) }),
-      fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: 'Foo' }, { id: 1, translation: second }],
-        ...(calls > 1 ? { preserved: [{ id: 0, text: 'Foo', category: 'unrecognized-name', reason: '软件名称原样' }] } : {}) }); } }),
-    error => error.code === 'TRANSLATION_REVIEW_FAILED' && error.cause?.code === 'TRANSLATION_REVIEW_UNTRANSLATED');
-  }
-});
-
-test('惯用原名的 OBS Studio 可用简短自然理由保留，不必假称不认识', async () => {
-  for (const reason of ['缩写原样', '软件名按惯用写法']) {
-    let calls = 0;
-    const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-      recognize: async () => ({ blocks: [{ text: 'OBS Studio', x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => {
-        calls++;
-        return reply({ translations: [{ id: 0, translation: 'OBS Studio' }], ...(calls > 1 ? { preserved: [
-          { id: 0, text: 'OBS Studio', category: 'unrecognized-name', reason },
-        ] } : {}) });
-      } });
-    assert.equal(calls, 2);
-    assert.equal(result.blocks[0].translation, 'OBS Studio');
-  }
-});
-
-test('普通英文句子、界面标签和技术术语不能借不认识的名称类别通过漏译复核', async () => {
-  for (const text of ['Open the settings panel', 'Open Settings', 'rendering pipeline']) {
-    let calls = 0;
-    await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-      recognize: async () => ({ blocks: [{ text, x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => {
-        calls++;
-        return reply({ translations: [{ id: 0, translation: text }], ...(calls > 1 ? { preserved: [
-          { id: 0, text, category: 'unrecognized-name', reason: 'Unknown.' },
-        ] } : {}) });
-      } }), error => error.code === 'TRANSLATION_REVIEW_FAILED' && error.retryable === true
-        && error.message === '复核后仍有未翻译内容或原样保留理由无效，请检查后重试本次截图翻译。');
-    assert.equal(calls, 2);
-  }
-});
-
-test('自然进入目标语的同形词需说明语境后可以保留', async () => {
-  let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'fr' },
-    recognize: async () => ({ blocks: [{ text: 'Open menu', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => {
-      calls++;
-      return reply(calls === 1 ? { translations: [{ id: 0, translation: 'Open menu' }] }
-        : { translations: [{ id: 0, translation: 'Ouvrir le menu' }], preserved: [
-          { id: 0, text: 'menu', category: 'target-language-lexeme', reason: 'menu 在法语界面中是自然使用的同形词。' },
-        ] });
+      if (calls === 1) throw Error('socket reset');
+      return reply({ translations: [{ id: 0, translation: '完整译文' }] });
     } });
   assert.equal(calls, 2);
-  assert.equal(result.blocks[0].translation, 'Ouvrir le menu');
+  assert.equal(result.blocks[0].status, 'complete');
+  assert.equal(result.blocks[0].translation, '完整译文');
 });
 
-test('目标语同形词用目标语言说明语境时也能通过复核', async () => {
+test('永久缺少 ID 只用完两次重试并以 partial 标记真实失败', async () => {
   let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'fr' },
-    recognize: async () => ({ blocks: [{ text: 'Open menu', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => {
-      calls++;
-      return reply(calls === 1 ? { translations: [{ id: 0, translation: 'Ouvrir le menu' }] }
-        : { translations: [{ id: 0, translation: 'Ouvrir le menu' }], preserved: [
-          { id: 0, text: 'menu', category: 'target-language-lexeme', reason: '« menu » est un mot courant en français dans cette interface.' },
-        ] });
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false }, recognize: async () => recognition,
+    fetchImpl: async () => { calls++; return reply({ translations: [] }); } });
+  assert.equal(calls, 3);
+  assert.equal(result.blocks[0].status, 'failed');
+  assert.equal(result.blocks[0].errorCode, 'TRANSLATION_MISSING_ID');
+  assert.equal(result.blocks[0].translation, '');
+  assert.deepEqual(result.pendingIds, [0]);
+  assert.equal(result.failedCount, 1);
+  assert.equal(Object.hasOwn(result, 'reviewCount'), false);
+});
+
+test('401、403、400 和 404 不自动重试，并返回可操作错误', async () => {
+  for (const [status, message] of [[401, /API Key/], [403, /权限/], [400, /请求参数/], [404, /服务地址/]]) {
+    let calls = 0;
+    const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false }, recognize: async () => recognition,
+      fetchImpl: async () => { calls++; return Response.json({ error: '无效请求' }, { status }); } });
+    assert.equal(calls, 1, `HTTP ${status} 不盲目重试`);
+    assert.equal(result.blocks[0].status, 'failed');
+    assert.match(result.blocks[0].error, message);
+    assert.deepEqual(result.pendingIds, [0]);
+  }
+});
+
+test('重试等待期间取消会停止后续网络请求', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const result = translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false }, signal: controller.signal,
+    recognize: async () => recognition, fetchImpl: async () => { calls++; throw Error('socket reset'); } });
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(result, { code: 'ABORTED' });
+  assert.equal(calls, 1);
+});
+
+test('同图重试复用 OCR、稳定 ID 和成功块，只重新请求失败块', async () => {
+  let recognizeCalls = 0;
+  const requests = [];
+  const options = { sourceLanguage: 'en', targetLanguage: 'zh-Hans', translationMode: 'standard', searchEnabled: false,
+    displayMode: 'overlay', showOriginal: false };
+  const first = await translateScreenshot({ imageData: IMAGE, configs, options,
+    recognize: async () => { recognizeCalls++; return { blocks: [
+      { text: 'Desktop', x: 0, y: 0, width: 1, height: 1 }, { text: 'Open Settings', x: 0, y: 0, width: 1, height: 1 },
+      { text: 'Ctrl + Shift + P', x: 0, y: 0, width: 1, height: 1 }, { text: 'Panel', x: 0, y: 0, width: 1, height: 1 },
+    ] }; },
+    fetchImpl: async (_, request) => {
+      const payload = JSON.parse(JSON.parse(request.body).messages[1].content); requests.push(payload.lines);
+      if (requests.length === 1) return reply({ translations: payload.lines.filter(line => line.id !== 3).map(line => ({
+        id: line.id, translation: line.id === 0 ? '桌面' : line.id === 1 ? 'Open设置' : line.text,
+      })) });
+      return reply({ translations: payload.lines.map(line => ({ id: line.id, translation: '' })) });
     } });
-  assert.equal(calls, 2);
-  assert.equal(result.blocks[0].translation, 'Ouvrir le menu');
-});
+  assert.deepEqual(first.pendingIds, [3]);
+  assert.deepEqual(first.blocks.map(block => block.status), ['complete', 'complete', 'complete', 'failed']);
+  assert.match(first.imageFingerprint, /^[a-f0-9]{64}$/u);
+  assert.ok(requests.slice(1).every(lines => lines.map(line => line.id).join(',') === '3'));
 
-test('目标语同形词不能用错误的目标语言作为保留理由', async () => {
-  let calls = 0;
-  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'fr' },
-    recognize: async () => ({ blocks: [{ text: 'Open menu', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => {
-      calls++;
-      return reply(calls === 1 ? { translations: [{ id: 0, translation: 'Ouvrir le menu' }] }
-        : { translations: [{ id: 0, translation: 'Ouvrir le menu' }], preserved: [
-          { id: 0, text: 'menu', category: 'target-language-lexeme', reason: 'menu is a common English word in this interface.' },
-        ] });
-    } }), error => error.code === 'TRANSLATION_REVIEW_FAILED' && error.retryable === true);
-  assert.equal(calls, 2);
-});
-
-test('复核可用结构化理由保留具体型号和代码标识', async () => {
-  const bodies = [];
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
-    recognize: async () => ({ blocks: [
-      { text: 'Choose RTX 4090', x: 0, y: 0, width: 1, height: 1 },
-      { text: 'Set USER_ID', x: 0, y: 0, width: 1, height: 1 },
-      { text: 'Open https://example.invalid/page', x: 0, y: 0, width: 1, height: 1 },
-      { text: 'Check: x=2+2', x: 0, y: 0, width: 1, height: 1 },
-    ] }), fetchImpl: async (_, request) => {
-      bodies.push(JSON.parse(request.body));
-      return reply(bodies.length === 1 ? { translations: [
-        { id: 0, translation: 'Choose RTX 4090' }, { id: 1, translation: 'Set USER_ID' },
-        { id: 2, translation: 'Open https://example.invalid/page' }, { id: 3, translation: 'Check: x=2+2' },
-      ] } : { translations: [
-          { id: 0, translation: '选择 RTX 4090' }, { id: 1, translation: '设置 USER_ID' },
-          { id: 2, translation: '打开 https://example.invalid/page' }, { id: 3, translation: '检查：x=2+2' },
-        ], preserved: [
-          { id: 0, text: 'RTX 4090', category: 'model', reason: '该片段是具体显卡型号。' },
-          { id: 1, text: 'USER_ID', category: 'code', reason: 'This is a source code identifier and should remain unchanged.' },
-          { id: 2, text: 'https://example.invalid/page', category: 'url', reason: 'This is a URL link that should remain unchanged.' },
-          { id: 3, text: 'x=2+2', category: 'formula', reason: 'This is a mathematical formula and should remain unchanged.' },
-        ] });
+  const retry = await translateScreenshot({ imageData: IMAGE, configs, options: { ...options, displayMode: 'compare', showOriginal: true },
+    previousResult: first, recognize: async () => { recognizeCalls++; throw Error('缓存命中时不能重新 OCR'); },
+    fetchImpl: async (_, request) => {
+      const lines = JSON.parse(JSON.parse(request.body).messages[1].content).lines; requests.push(lines);
+      return reply({ translations: lines.map(line => ({ id: line.id, translation: '面板' })) });
     } });
-  assert.equal(bodies.length, 2);
-  assert.deepEqual(JSON.parse(bodies[1].messages[1].content).reviewIds, [0, 1, 2, 3]);
-  assert.match(bodies[1].messages[0].content, /preserved.*category.*reason/);
-  assert.match(bodies[1].messages[0].content, /不能只因没有官方译名而照抄/);
-  assert.deepEqual(result.blocks.map(block => block.translation), [
-    '选择 RTX 4090', '设置 USER_ID', '打开 https://example.invalid/page', '检查：x=2+2',
-  ]);
+  assert.equal(recognizeCalls, 1);
+  assert.deepEqual(requests.at(-1).map(line => line.id), [3]);
+  assert.deepEqual(retry.blocks.map(block => block.id), [0, 1, 2, 3]);
+  assert.deepEqual(retry.blocks.map(block => block.status), ['complete', 'complete', 'complete', 'complete']);
+  assert.deepEqual(retry.blocks.map(block => block.translation), ['桌面', 'Open设置', 'Ctrl + Shift + P', '面板']);
+  assert.deepEqual(retry.pendingIds, []);
+  assert.equal(retry.options.displayMode, 'compare');
+  assert.equal(retry.options.showOriginal, true);
 });
 
-test('漏译复核网络与 HTTP 请求失败显示固定原因且不自动重试', async () => {
-  for (const failureKind of ['network', 'http']) {
-    let calls = 0;
-    await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'fr' },
-      recognize: async () => ({ blocks: [{ text: 'Open the settings panel', x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => {
-        if (++calls === 1) return reply({ translations: [{ id: 0, translation: 'Ouvrez the paramètres panel' }] });
-        if (failureKind === 'network') throw Error('https://secret.invalid/path API_KEY=secret-value');
-        return new Response('API_KEY=secret-value', { status: 503 });
-      } }), error => {
-      assert.equal(error.code, 'TRANSLATION_REVIEW_FAILED');
-      assert.equal(error.retryable, true);
-      assert.equal(error.message, '目标语言核对服务请求失败，请检查网络或服务配置后重试本次截图翻译。');
-      assert.doesNotMatch(error.message, /secret|API_KEY|secret\.invalid/);
-      return true;
-    });
-    assert.equal(calls, 2, '仅首轮翻译和一次复核请求，不因失败自动重试');
-  }
+test('单块超出批次字符预算仍完整发送，不按文本切段', async () => {
+  const text = `Open ${'setting '.repeat(500)}`;
+  let sent;
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false },
+    recognize: async () => ({ blocks: [{ text, x: 0, y: 0, width: 1, height: 1 }] }),
+    fetchImpl: async (_, request) => {
+      sent = JSON.parse(JSON.parse(request.body).messages[1].content).lines;
+      return reply({ translations: [{ id: 0, translation: '已翻译长文本' }] });
+    } });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].text, text.trim());
+  assert.equal(result.blocks[0].status, 'complete');
 });
-
-test('漏译复核响应格式错误显示固定原因且不暴露响应内容', async () => {
-  let calls = 0;
-  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'fr' },
-    recognize: async () => ({ blocks: [{ text: 'Open the settings panel', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => {
-      if (++calls === 1) return reply({ translations: [{ id: 0, translation: 'Ouvrez the paramètres panel' }] });
-      return new Response('data: malformed response API_KEY=secret-value https://secret.invalid/path\\n\\n', {
-        headers: { 'content-type': 'text/event-stream' },
-      });
-    } }), error => {
-    assert.equal(error.code, 'TRANSLATION_REVIEW_FAILED');
-    assert.equal(error.retryable, true);
-    assert.equal(error.message, '模型响应格式未满足目标语言核对要求，请检查模型输出后重试本次截图翻译。');
-    assert.doesNotMatch(error.message, /secret|API_KEY|secret\.invalid|malformed response/);
-    return true;
-  });
-  assert.equal(calls, 2, '格式错误后不自动重试');
-});
-
-test('漏译复核只执行一轮并修正名称，识图路径也使用同一规则', async () => {
-  for (const method of ['windows-ocr', 'vision']) {
-    let calls = 0;
-    const result = await translateScreenshot({ imageData: IMAGE, configs, recognitionMode: method === 'vision' ? 'vision' : 'auto',
-      recognize: async () => ({ blocks: [{ text: 'Studio', x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => { calls++; return method === 'vision' && calls === 1
-        ? reply({ sourceText: 'Studio', translation: 'Studio' }) : reply({ translations: [{ id: 0, translation: calls === 1 ? 'Studio' : '工作室' }],
-          ...(calls > 1 ? { preserved: [] } : {}) }); } });
-    assert.equal(calls, 2); assert.equal(result.blocks[0].translation, '工作室');
-    assert.equal(result.unchangedCount, 0);
-  }
-});
-
-test('同语种、已译文字、文件名、网址、代码和公式不触发多余复核，复核中止不会返回旧译文', async () => {
-  for (const [text, translation, options] of [['Studio', '工作室', {}], ['Studio', 'Studio', { sourceLanguage: 'en', targetLanguage: 'en' }],
-    ['notes.txt', 'notes.txt', {}], ['https://example.invalid/page', 'https://example.invalid/page', {}], ['`user.name`', '`user.name`', {}],
-    ['x = 2 + 2', 'x = 2 + 2', {}], ['工作室', '工作室', {}]]) {
-    let calls = 0;
-    await translateScreenshot({ imageData: IMAGE, configs, options, recognize: async () => ({ blocks: [{ text, x: 0, y: 0, width: 1, height: 1 }] }),
-      fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation }] }); } });
-    assert.equal(calls, 1);
-  }
-  const abort = new AbortController(); let calls = 0;
-  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, signal: abort.signal,
-    recognize: async () => ({ blocks: [{ text: 'Studio', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { if (++calls === 2) { await Promise.resolve(); abort.abort(); throw Object.assign(Error('已取消'), { code: 'ABORTED' }); }
-      return reply({ translations: [{ id: 0, translation: 'Studio' }] }); } }), error => error.code === 'ABORTED');
-});
-
 test('截图翻译优先独立翻译模型，留空时完整沿用文字配置且提示文件类型翻译规则', async () => {
   const configured = { ...configs, translation: { baseUrl: 'https://translate.invalid/v1', model: '专用翻译模型', apiKey: '虚构翻译密钥' } };
   for (const custom of [true, false]) {
@@ -476,7 +236,7 @@ test('常规模式关闭已识别模型的思考且不搜索，深度发送最�
   }
 });
 
-test('常规联网先查询再搜索，最终翻译与漏译复核都收到来源且保持关闭思考', async () => {
+test('常规联网先查询再搜索，最终翻译收到来源且保持关闭思考', async () => {
   const searchConfig = { providerId: 'exa', baseUrl: 'https://search.example.test/search', apiKey: '虚构搜索密钥' };
   const translationConfig = { providerId: 'custom', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.6-flash' };
   const calls = [];
@@ -488,19 +248,16 @@ test('常规联网先查询再搜索，最终翻译与漏译复核都收到来�
       const body = JSON.parse(options.body); calls.push({ url, body });
       if (url === searchConfig.baseUrl) return Response.json({ results: [{ title: '产品官方名称', url: 'https://evidence.example.test/product', highlights: [snippet] }] });
       if (body.messages[0].content.includes('联网搜索词')) return reply({ query: 'Visible Product 中文官方名称' });
-      const reviewed = calls.filter(call => call.url !== searchConfig.baseUrl && !call.body.messages[0].content.includes('联网搜索词')).length > 1;
-      return reply({ translations: [{ id: 0, translation: reviewed ? '本地化名称' : 'Visible Product' }], ...(reviewed ? { preserved: [] } : {}) });
+      return reply({ translations: [{ id: 0, translation: '本地化名称' }] });
     } });
-  assert.equal(calls.length, 4, '查询、搜索、最终翻译和一次漏译复核依次完成');
+  assert.equal(calls.length, 3, '查询、搜索、最终翻译各请求一次');
   assert.ok(calls[0].body.messages[0].content.includes('联网搜索词'));
   assert.deepEqual(calls[0].body.thinking, { type: 'disabled' });
   assert.equal(calls[1].url, searchConfig.baseUrl);
-  for (const call of calls.slice(2)) {
-    assert.deepEqual(call.body.thinking, { type: 'disabled' });
-    const payload = JSON.parse(call.body.messages[1].content);
-    assert.equal(payload.sources[0].snippet, snippet);
-  }
-  assert.ok(calls[3].body.messages[0].content.includes('漏译复核'));
+  assert.deepEqual(calls[2].body.thinking, { type: 'disabled' });
+  const payload = JSON.parse(calls[2].body.messages[1].content);
+  assert.equal(payload.sources[0].snippet, snippet);
+  assert.deepEqual(payload.lines, [{ id: 0, text: 'Visible Product' }]);
   assert.equal(result.search.status, 'complete');
   assert.deepEqual(result.blocks.map(block => block.translation), ['本地化名称']);
   assert.equal(result.thinking.status, 'disabled');
@@ -560,7 +317,7 @@ test('深度搜索先提炼查询、再搜索并把不可信来源交给最终�
   assert.deepEqual(result.search, { status: 'complete', query: 'Quark software and Genshin Impact Chinese names', providerId: 'exa', sources: result.search.sources });
   assert.equal(result.search.sources.length, 5);
   assert.deepEqual(result.thinking, { mode: 'deep', status: 'enabled', providerId: 'mimo', model: 'mimo-v2.6-pro', controlSupported: true, effort: 'model-maximum' });
-  assert.deepEqual(stages.map(item => item.stage), ['recognizing', 'preparing-search', 'searching', 'translating']);
+  assert.deepEqual(stages.map(item => item.stage), ['recognizing', 'preparing-search', 'searching', 'translating', 'translating']);
   assert.ok(stages.every(item => typeof item.details.method === 'string' && typeof item.details.fallbackReason === 'string'));
   assert.equal(stages.find(item => item.stage === 'searching').details.search.status, 'searching');
   assert.equal(stages.at(-1).details.search.status, 'complete');
@@ -631,7 +388,7 @@ test('检索摘录以引用材料送入最终请求，明确用匹配证据修�
     assert.match(querySystem, /目标语言.*译名.*含义/);
     assert.match(querySystem, /消歧/);
     assert.match(finalSystem, /必须审阅.*资料.*匹配.*证据.*最终译文/);
-    assert.match(finalSystem, /没有通行译名但能合理音译或意译时仍须译成目标语言/);
+    assert.match(finalSystem, /优先用通行译名/);
     assert.match(finalSystem, /来源.*冲突/);
     assert.match(finalSystem, /同名.*不符.*忽略/);
     assert.match(finalSystem, /纯译文/);
@@ -737,71 +494,89 @@ test('OCR 回退到未配置的 vision 时，失败状态已标记正确路径�
   assert.equal(stages.at(-1).details.fallbackReason, 'unavailable');
 });
 
-test('单独的品牌、软件和游戏名称优先采用通行目标语言译名', async () => {
-  const namedItems = { blocks: [
-    { text: 'Quark', x: 0, y: 0, width: 1, height: 1 },
-    { text: 'Genshin', x: 0, y: 0, width: 1, height: 1 },
-  ] };
+test('软件名称可自然意译，首轮非空结果直接完成', async () => {
+  const namedItems = { blocks: [{ text: 'Obsidian', x: 0, y: 0, width: 1, height: 1 }] };
+  let calls = 0;
   let sent;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, recognize: async () => namedItems,
-    fetchImpl: async (url, options) => {
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false }, recognize: async () => namedItems,
+    fetchImpl: async (_, options) => {
+      calls++;
       sent = JSON.parse(options.body);
-      return reply({ translations: [{ id: 0, translation: '夸克' }, { id: 1, translation: '原神' }] });
+      return reply({ translations: [{ id: 0, translation: '黑曜石' }] });
     } });
-  assert.deepEqual(JSON.parse(sent.messages[1].content).lines.map(line => line.text), ['Quark', 'Genshin']);
-  assert.match(sent.messages[0].content, /品牌、软件和游戏名称.*通行.*译名/);
-  assert.match(sent.messages[0].content, /没有通行译名但能合理音译或意译时仍须译成目标语言/);
-  assert.match(sent.messages[0].content, /无法确认或确实没有合适译法的短名称可保持原样/);
-  assert.deepEqual(result.blocks.map(block => block.translation), ['夸克', '原神']);
+  assert.equal(calls, 1);
+  assert.deepEqual(JSON.parse(sent.messages[1].content).lines, [{ id: 0, text: 'Obsidian' }]);
+  assert.doesNotMatch(sent.messages[0].content, /Obsidian|黑曜石/u, '名称译法来自一般规则，不靠硬编码词典');
+  assert.equal(result.blocks[0].translation, '黑曜石');
+  assert.equal(result.blocks[0].status, 'complete');
 });
 
-test('具体型号可在有界复核后原样保留', async () => {
+test('仅保留缩写的译文无需额外检查', async () => {
   let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans', searchEnabled: false },
     recognize: async () => ({ blocks: [{ text: 'RTX 4090', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: 'RTX 4090' }], ...(calls > 1 ? { preserved: [
-      { id: 0, text: 'RTX 4090', category: 'model', reason: '这是需要保留的具体硬件型号。' },
-    ] } : {}) }); } });
-  assert.equal(calls, 2);
+    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: 'RTX 4090' }] }); } });
+  assert.equal(calls, 1);
   assert.equal(result.blocks[0].translation, 'RTX 4090');
+  assert.equal(result.blocks[0].status, 'complete');
 });
 
-test('无数字的具体设备型号在自然译文中可通过原样保留核对', async () => {
+test('自然译文中的设备名首轮直接返回', async () => {
   let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans', searchEnabled: false },
     recognize: async () => ({ blocks: [{ text: 'Connect MacBook Air', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: calls === 1 ? 'Connect MacBook Air' : '连接 MacBook Air' }],
-      ...(calls > 1 ? { preserved: [
-        { id: 0, text: 'MacBook Air', category: 'model', reason: 'MacBook Air is a specific device model and should remain unchanged.' },
-      ] } : {}) }); } });
-  assert.equal(calls, 2);
+    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: '连接 MacBook Air' }] }); } });
+  assert.equal(calls, 1);
   assert.equal(result.blocks[0].translation, '连接 MacBook Air');
+  assert.equal(result.blocks[0].status, 'complete');
 });
 
-test('独立翻译配置不完整时应报错，不悄悄退回文字模型；原样译文以结构化数量提示核对', async () => {
+test('独立翻译配置无效时拒绝；非空结构化译文直接完成', async () => {
   let recognized = false;
   await assert.rejects(translateScreenshot({ imageData: IMAGE, configs: { ...configs, translation: { model: '专用翻译模型', baseUrl: '' } }, recognize: async () => { recognized = true; return recognition; }, fetchImpl: async () => reply({}) }), { code: 'INVALID_CONFIG' });
   assert.equal(recognized, false);
-  let calls = 0;
-  const result = await translateScreenshot({ imageData: IMAGE, configs, recognize: async () => ({ blocks: [{ text: 'TXT', x: 0, y: 0, width: 1, height: 1 }] }),
-    fetchImpl: async () => { calls++; return reply({ translations: [{ id: 0, translation: 'TXT' }], ...(calls > 1 ? { preserved: [
-      { id: 0, text: 'TXT', category: 'untranslatable-name', reason: '缺少上下文，无法合理音译或意译该缩写。' },
-    ] } : {}) }); } });
-  assert.equal(result.unchangedCount, 1);
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false }, recognize: async () => ({ blocks: [{ text: 'TXT', x: 0, y: 0, width: 1, height: 1 }] }),
+    fetchImpl: async () => reply({ translations: [{ id: 0, translation: 'TXT' }] }) });
+  assert.equal(result.blocks[0].status, 'complete');
   assert.equal(result.warning, '');
 });
 
-test('识图后备同样复核可疑原文，并保留缺少语言包和整区覆盖说明', async () => {
+test('识图后备首轮译文直接完成并保留缺少语言包说明', async () => {
   let calls = 0;
   const result = await translateScreenshot({ imageData: IMAGE, configs, options: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' },
     recognize: async () => { throw Object.assign(Error('缺少语言包'), { code: 'OCR_LANGUAGE_UNAVAILABLE' }); },
-    fetchImpl: async () => ++calls === 1 ? reply({ sourceText: 'TXT', translation: 'TXT' })
-      : reply({ translations: [{ id: 0, translation: 'TXT' }], preserved: [
-        { id: 0, text: 'TXT', category: 'untranslatable-name', reason: '缺少上下文，无法合理音译或意译该缩写。' },
-      ] }) });
-  assert.equal(result.unchangedCount, 1); assert.match(result.warning, /未安装.*语言包/); assert.match(result.warning, /整区覆盖/);
-  assert.equal(calls, 2);
+    fetchImpl: async () => { calls++; return reply({ sourceText: 'TXT', translation: 'TXT' }); } });
+  assert.match(result.warning, /未安装.*语言包/); assert.match(result.warning, /整区覆盖/);
+  assert.equal(result.blocks[0].status, 'complete');
+  assert.deepEqual(result.pendingIds, []);
+  assert.equal(calls, 1);
   assert.equal(result.fallbackReason, 'language');
+});
+
+test('整区识图响应缺少原文时有限重试，持续结构错误失败，空原文不重试', async () => {
+  let recoveredCalls = 0;
+  const recovered = await translateScreenshot({ imageData: IMAGE, configs, recognitionMode: 'vision', options: { searchEnabled: false },
+    fetchImpl: async () => {
+      recoveredCalls++;
+      return recoveredCalls === 1 ? reply({ translation: '译文' }) : reply({ sourceText: 'Open', translation: '打开' });
+    } });
+  assert.equal(recoveredCalls, 2);
+  assert.equal(recovered.blocks[0].text, 'Open');
+  assert.equal(recovered.blocks[0].translation, '打开');
+  assert.equal(recovered.blocks[0].status, 'complete');
+
+  let invalidCalls = 0;
+  const invalid = await translateScreenshot({ imageData: IMAGE, configs, recognitionMode: 'vision', options: { searchEnabled: false },
+    fetchImpl: async () => { invalidCalls++; return reply({ translation: '译文' }); } });
+  assert.equal(invalidCalls, 3);
+  assert.equal(invalid.blocks[0].status, 'failed');
+  assert.equal(invalid.blocks[0].errorCode, 'TRANSLATION_RESPONSE_INVALID');
+  assert.deepEqual(invalid.pendingIds, [0]);
+
+  let emptyCalls = 0;
+  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, recognitionMode: 'vision', options: { searchEnabled: false },
+    fetchImpl: async () => { emptyCalls++; return reply({ sourceText: '   ', translation: '译文' }); } }), { code: 'OCR_EMPTY' });
+  assert.equal(emptyCalls, 1);
 });
 
 test('质量不足的本地识别在请求前切换识图并发送可供界面保存的模式元数据', async () => {
@@ -824,12 +599,15 @@ test('质量不足的本地识别在请求前切换识图并发送可供界面�
   assert.match(result.warning, /对照/);
 
   const failedStages = [];
-  await assert.rejects(translateScreenshot({ imageData: IMAGE, configs,
+  const failed = await translateScreenshot({ imageData: IMAGE, configs,
     recognize: async () => ({ blocks: [{ text: 'noise', x: 0, y: 0, width: 1, height: 1 }], quality: { reliable: false } }),
     onStage: (stage, metadata) => failedStages.push({ stage, metadata }),
-    fetchImpl: async () => { throw Error('远端识图失败'); } }), { code: 'NETWORK_ERROR' });
+    fetchImpl: async () => { throw Error('远端识图失败'); } });
   assert.equal(failedStages.at(-1).stage, 'translating');
   assert.equal(failedStages.at(-1).metadata.method, 'vision'); assert.equal(failedStages.at(-1).metadata.fallbackReason, 'quality');
+  assert.equal(failed.blocks[0].status, 'failed');
+  assert.equal(failed.blocks[0].translation, '');
+  assert.equal(failed.pendingIds.length, 1);
 });
 
 test('WinRT 多语言候选经真实桥接质量判定后走识图后备', async () => {
@@ -923,7 +701,6 @@ test('本地文字按真实位置一次批量翻译，原文保持引用材料�
   assert.equal(result.blocks[0].x, 0); assert.equal(result.blocks[0].translation, '测试译文');
   assert.equal(result.method, 'windows-ocr');
   assert.equal(result.fallbackReason, '');
-  assert.equal(result.unchangedCount, 0);
   assert.equal(result.rotationAdjusted, false);
 });
 
@@ -938,14 +715,62 @@ test('缺少识别语言时使用识图后备，明确整区覆盖且不伪造�
   assert.equal(result.blocks[0].width, 1); assert.equal(result.blocks[0].height, 1);
 });
 
-test('缺项、重复或越界的译文不得显示为成功，倾斜坐标校正后仍可覆盖并提示核对', async () => {
-  for (const translations of [[], [{ id: 2, translation: '错误对应' }], [{ id: 0, translation: '' }]]) {
-    await assert.rejects(translateScreenshot({ imageData: IMAGE, configs, recognize: async () => recognition, fetchImpl: async () => reply({ translations }) }), { code: 'INVALID_TRANSLATION' });
+test('缺项、重复、未知 ID、空译文与无效 JSON 分别标为硬失败', async () => {
+  const cases = [
+    [[], 'TRANSLATION_MISSING_ID'],
+    [[{ id: 2, translation: '错误对应' }], 'TRANSLATION_MISSING_ID'],
+    [[{ id: 0, translation: '' }], 'TRANSLATION_EMPTY'],
+    [[{ id: 0, translation: '第一次' }, { id: 0, translation: '第二次' }], 'TRANSLATION_DUPLICATE_ID'],
+  ];
+  for (const [translations, errorCode] of cases) {
+    let calls = 0;
+    const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false },
+      recognize: async () => recognition, fetchImpl: async () => { calls++; return reply({ translations }); } });
+    assert.equal(calls, 3, '缺项或结构错误只重试两次');
+    assert.equal(result.blocks[0].status, 'failed');
+    assert.equal(result.blocks[0].errorCode, errorCode);
+    assert.equal(result.blocks[0].translation, '');
   }
+  let invalidCalls = 0;
+  const invalidJson = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false },
+    recognize: async () => recognition, fetchImpl: async () => { invalidCalls++; return Response.json({ choices: [{ message: { content: '{broken' } }] }); } });
+  assert.equal(invalidCalls, 3);
+  assert.equal(invalidJson.blocks[0].status, 'failed');
+  assert.equal(invalidJson.blocks[0].errorCode, 'TRANSLATION_JSON_INVALID');
   const result = await translateScreenshot({ imageData: IMAGE, configs, recognize: async () => ({ ...recognition, angle: 3 }), fetchImpl: async () => reply({ translations: [{ id: 0, translation: '完整译文' }] }) });
   assert.equal(result.overlayAvailable, true); assert.equal(result.blocks[0].translation, '完整译文');
   assert.equal(result.rotationAdjusted, true);
   assert.equal(result.warning, '');
+});
+
+test('乱序 ID 按 OCR 原始顺序映射译文', async () => {
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false },
+    recognize: async () => ({ blocks: [
+      { text: 'Panel', x: 0, y: 0, width: 1, height: 1 }, { text: 'Desktop', x: 0, y: 0, width: 1, height: 1 },
+    ] }),
+    fetchImpl: async (_, request) => {
+      const lines = JSON.parse(JSON.parse(request.body).messages[1].content).lines;
+      return reply({ translations: [...lines].reverse().map(line => ({ id: line.id, translation: line.id === 0 ? '面板' : '桌面' })) });
+    } });
+  assert.deepEqual(result.blocks.map(block => block.id), [0, 1]);
+  assert.deepEqual(result.blocks.map(block => block.translation), ['面板', '桌面']);
+  assert.deepEqual(result.blocks.map(block => block.status), ['complete', 'complete']);
+});
+
+test('提前断开的模型流标记为截断失败且不回填原文', async () => {
+  let calls = 0;
+  const result = await translateScreenshot({ imageData: IMAGE, configs, options: { searchEnabled: false },
+    recognize: async () => recognition,
+    fetchImpl: async () => {
+      calls++;
+      const partial = JSON.stringify({ choices: [{ delta: { content: '{"translations":[' } }] });
+      return new Response(`data: ${partial}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    } });
+  assert.equal(result.blocks[0].status, 'failed');
+  assert.equal(result.blocks[0].errorCode, 'RESPONSE_TRUNCATED');
+  assert.equal(calls, 3);
+  assert.equal(result.blocks[0].translation, '');
+  assert.deepEqual(result.pendingIds, [0]);
 });
 
 test('Windows OCR 的去倾斜文字框绕图片中心还原到原图，边界裁切仍在本次截图内', () => {

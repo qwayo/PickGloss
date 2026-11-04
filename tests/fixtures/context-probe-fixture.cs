@@ -27,14 +27,17 @@ public static class ContextProbeFixture {
         string paragraph="这是虚构的段落诊断材料。测试词位于段落中间，前后文字都应该作为可信上下文。";
         string first="前一段只作为边界对照。", middle="目标段落含有测试词，应当只使用这一段。", last="后一段不能混入上下文。";
         string multiple=first+"\r\n"+middle+"\r\n"+last;
+        string wrapped=new string('甲',160)+"测试词"+new string('乙',160);
         var samples=new[] {
             new Sample("单段部分选区",paragraph,"测试词",paragraph,"取得上下文"),
+            new Sample("同段视觉换行",wrapped,"测试词",wrapped,"取得上下文"),
             new Sample("单段末尾换行",paragraph+"\r\n","测试词",paragraph,"取得上下文"),
             new Sample("单段末尾文字与表情一起选中","虚构签名🙂","签名🙂","虚构签名🙂","取得上下文"),
             new Sample("单段只选末尾表情","虚构签名🙂","🙂","虚构签名🙂","取得上下文"),
             new Sample("单段签名和表情全选","虚构签名🙂","虚构签名🙂","虚构签名🙂","取得上下文"),
-            new Sample("多段中选择词语",multiple,"测试词",middle,"不得混入邻段"),
-            new Sample("选区跨越段落",multiple,first+"\r\n"+middle,"","跨段"),
+            new Sample("多段中选择词语并补齐相邻段",multiple,"测试词",multiple,"取得上下文"),
+            new Sample("整段选择仍补充相邻段",multiple,middle,multiple,"取得上下文"),
+            new Sample("选区跨越段落并补齐首尾段",multiple,first+"\r\n"+middle,multiple,"取得上下文"),
             new Sample("单段5999字符",LongText(5999),"测试词",LongText(5999),"取得上下文"),
             new Sample("单段6000字符",LongText(6000),"测试词",LongText(6000),"取得上下文"),
             new Sample("6000字符段落末尾换行",LongText(6000)+"\r\n","测试词",LongText(6000),"取得上下文"),

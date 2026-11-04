@@ -2,6 +2,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
+const { performance } = require('node:perf_hooks');
 const { BrowserWindow, Menu, Tray, nativeImage, nativeTheme, systemPreferences, desktopCapturer, screen, utilityProcess, app, ipcMain } = require('electron');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
@@ -19,6 +20,9 @@ const { sourceForRegion } = require('./translation-source.cjs');
 const { createTranslationTracker } = require('./translation-tracker.cjs');
 const { createOrbController } = require('./orb-controller.cjs');
 const { panelResizeBounds, validResizePayload } = require('./panel-resize.cjs');
+
+const PANEL_MOTION_DURATION = 200;
+const PANEL_MOTION_FRAME = 16;
 
 function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, onWindowState, captureFactory = createScreenCapture, sourceFactory }) {
   const windows = new Map();
@@ -147,9 +151,9 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     queueWindowState();
   }
 
-  function stopAnimation(notify = true, committed = false) {
+  function stopAnimation(notify = true, committed = false, cancelLayout = true) {
     const running = !!animation;
-    if (animation && !committed && !animation.win.isDestroyed()) animation.win.webContents.send('pickgloss:layout', { phase: 'cancel', id: animation.id });
+    if (animation && !committed && cancelLayout && !animation.win.isDestroyed()) animation.win.webContents.send('pickgloss:layout', { phase: 'cancel', id: animation.id });
     clearTimeout(animationTimer); animationTimer = null; animation = null;
     if (running && notify) onStatus({ wide, windowTransitioning: false });
   }
@@ -157,6 +161,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   function finishAnimation() {
     const current = animation;
     if (!current) return;
+    clearTimeout(animationTimer); animationTimer = null;
     // 最后一帧仍保持抑制，避免同步 resize 回调记录动画尺寸。
     if (!current.win.isDestroyed()) {
       setWindowBounds(current.win, current.target);
@@ -166,19 +171,54 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     if (!current.win.isDestroyed()) rememberWindow('panel', current.win, false);
   }
 
+  function schedulePanelAnimationFrame(current) {
+    const now = performance.now(), elapsed = Math.max(0, now - current.startedAt);
+    if (elapsed >= PANEL_MOTION_DURATION) { finishAnimation(); return; }
+    let deadline = current.startedAt + current.frameIndex * PANEL_MOTION_FRAME;
+    while (deadline <= now) deadline = current.startedAt + ++current.frameIndex * PANEL_MOTION_FRAME;
+    animationTimer = setTimeout(() => animatePanelFrame(current), Math.max(1,
+      Math.min(PANEL_MOTION_DURATION - elapsed, deadline - now)));
+  }
+
+  function animatePanelFrame(current) {
+    if (animation !== current || current.phase !== 'animating') return;
+    const elapsed = Math.max(0, performance.now() - current.startedAt);
+    const progress = Math.min(1, elapsed / PANEL_MOTION_DURATION);
+    // 使用缓入缓出插值；每帧只改原生边界，renderer 在 commit 前保持原排版。
+    const eased = progress * progress * (3 - 2 * progress);
+    const bounds = Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key,
+      Math.round(current.start[key] + (current.target[key] - current.start[key]) * eased)]));
+    setWindowBounds(current.win, bounds);
+    if (progress >= 1) { finishAnimation(); return; }
+    current.frameIndex++;
+    schedulePanelAnimationFrame(current);
+  }
+
+  function startPanelAnimation(current) {
+    if (animation !== current || current.phase !== 'preparing') return;
+    clearTimeout(animationTimer); animationTimer = null;
+    if (current.win.isDestroyed()) { stopAnimation(); return; }
+    current.phase = 'animating';
+    current.start = { ...current.win.getBounds() };
+    current.startedAt = performance.now();
+    current.frameIndex = 1;
+    schedulePanelAnimationFrame(current);
+  }
+
   function animatePanel(win, target) {
-    stopAnimation(false);
+    // 快速反向时保留 renderer 冻结的原内容，新的 prepare 直接替换旧布局令牌。
+    stopAnimation(false, false, reducedMotion);
     if (reducedMotion) { setWindowBounds(win, target); rememberWindow('panel', win, false); onStatus({ wide, windowTransitioning: false }); return; }
-    const current = animation = { win, target, id: ++layoutSerial };
-    // 先让旧文字退出绘制，再一次提交目标尺寸；不再逐帧让 Win32 和 Chromium 同时重排。
+    const current = animation = { win, target, id: ++layoutSerial, phase: 'preparing' };
+    // 先让旧文字退出绘制；收到 ACK 后平滑改变原生窗口边界，最后再提交新排版。
     win.webContents.send('pickgloss:layout', { phase: 'prepare', id: current.id });
-    // renderer 尚未载入或退出时仍能完成切换；过期 ACK 不得影响新切换。
-    animationTimer = setTimeout(() => { if (animation === current) finishAnimation(); }, 100);
+    // renderer 尚未载入或退出时仍能完成切换；超时开始原生过渡，迟到 ACK 不得提前提交。
+    animationTimer = setTimeout(() => startPanelAnimation(current), 100);
   }
 
   function layoutReady(event, id) {
     if (!animation || animation.id !== id || event.sender !== animation.win.webContents || event.senderFrame !== event.sender.mainFrame) return;
-    finishAnimation();
+    startPanelAnimation(animation);
   }
   ipcMain.on('pickgloss:layout-ready', layoutReady);
 
@@ -975,9 +1015,10 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       const area = screen.getDisplayMatching(bounds).workArea;
       // 原生落位可能产生像素取整差异，不能据此丢掉原小窗位置并重新选择左右边缘。
       // 真正的用户拖动或拉伸已在 will-move／will-resize 中清除这份往返位置。
-      const origin = !wide && panelTransition ? panelTransition.compact : bounds;
+      // 同一轮动画中的反向切换始终从已确定的小窗边缘锚点计算目标，不能用中间帧重判最近边缘。
+      const origin = panelTransition?.compact || bounds;
       const next = resizePanel(origin, panelSizes[wide ? 'reading' : 'compact'], area);
-      // 收窄过程中仍保留小窗原位，连续反向不会拿中间帧作为下一次的返回位置。
+      // 收窄过程中仍保留小窗原位；下次展开也复用此锚点，避免收缩中点跨过边缘判断阈值。
       if (wide) panelTransition = { compact: wasAnimating && panelTransition ? panelTransition.compact : bounds, reading: next };
       onStatus({ wide, windowTransitioning: true });
       animatePanel(win, next);

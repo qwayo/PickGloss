@@ -32,6 +32,7 @@ function createUiDriver(evaluate, { timeoutMs = 12000, intervalMs = 40 } = {}) {
     async click(label, { scope, selector = 'button', stage = '点击目标控件' } = {}) {
       phase = stage;
       target = { label, scope, selector };
+      await this.waitFor('!document.documentElement.classList.contains("layout-preparing")', '窗口终态排版已提交', { allowErrors: true });
       const report = await inspect({ ...target, click: true });
       if (!report.clicked) throw failure('唯一可操作控件', report, report.scopes !== 1 ? '分区匹配不唯一' : report.actionable > 1 ? '同名控件匹配不唯一' : '未找到可操作控件');
     },
