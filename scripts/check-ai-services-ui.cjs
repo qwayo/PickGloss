@@ -486,9 +486,13 @@ app.whenReady().then(async () => {
     assert.deepEqual(customDraft,{protocol:'deepseek',url:'https://custom-search.mock.invalid/query',key:'虚构自定义搜索Key',visible:true,keyLinkHidden:true});
     await pushState();
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="search-protocol"]').value`),'deepseek','状态重绘保留未保存的协议选择');
+    const customSaved = await waitForCall('save-settings', item => item.payload.serviceProfiles?.search?.custom?.apiKey === '虚构自定义搜索Key');
+    assert.deepEqual(customSaved.payload.serviceProfiles.search.custom, { protocol: 'deepseek', baseUrl: 'https://custom-search.mock.invalid/query', apiKey: '虚构自定义搜索Key' });
+    assert.equal(customSaved.payload.search.apiKey, '虚构自定义搜索Key');
+    await waitFor(`document.querySelector('[name="search-apiKey"]').value==='' && document.querySelector('[data-key-status="search"]').textContent.includes('已配置')`, '自定义搜索密钥保存完成并从输入框清除');
     await driver.click('测试搜索服务', { scope: '[data-provider="search"]' });
     await waitForCall('test-search-provider',item=>item.payload.config.providerId==='custom');
-    assert.deepEqual(calls.find(item=>item.action==='test-search-provider'&&item.payload.config.providerId==='custom').payload.config,{providerId:'custom',protocol:'deepseek',baseUrl:'https://custom-search.mock.invalid/query',apiKey:'虚构自定义搜索Key'});
+    assert.deepEqual(calls.find(item=>item.action==='test-search-provider'&&item.payload.config.providerId==='custom').payload.config,{providerId:'custom',protocol:'deepseek',baseUrl:'https://custom-search.mock.invalid/query'});
     await delay(220);
     await screenshot('搜索服务-自定义提供商.png');
 

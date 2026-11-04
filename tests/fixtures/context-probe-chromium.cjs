@@ -17,9 +17,10 @@ const samples = [
   { name: '单行控件6001字符不能借边界截断接纳', document: '测试词' + '甲'.repeat(5998), selection: '测试词', context: '', rule: '超限' },
   { name: '6000字符控件选到末尾表情', document: '甲'.repeat(5998) + '🙂', selection: '甲🙂', rule: '取得上下文' },
   { name: '6001字符控件选到表情仍拒绝超限', document: '甲'.repeat(5999) + '🙂', selection: '甲🙂', context: '', rule: '超限' },
-  { name: '多行控件不混入邻段', document: '前一段不得作为当前上下文。\n后一段含有测试词。', selection: '测试词', context: '后一段含有测试词。', multiline: true, rule: '不得混入邻段' },
-  { name: '多行控件选择末尾表情不放行完整多段', document: '前一段不能混入上下文。\n后一段有测试词🙂', selection: '测试词🙂', context: '后一段有测试词🙂', multiline: true, rule: '不得混入邻段' },
-  { name: '多行控件跨段选区仍拒绝', document: '前一段正文。\n后一段含有测试词。', selection: '正文。\n后一段', context: '', multiline: true, rule: '跨段' },
+  { name: '多行控件补齐所在段及前一段', document: '前一段不得作为当前上下文。\n后一段含有测试词。', selection: '测试词', context: '前一段不得作为当前上下文。\n后一段含有测试词。', multiline: true, rule: '取得上下文' },
+  { name: '多行控件选区末尾表情并保留前段', document: '前一段不能混入上下文。\n后一段有测试词🙂', selection: '测试词🙂', context: '前一段不能混入上下文。\n后一段有测试词🙂', multiline: true, rule: '取得上下文' },
+  { name: '多行控件跨段选区补齐首尾段', document: '前一段正文。\n后一段含有测试词。', selection: '正文。\n后一段', context: '前一段正文。\n后一段含有测试词。', multiline: true, rule: '取得上下文' },
+  { name: '多行控件整段选区保留前后段', document: '前一段。\n目标段落完整选中。\n后一段。', selection: '目标段落完整选中。', context: '前一段。\n目标段落完整选中。\n后一段。', multiline: true, rule: '取得上下文' },
   { name: '多行控件只有单段且带表情', document: '虚构签名🙂', selection: '签名', context: '虚构签名🙂', multiline: true, rule: '取得上下文' },
 ];
 async function probe(request) {

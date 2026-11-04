@@ -52,7 +52,7 @@ const sequence=arg('sequence')||'roundtrip';
 const cycles = Number(arg('cycles') || 2);
 if (!['source', 'lock-compact', 'sync-layout', 'freeze-content', 'freeze-content-commit', 'flip-x', 'flip-xy', 'sync-flip-x', 'flip-x-protected', 'sync-flip-x-protected', 'sync-guarded-flip'].includes(variant)) throw new Error('实验类型无效。');
 if(!['source','disabled'].includes(glow))throw new Error('外光实验开关无效。');
-if(!['roundtrip','rapid'].includes(sequence))throw new Error('动作序列无效。');
+if(!['roundtrip','rapid','anchor-reversal'].includes(sequence))throw new Error('动作序列无效。');
 if (!['solid', 'glass'].includes(material)) throw new Error('材质必须为 solid 或 glass。');
 if (!['top', 'middle', 'bottom'].includes(scrollPosition)) throw new Error('滚动位置无效。');
 if (!Number.isInteger(cycles) || cycles < 1 || cycles > 8) throw new Error('测量轮数必须为1至8。');
@@ -65,12 +65,22 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 const snapshotRoot = path.resolve(arg('snapshot') || path.join(outputRoot, 'sources'));
 if (!arg('snapshot')) {
-  fs.cpSync(path.join(sourceRoot, 'src/renderer'), path.join(snapshotRoot, 'src/renderer'), { recursive: true });
-  for (const relative of ['src/windows/desktop.cjs', 'src/windows/geometry.cjs', 'src/preload.cjs', 'node_modules/markdown-it/dist/browser/markdown-it.umd.min.js']) {
+  for (const relative of ['src/renderer', 'src/windows', 'src/core']) {
+    fs.cpSync(path.join(sourceRoot, relative), path.join(snapshotRoot, relative), { recursive: true });
+  }
+  for (const relative of ['src/preload.cjs', 'node_modules/markdown-it/dist/browser/markdown-it.umd.min.js']) {
     const destination = path.join(snapshotRoot, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(path.join(sourceRoot, relative), destination);
   }
+}
+const snapshotDependencies = ['src/renderer/index.html', 'src/renderer/app.js', 'src/preload.cjs',
+  'src/windows/desktop.cjs', 'src/windows/geometry.cjs', 'src/windows/window-appearance.cjs',
+  'src/windows/translation-layout.cjs', 'src/windows/screen-capture.cjs', 'src/windows/translation-source.cjs',
+  'src/windows/translation-tracker.cjs', 'src/windows/orb-controller.cjs', 'src/windows/panel-resize.cjs',
+  'src/core/validation.cjs', 'node_modules/markdown-it/dist/browser/markdown-it.umd.min.js'];
+for (const relative of snapshotDependencies) if (!fs.existsSync(path.join(snapshotRoot, relative))) {
+  throw new Error(`隔离快照缺少正式依赖：${relative}。请使用默认闭包生成快照，或补齐 --snapshot。`);
 }
 const originalSource = fs.readFileSync(path.join(snapshotRoot, 'src/windows/desktop.cjs'), 'utf8');
 let runtimeRoot=snapshotRoot;
@@ -139,7 +149,12 @@ function presentationAnchorNode() {
 }
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
 const hashes = {};
-for (const relative of ['src/windows/desktop.cjs', 'src/windows/geometry.cjs', 'src/preload.cjs', ...fs.readdirSync(path.join(snapshotRoot, 'src/renderer')).filter(name => /\.(html|js|css)$/.test(name)).map(name => 'src/renderer/' + name)]) hashes[relative] = sha256(fs.readFileSync(path.join(snapshotRoot, relative)));
+const hashFiles = [...snapshotDependencies.filter(relative => relative.startsWith('src/')),
+  ...fs.readdirSync(path.join(snapshotRoot, 'src/renderer')).filter(name => /\.(html|js|css)$/.test(name)).map(name => 'src/renderer/' + name),
+  ...fs.readdirSync(path.join(snapshotRoot, 'src/windows')).filter(name => /\.(cjs|cs)$/.test(name)).map(name => 'src/windows/' + name),
+  ...fs.readdirSync(path.join(snapshotRoot, 'src/core')).filter(name => /\.cjs$/.test(name)).map(name => 'src/core/' + name),
+  'node_modules/markdown-it/dist/browser/markdown-it.umd.min.js'];
+for (const relative of [...new Set(hashFiles)].sort()) hashes[relative] = sha256(fs.readFileSync(path.join(snapshotRoot, relative)));
 for (const method of ['show', 'showInactive']) BrowserWindow.prototype[method] = function () { throw new Error('隐藏诊断禁止展示窗口。'); };
 const createdWindows = [];
 const nativeWindowCalls=[];
@@ -180,13 +195,20 @@ const probeCode = `(() => {
   probe.sample = at => {
     if (!probe.active) return;
     const scroller = document.querySelector('[data-scroll="body"]'), panel = document.querySelector('.panel');
+    const body = panel?.querySelector('.panel-body'), content = panel?.querySelector('.message-content');
     const anchorRect = rect(probe.anchor), scrollRect = rect(scroller), tabs = document.querySelector('.mode-tabs');
     const selected = tabs?.querySelector('[aria-selected="true"]');
-    const paragraph=probe.anchor?.tagName==='P'?probe.anchor:probe.anchor?.nextElementSibling;
+    const paragraph=probe.anchor?.tagName==='P'?probe.anchor:probe.anchor?.nextElementSibling?.tagName==='P'?probe.anchor.nextElementSibling:document.querySelector('.message-content p');
     const paragraphRect=rect(paragraph); let paragraphLines=null;
     if(paragraph?.tagName==='P'){const range=document.createRange();range.selectNodeContents(paragraph);paragraphLines=new Set([...range.getClientRects()].map(value=>Math.round(value.top))).size;}
     const overflowX=scroller?getComputedStyle(scroller).overflowX:null;
-    probe.samples.push({ at, phase:probe.phase, width:innerWidth, height:innerHeight, reading:panel?.classList.contains('reading-layout'), scroller:scroller?.className, scrollTop:scroller?.scrollTop, scrollLeft:scroller?.scrollLeft,scrollWidth:scroller?.scrollWidth,clientWidth:scroller?.clientWidth,overflowX,horizontalScrollbar:scroller && scroller.scrollWidth>scroller.clientWidth+1 && !['hidden','clip'].includes(overflowX),scrollHeight:scroller?.scrollHeight, clientHeight:scroller?.clientHeight, anchor:anchorRect, anchorOffset:anchorRect && scrollRect ? anchorRect.y-scrollRect.y : null, paragraph:paragraphRect,paragraphLines,answer:rect(document.querySelector('.answer-pane')), source:rect(document.querySelector('.source-pane')), tabs:rect(tabs), selected:rect(selected), indicator:rect(tabs?.querySelector('.mode-indicator')), composer:rect(document.querySelector('.composer-wrap')), fontSize:getComputedStyle(document.querySelector('.message')).fontSize });
+    const contentBoxes=[...(panel?.children||[])].filter(node=>!node.classList.contains('native-pin-frame')).map(node=>({className:String(node.className),rect:rect(node),inlineWidth:node.style.width,inlineHeight:node.style.height}));
+    const paragraphText=paragraph?{rect:paragraphRect,lines:paragraphLines}:null;
+    probe.samples.push({ at, phase:probe.phase, width:innerWidth, height:innerHeight, reading:panel?.classList.contains('reading-layout'),
+      layoutFrozen:contentBoxes.length>0&&contentBoxes.every(value=>value.inlineWidth!==''&&value.inlineHeight!==''),contentBoxes,paragraphText,
+      bodyOpacity:body?Number.parseFloat(getComputedStyle(body).opacity):null,
+      contentOpacity:content?Number.parseFloat(getComputedStyle(content).opacity):null,
+      scroller:scroller?.className, scrollTop:scroller?.scrollTop, scrollLeft:scroller?.scrollLeft,scrollWidth:scroller?.scrollWidth,clientWidth:scroller?.clientWidth,overflowX,horizontalScrollbar:scroller && scroller.scrollWidth>scroller.clientWidth+1 && !['hidden','clip'].includes(overflowX),scrollHeight:scroller?.scrollHeight, clientHeight:scroller?.clientHeight, anchor:anchorRect, anchorOffset:anchorRect && scrollRect ? anchorRect.y-scrollRect.y : null, paragraph:paragraphRect,paragraphLines,answer:rect(document.querySelector('.answer-pane')), source:rect(document.querySelector('.source-pane')), tabs:rect(tabs), selected:rect(selected), indicator:rect(tabs?.querySelector('.mode-indicator')), composer:rect(document.querySelector('.composer-wrap')), fontSize:getComputedStyle(document.querySelector('.message')).fontSize });
   };
   probe.start = position => {
     const scroller = document.querySelector('[data-scroll="body"]');
@@ -233,6 +255,14 @@ app.whenReady().then(async () => {
     desktop.setAppearance(state.settings.prefs.appearance);
     await desktop.smoke();
     const win = createdWindows[0];
+    let anchorReversalStartBounds = null;
+    if (sequence === 'anchor-reversal') {
+      const area = electron.screen.getPrimaryDisplay().workArea;
+      anchorReversalStartBounds = { x: area.x + Math.round(area.width * .35), y: area.y + 40, width: 300, height: 483 };
+      desktop.restoreWindowState({ panel: { x: anchorReversalStartBounds.x, y: anchorReversalStartBounds.y }, wide: false,
+        sizes: { compact: { width: 300, height: 483 }, reading: { width: 860, height: 690 } } });
+      anchorReversalStartBounds = { ...win.getBounds() };
+    }
     desktop.setPinned(pinned);
     win.webContents.on('console-message', (_event, details) => { if (details.level === 'error') errors.push(details.message); });
     win.webContents.setFrameRate(60);
@@ -257,17 +287,22 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(`resizePresentation.start(${quoteJavaScriptString(scrollPosition)})`);
     await sleep(100);
     const rounds = [];
-    const actions=Array.from({length:cycles},()=>sequence==='rapid'?[{wide:true,wait:145},{wide:false,wait:85},{wide:true,wait:440},{wide:false,wait:370}]:[{wide:true,wait:440},{wide:false,wait:370}]).flat();
+    const actions=Array.from({length:cycles},()=>sequence==='anchor-reversal'
+      ?[{wide:true,wait:320},{wide:false,wait:80},{wide:true,wait:320},{wide:false,wait:320}]
+      :sequence==='rapid'?[{wide:true,wait:145},{wide:false,wait:85},{wide:true,wait:440},{wide:false,wait:370}]
+      :[{wide:true,wait:440},{wide:false,wait:370}]).flat();
     for (let round = 0; round < actions.length; round++) {
       const {wide,wait}=actions[round];
       phase = `${round+1}-${wide?'expand':'contract'}`;
       measurementPhase=phase;
       const start = performance.now();
       const rendererStart = await win.webContents.executeJavaScript(`resizePresentation.phase=${quoteJavaScriptString(phase)}; performance.now()`);
+      const startBounds = { ...win.getBounds() };
       desktop.setWide(wide);
       await sleep(wait);
       const rendererEnd = await win.webContents.executeJavaScript('performance.now()');
-      rounds.push({ phase, wide, start, end:performance.now(), rendererStart, rendererEnd });
+      rounds.push({ phase, wide, wait, interrupted: wait < 200, start, end:performance.now(), rendererStart, rendererEnd,
+        startBounds, targetBounds: { ...win.getBounds() } });
     }
     phase = 'idle';
     measurementPhase='idle';
@@ -286,28 +321,81 @@ app.whenReady().then(async () => {
       frame.pixelReading=scrollPosition==='middle' && frame.contentInk.count>=8 ? frame.contentInk.minX>120 : null;
       frame.layoutWidthMismatch=frame.pixelReading===null || !['source','sync-layout'].includes(variant)?null:frame.pixelReading!==(frame.size.width>=640);
     }
-    const structuralJumps = [], paintedContentJumps=[];
+    const structuralJumps = [], paintedContentJumps=[], readingLayoutCommits=[];
     for (const round of rounds) {
       const samples = renderer.samples.filter(value => value.phase === round.phase);
       const calls = nativeCalls.filter(value => value.phase === round.phase);
       const frames = paints.filter(value => value.phase === round.phase);
       const jumps = [];
-      for(let index=1;index<frames.length;index++){
-        const previous=frames[index-1],current=frames[index];
-        if(previous.contentInk.count<8 || current.contentInk.count<8)continue;
-        const deltaX=current.contentInk.minX-previous.contentInk.minX;
-        if(scrollPosition==='middle' && Math.abs(deltaX)>80)paintedContentJumps.push({phase:round.phase,index,frameGap:current.at-previous.at,fromWidth:previous.size.width,toWidth:current.size.width,fromX:previous.contentInk.minX,toX:current.contentInk.minX,deltaX});
-      }
+      const sameBounds = (left, right) => ['x','y','width','height'].every(key => left?.[key] === right?.[key]);
+      round.nativeSizes = calls.map(value => ({ at:value.at, ...value.actual }));
+      round.intermediateNativeFrames = calls.filter(value => !sameBounds(value.actual, round.startBounds) &&
+        !sameBounds(value.actual, round.targetBounds)).length;
+      round.nativeMotionDurationMs = calls.length > 1 ? calls.at(-1).at-calls[0].at : 0;
+      round.requestToTargetDurationMs = calls.length ? calls.at(-1).at-round.start : 0;
+      round.nativeTargetReached = sameBounds(calls.at(-1)?.actual, round.targetBounds);
+      const toMainTime = value => round.start + (value-round.rendererStart);
+      const motionStart = calls[0]?.at, motionEnd = calls.at(-1)?.at;
+      const inMotionSamples = motionStart === undefined ? [] : samples.filter(value => {
+        const at = toMainTime(value.at); return at >= motionStart-2 && at <= motionEnd+2;
+      });
+      const contentKey = value => JSON.stringify({ reading:value.reading, fontSize:value.fontSize,
+        scrollTop:value.scrollTop, scrollLeft:value.scrollLeft, scrollWidth:value.scrollWidth,
+        clientWidth:value.clientWidth, scrollHeight:value.scrollHeight, clientHeight:value.clientHeight,
+        contentBoxes:value.contentBoxes?.filter(box=>box.className.includes('panel-body'))
+          .map(box=>({rect:box.rect,inlineWidth:box.inlineWidth,inlineHeight:box.inlineHeight})),
+        paragraphText:value.paragraphText });
+      const contentKeys = inMotionSamples.map(contentKey);
+      round.contentFreezeSampleCount = inMotionSamples.length;
+      round.contentFreezePass = inMotionSamples.length >= (round.interrupted?2:3) && inMotionSamples.every(value=>value.layoutFrozen) &&
+        contentKeys.every(value=>value===contentKeys[0]);
+      round.opacitySamples = samples.map(value=>({ at:value.at, bodyOpacity:value.bodyOpacity, contentOpacity:value.contentOpacity }));
+      round.opacityPass = samples.length >= 3 && samples.every(value=>value.bodyOpacity === 1 && value.contentOpacity === 1);
+      round.contentInkPaintCount = frames.filter(value=>value.contentInk.count>=8).length;
+      round.frozenFontSizes = [...new Set(inMotionSamples.map(value=>value.fontSize))];
+      round.frozenReadingLayout = [...new Set(inMotionSamples.map(value=>value.reading))];
+      round.frozenParagraphLineCounts = [...new Set(inMotionSamples.map(value=>value.paragraphText?.lines ?? null))];
       for (let index=1; index<samples.length; index++) {
         const previous=samples[index-1], current=samples[index];
         const deltaX=current.anchor && previous.anchor ? current.anchor.x-previous.anchor.x : 0;
         const deltaY=current.anchor && previous.anchor ? current.anchor.y-previous.anchor.y : 0;
         const deltaOffset=current.anchorOffset-previous.anchorOffset;
+        if (current.reading !== previous.reading) {
+          const commit={phase:round.phase,at:current.at,fromWidth:previous.width,toWidth:current.width,
+            fromReading:previous.reading,toReading:current.reading,deltaX,deltaY,deltaOffset};
+          round.readingLayoutCommit=commit; readingLayoutCommits.push(commit);
+          continue;
+        }
         // scroller本身也可能被纯位移；用锚点相对视口的实际位置判断抖动，保留相对offset作锚点核对。
         if (Math.abs(deltaX)>80 || Math.abs(deltaY)>30) {
           const jump={phase:round.phase,at:current.at,frameGap:current.at-previous.at,fromWidth:previous.width,toWidth:current.width,layoutChanged:current.reading!==previous.reading,fromReading:previous.reading,toReading:current.reading,deltaX,deltaY,deltaOffset,from:previous,to:current};
           jumps.push(jump); structuralJumps.push(jump);
         }
+      }
+      // 正文在终态布局提交后可能按新列宽换行，允许精确跨越该提交的一对paint帧；其他帧仍检查真实墨迹横移。
+      const commitIndex = samples.findIndex((value,index)=>index>0&&value.reading!==samples[index-1].reading);
+      if (commitIndex > 0 && frames.length > 1) {
+        const commitAt = toMainTime(samples[commitIndex].at);
+        let nearest = null;
+        for (let index=1; index<frames.length; index++) {
+          const previous=frames[index-1],current=frames[index];
+          const distance = commitAt < previous.at ? previous.at-commitAt : commitAt > current.at ? commitAt-current.at : 0;
+          if (!nearest || distance < nearest.distance) nearest = { index, distance, previous, current };
+        }
+        if (nearest && nearest.distance <= 50) {
+          round.layoutCommitAt = commitAt;
+          round.layoutCommitPaintTransition = { index:nearest.index, distanceMs:nearest.distance,
+            fromWidth:nearest.previous.size.width,toWidth:nearest.current.size.width,
+            fromX:nearest.previous.contentInk.minX,toX:nearest.current.contentInk.minX,
+            deltaX:nearest.current.contentInk.minX-nearest.previous.contentInk.minX };
+        }
+      }
+      for(let index=1;index<frames.length;index++){
+        if(index===round.layoutCommitPaintTransition?.index)continue;
+        const previous=frames[index-1],current=frames[index];
+        if(previous.contentInk.count<8 || current.contentInk.count<8)continue;
+        const deltaX=current.contentInk.minX-previous.contentInk.minX;
+        if(scrollPosition==='middle' && Math.abs(deltaX)>80)paintedContentJumps.push({phase:round.phase,index,frameGap:current.at-previous.at,fromWidth:previous.size.width,toWidth:current.size.width,fromX:previous.contentInk.minX,toX:current.contentInk.minX,deltaX});
       }
       round.nativeCadence=distribution(gaps(calls.map(value=>value.at)));
       round.paintCadence=distribution(gaps(frames.map(value=>value.at)));
@@ -324,6 +412,7 @@ app.whenReady().then(async () => {
       round.horizontalScrollbarSamples=samples.filter(value=>value.horizontalScrollbar).length;
       round.extraNativeCalls=nativeWindowCalls.filter(value=>value.phase===round.phase && value.kind==='pin-glow').length;
       round.extraNativeCost=distribution(nativeWindowCalls.filter(value=>value.phase===round.phase && value.kind==='pin-glow').map(value=>value.cost));
+      round.anchorCommitPass=!round.readingLayoutCommit || Math.abs(round.readingLayoutCommit.deltaOffset)<=2;
     }
     // 动画结束后才编码图像，避免PNG编码阻塞干扰动效测量。
     const framesDirectory=path.join(outputRoot,'frames'); fs.mkdirSync(framesDirectory,{recursive:true});
@@ -339,14 +428,30 @@ app.whenReady().then(async () => {
       }
     }
     const hidden=createdWindows.every(value=>value.isDestroyed() || !value.isVisible());
-    const continuityPass=structuralJumps.length===0 && paintedContentJumps.length===0;
-    const measurementAvailable=rounds.every(round=>round.paintCount>=3 && round.sampleCount>=3);
-    const report={description:'真实正式界面与原生尺寸路径的隐藏离屏绘制和逐帧布局诊断。虚构材料；不代表Windows前台DWM呈现或真人验收。',variant,pinned,glow,sequence,createdWindows:createdWindows.map(value=>({kind:value._probeKind,visible:value.isDestroyed()?false:value.isVisible()})),experimentChanges,experimentRendererSha256:sha256(fs.readFileSync(path.join(runtimeRoot,'src/renderer/app.js'))),scrollPosition,cycles,outputRoot,snapshotRoot,runtimeRoot,isolated,hashes,environment,electron:process.versions.electron,platform:process.platform,release:os.release(),hidden,errors,measurementAvailable,continuityPass,pixelProbeAvailable:scrollPosition==='middle',criterion:'正式resize监听器完成布局rAF之后，同一阅读锚点相对视口的相邻帧横移超过80 CSS像素或纵移超过30 CSS像素，记录为布局不连续；相对scroller的offset另记，避免scroller本身参与transform时误判。中部固定虚构材料的真实离屏paint顶端正文笔画横移超过80像素另行记录；顶部像素仅保存人工看图。每动作必须至少有3次实际绘制。阈值未放宽。',rounds,structuralJumps,paintedContentJumps,statusChanges,raw:{nativeCalls,nativeWindowCalls,paints:paints.map(({image,...value})=>value),renderer},limits:['离屏绘制包括真实布局和Chromium像素生成，但不包括可见桌面的DWM、显示刷新和用户主观抖动判断。','rAF几何与paint只按同一动作关联；不声称每个DOM样本均已一一呈现。','像素笔画定位仅适用于此固定虚构材料，不能直接套用任意用户会话。','本判据捕获内容跳变；断点重排本身是现有设计行为，需要单变量实验判定改善与副作用。']};
+    const readingTargets = rounds.filter(value=>value.wide).map(value=>value.targetBounds);
+    const compactTargets = rounds.filter(value=>!value.wide).map(value=>value.targetBounds);
+    const sameBounds = (left, right) => ['x','y','width','height'].every(key => left?.[key] === right?.[key]);
+    const anchorReversal = sequence === 'anchor-reversal' ? {
+      startBounds: anchorReversalStartBounds,
+      firstReadingBounds: readingTargets[0] || null,
+      reversedReadingBounds: readingTargets[1] || null,
+      finalCompactBounds: compactTargets.at(-1) || null,
+      readingTargetsStable: readingTargets.length === 2 && sameBounds(readingTargets[0], readingTargets[1]),
+      compactReturnedToStart: !!anchorReversalStartBounds && sameBounds(compactTargets.at(-1), anchorReversalStartBounds),
+    } : null;
+    const anchorReversalPass = sequence !== 'anchor-reversal' ||
+      anchorReversal?.readingTargetsStable === true && anchorReversal?.compactReturnedToStart === true;
+    const continuityPass=structuralJumps.length===0 && paintedContentJumps.length===0 &&
+      rounds.every(round=>round.contentFreezePass&&round.anchorCommitPass&&round.opacityPass) && anchorReversalPass;
+    const measurementAvailable=rounds.every(round=>round.paintCount>=(round.interrupted?1:3)&&round.sampleCount>=3&&
+      round.intermediateNativeFrames>=(round.interrupted?2:3)&&round.contentFreezeSampleCount>=(round.interrupted?2:3)&&
+      (round.interrupted||round.nativeTargetReached));
+    const report={description:'真实正式界面与原生尺寸路径的隐藏离屏绘制诊断。逐帧核对窗口边界、冻结内容尺寸、字号、段落行数、阅读锚点与正文不透明度。虚构材料；不代表Windows前台DWM呈现或真人验收。',variant,pinned,glow,sequence,createdWindows:createdWindows.map(value=>({kind:value._probeKind,visible:value.isDestroyed()?false:value.isVisible()})),experimentChanges,experimentRendererSha256:sha256(fs.readFileSync(path.join(runtimeRoot,'src/renderer/app.js'))),scrollPosition,cycles,outputRoot,snapshotRoot,runtimeRoot,isolated,hashes,environment,electron:process.versions.electron,platform:process.platform,release:os.release(),hidden,errors,measurementAvailable,continuityPass,anchorReversal,readingLayoutCommits,pixelProbeAvailable:scrollPosition==='middle',criterion:'动画帧期间正式内容容器必须保持冻结，字号、正文段落行数、内容矩形与滚动位置不变，panel-body及message-content的计算opacity始终为1；原生窗口必须至少出现3个中间尺寸并准确抵达目标。两栏切换的终端排版提交允许锚点横向位置变化，但相对阅读视口的锚点偏移误差不得超过2 CSS像素。动画期间同一排版下锚点相邻帧横移超过80 CSS像素或纵移超过30 CSS像素记为不连续；固定虚构正文在离屏paint中的横移超过80像素另行记录。每动作至少3次绘制。anchor-reversal还要求两次阅读视图终点同位，并最终回到原小窗坐标。',rounds,structuralJumps,paintedContentJumps,statusChanges,raw:{nativeCalls,nativeWindowCalls,paints:paints.map(({image,...value})=>value),renderer},limits:['离屏绘制包括真实布局和Chromium像素生成，但不包括可见桌面的DWM、显示刷新和用户主观抖动判断。','rAF几何与paint只按同一动作关联；不声称每个DOM样本均已一一呈现。','像素笔画定位仅适用于此固定虚构材料，不能直接套用任意用户会话。','只验证中间帧及内容边界；真实前台呈现仍需独立可见验收。']};
     report.material = material;
     report.effectiveMaterial = state.status.appearanceMaterial ?? null;
     report.pixelProbeMethod = '固定虚构标题取样带按12列连续空白分簇，选择最大墨迹簇；保留全带minX及各簇用于排除来源标签。颜色、透明度、80像素横移阈值均未修改。';
     fs.writeFileSync(path.join(outputRoot,'report.json'),JSON.stringify(report,null,2));
-    console.log(JSON.stringify({report:path.join(outputRoot,'report.json'),variant,material,effectiveMaterial:report.effectiveMaterial,hidden,measurementAvailable,continuityPass,structuralJumps:structuralJumps.map(({from,to,...value})=>value),paintedContentJumps,rounds:rounds.map(({paintedSizes,...value})=>value)},null,2));
+    console.log(JSON.stringify({report:path.join(outputRoot,'report.json'),variant,material,effectiveMaterial:report.effectiveMaterial,hidden,measurementAvailable,continuityPass,anchorReversal,structuralJumps:structuralJumps.map(({from,to,...value})=>value),paintedContentJumps,rounds:rounds.map(({paintedSizes,...value})=>value)},null,2));
     desktop.dispose();clearTimeout(timeout);
     app.exit(hidden && measurementAvailable && errors.length===0 && (!process.argv.includes('--assert-continuity') || continuityPass)?0:1);
   }catch(error){console.error(error.stack);desktop?.dispose();clearTimeout(timeout);app.exit(1);}

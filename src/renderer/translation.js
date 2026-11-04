@@ -93,12 +93,14 @@ function translationStatus(data, changedOptions, localError) {
   if (data.status === 'failed') return ['preparing', 'searching'].includes(data.search?.status) ? '联网失败' : data.method === 'vision' ? '识图失败' : '翻译失败';
   if (data.status === 'stopped') return '已停止';
   if (data.status === 'recognizing') return data.method === 'vision' ? '识图中…' : '本地 OCR · 识别中';
-  if (data.status === 'complete' && changedOptions) return changedOptions;
+  if (['complete', 'partial'].includes(data.status) && changedOptions) return changedOptions;
+  if (data.status === 'partial') return `部分完成 · ${data.failedCount || 0} 处翻译失败`;
   if (data.method === 'vision') {
     const mode = data.fallbackReason === 'manual' ? '识图模式' : data.fallbackReason === 'language' ? 'OCR 缺少语言 · 识图' : data.fallbackReason === 'quality' ? 'OCR 不清晰 · 识图' : data.fallbackReason === 'empty' ? 'OCR 无文字 · 识图' : data.fallbackReason === 'unavailable' ? 'OCR 失败 · 识图' : '识图模式';
     return data.status === 'translating' ? `${mode}中…` : mode;
   }
-  return data.status === 'translating' ? '本地 OCR · 翻译中' : '本地 OCR · 完成';
+  const completed = data.blocks?.filter(block => block.status === 'complete').length || 0;
+  return data.status === 'translating' ? completed ? `翻译中 · ${completed}/${data.blocks.length}` : '本地 OCR · 翻译中' : '本地 OCR · 完成';
 }
 
 export function createTranslationUI({ root, invoke, role = 'controls' }) {
@@ -174,7 +176,7 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
     }
   };
   const startOriginalHold = (kind, event, button) => {
-    if (!button || button.disabled || current?.status !== 'complete' || current.options.displayMode !== 'overlay') return;
+    if (!button || button.disabled || !['complete', 'partial'].includes(current?.status) || current.options.displayMode !== 'overlay') return;
     if (originalHold) {
       if (originalHold.kind === kind && originalHold.pointerId === event.pointerId && originalHold.key === event.key) return;
       endOriginalHold();
@@ -265,7 +267,7 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
 
   function render(data, availableLanguages, availablePreferences) {
     rememberComparisonView();
-    if (originalHold && (!data || data.id !== originalHold.id || data.status !== 'complete' || data.options.displayMode !== 'overlay')) endOriginalHold();
+    if (originalHold && (!data || data.id !== originalHold.id || !['complete', 'partial'].includes(data.status) || data.options.displayMode !== 'overlay')) endOriginalHold();
     // 切换期间的旧测量可能被主进程忽略；回到对照时必须重新提交，不能被相同高度去重。
     if (data?.options.displayMode === 'compare' && current?.options.displayMode !== 'compare') measuredHeight = { id: data.id, value: null };
     current = data; languages = availableLanguages || languages;
@@ -301,8 +303,10 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
       chosen.translationMode = preferences.translationMode ?? chosen.translationMode ?? 'standard';
       Object.assign(chosen, translationSearchPreferences({ ...chosen, ...preferences }));
     }
+    const translating = ['recognizing', 'translating', 'preparing-search', 'searching'].includes(data.status);
     const layer = node('main', 'translation-surface');
-    const canPaint = data.status === 'complete' && data.options.displayMode === 'overlay' && !data.options.showOriginal && data.overlayAvailable !== false;
+    const canPaint = ['complete', 'partial', 'translating'].includes(data.status) && data.width > 0 && data.height > 0 && data.blocks?.length > 0
+      && data.options.displayMode === 'overlay' && !data.options.showOriginal && data.overlayAvailable !== false;
     if (role === 'overlay') {
       const figure = node('figure', 'translation-image');
       positioned(figure, data.layout.image);
@@ -318,6 +322,7 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
           const prepared = (data.blocks || []).map(block => ({ block, background: sampleBackground(context, block, canvas.width, canvas.height), ...blockLayout(context, block, data) }));
           // 先采样整张原图再擦字，邻近行不能采到刚画的译文。
           for (const { block, background, area, size, lines, fits } of prepared) {
+            if (block.status === 'failed' || block.status === 'pending') continue;
             context.fillStyle = `rgb(${background.join(',')})`; context.fillRect(area.x, area.y, area.width, area.height);
             context.fillStyle = background[0] * .2126 + background[1] * .7152 + background[2] * .0722 > 145 ? '#141414' : '#f8f8f8';
             context.textBaseline = 'top'; context.textAlign = 'left'; context.direction = 'inherit';
@@ -328,6 +333,11 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
             } else {
               context.font = `${Math.min(area.height, 18)}px "Segoe UI",sans-serif`; context.fillText('↗', area.x + 1, area.y);
             }
+          }
+          // 自动重试后仍未取得译文的位置保留原图，并明确标出请求失败。
+          for (const { block, area } of prepared) if (block.status === 'failed' && !translating) {
+            context.save(); context.strokeStyle = '#b63e3e'; context.lineWidth = Math.max(1, Math.min(area.height * .08, 3));
+            context.setLineDash([4, 3]); context.strokeRect(area.x + 1, area.y + 1, Math.max(1, area.width - 2), Math.max(1, area.height - 2)); context.restore();
           }
           figure.append(canvas);
         };
@@ -378,19 +388,19 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
     if (originalPreview) {
       originalPreview.title = '按住查看原图，松开恢复译文'; originalPreview.setAttribute('aria-label', '按住查看原图');
       originalPreview.setAttribute('aria-pressed', String(originalHold?.id === data.id)); originalPreview.setAttribute('aria-keyshortcuts', 'Space Enter');
-      originalPreview.disabled = data.status !== 'complete'; originalPreview.append(controlIcon('eye'));
+      originalPreview.disabled = !['complete', 'partial'].includes(data.status); originalPreview.append(controlIcon('eye'));
     }
-    const retryTranslation = async (recognitionMode = 'auto') => {
+    const retryTranslation = async (recognitionMode = 'auto', pendingOnly = false) => {
       endOriginalHold();
-      const result = await action('retry-translation', { recognitionMode, options: selectedOptions() });
+      const result = await action('retry-translation', { recognitionMode, options: selectedOptions(), ...(pendingOnly ? { pendingOnly: true } : {}) });
       if (!result.ok) render(current, languages);
     };
-    const retry = iconButton(data.status === 'failed' ? '重试翻译' : '重新翻译', 'retry', () => retryTranslation());
+    const retry = iconButton(data.status === 'failed' ? '重试翻译' : data.status === 'partial' ? '重新翻译全部' : '重新翻译', 'retry', () => retryTranslation());
     const copy = iconButton(copied ? '已复制' : '复制译文', copied ? 'check' : 'copy', async () => {
       const result = await action('copy-translation');
       if (result.ok) { copied = true; render(current, languages); }
       else render(current, languages);
-    }); copy.disabled = busy || data.status !== 'complete';
+    }); copy.disabled = busy || !['complete', 'partial'].includes(data.status);
     const display = node('div', 'translation-display'); display.setAttribute('aria-label', '译文显示方式'); display.append(overlay, compare);
     const tools = node('div', 'translation-tools');
     const vision = iconButton('识图重试', 'vision', () => retryTranslation('vision')); vision.title = '文字漏识别？改用识图重试';
@@ -406,10 +416,17 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
     tools.append(retry, vision, network, copy,
       iconButton('重新框选', 'capture', () => { endOriginalHold(); return action('start-capture', { mode: 'translate', options: { ...selectedOptions(), showOriginal: false } }); }));
     toolbar.append(display, ...(originalPreview ? [originalPreview] : []), tools);
-    const notices = [data.sourceWarning, ...(data.status === 'complete' ? [data.method === 'vision' ? '整区覆盖' : '', data.unchangedCount ? `${data.unchangedCount} 处保留原文` : ''] : [])].filter(Boolean);
+    const notices = [data.sourceWarning, ...(['complete', 'partial'].includes(data.status) ? [data.method === 'vision' ? '整区覆盖' : '',
+      data.failedCount ? `${data.failedCount} 处模型请求失败` : ''] : [])].filter(Boolean);
     const warning = node('p', 'translation-warning', notices.join(' · ')); warning.hidden = !notices.length;
     warning.title = data.warning || '';
     controls.append(heading, fields, toolbar, warning);
+    if (data.pendingIds?.length && !['recognizing', 'translating', 'preparing-search', 'searching'].includes(data.status)) {
+      const retryPending = button(`重试失败内容（${data.pendingIds.length}）`, () => retryTranslation('auto', true), 'translation-pending-retry');
+      retryPending.disabled = busy || changedLanguage || changedMode;
+      retryPending.title = changedLanguage || changedMode ? '设置已更改，请使用重新翻译全部' : '保留已成功译文，仅重试请求失败的内容';
+      controls.append(retryPending);
+    }
     if (operationError || data.error) {
       const error = node('p', 'translation-error', operationError || data.error); error.setAttribute('role', 'alert'); controls.append(error);
     }
@@ -418,10 +435,16 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
       const comparison = node('div', 'translation-comparison');
       comparison.setAttribute('aria-label', '原文与译文对照'); comparison.tabIndex = 0;
       for (const block of data.blocks) {
-        const entry = node('article', 'translation-pair');
+        const failed = block.status === 'failed' && !translating;
+        const entry = node('article', `translation-pair${failed ? ' is-failed' : ''}`);
+        entry.dataset.translationId = String(block.id);
         const sourceText = node('p', 'translation-source-text', block.text); sourceText.setAttribute('dir', 'auto'); sourceText.setAttribute('aria-label', '原文');
-        const targetText = node('p', 'translation-target-text', block.translation); targetText.setAttribute('dir', 'auto'); targetText.setAttribute('aria-label', '译文');
+        const targetText = node('p', 'translation-target-text', failed ? '此处翻译失败' : ['pending', 'failed'].includes(block.status) ? '翻译中…' : block.translation); targetText.setAttribute('dir', 'auto'); targetText.setAttribute('aria-label', '译文');
         entry.append(sourceText, targetText); comparison.append(entry);
+        if (failed) {
+          const note = node('p', 'translation-block-note', block.error || '自动重试后请求仍失败，请检查模型服务。');
+          note.setAttribute('role', 'status'); entry.append(note);
+        }
       }
       if (data.search?.status === 'complete' && data.search.sources?.length) {
         const sources = node('details', 'translation-sources');
