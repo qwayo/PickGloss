@@ -79,7 +79,7 @@ jobs:
           RELEASE_COMMIT: ${{ steps.source.outputs.commit }}
         run: node scripts/release.cjs stage --version="$env:RELEASE_VERSION" --commit="$env:RELEASE_COMMIT" --dist=dist --output=output/release
       - name: 保留候选包 14 天
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: PickGloss-${{ inputs.version }}-candidate
           path: output/release/
