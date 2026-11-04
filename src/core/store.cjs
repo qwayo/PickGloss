@@ -174,6 +174,15 @@ function defaults() {
   };
 }
 
+// 只暴露常规页实际管理的默认值，避免恢复时覆盖其他页面的偏好。
+function generalSettingsDefaults() {
+  const prefs = defaults().prefs;
+  const keys = ['showOrb', 'selectionEnabled', 'orbAction', 'orbQuietFade', 'orbEdgeCollapse',
+    'captureDefaultMode', 'captureExplainMode', 'launchAtLogin', 'pinSound'];
+  return { ...Object.fromEntries(keys.map(key => [key, prefs[key]])),
+    screenshotTranslation: { translationMode: prefs.screenshotTranslation.translationMode } };
+}
+
 function settingsShape(input) {
   object(input, '设置');
   if (input.version !== 1) throw failure('INVALID_INPUT', '设置版本不受支持。');
@@ -575,4 +584,4 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
   return api;
 }
 
-module.exports = { createStore };
+module.exports = { createStore, generalSettingsDefaults };

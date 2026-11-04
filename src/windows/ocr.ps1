@@ -52,12 +52,15 @@ try {
     foreach ($line in $recognized.Lines) {
       if ([string]::IsNullOrWhiteSpace($line.Text) -or $line.Words.Count -eq 0) { continue }
       $left = [double]::MaxValue; $top = [double]::MaxValue; $right = 0.0; $bottom = 0.0
+      $words = @()
       foreach ($word in $line.Words) {
         $box = $word.BoundingRect
         $left = [Math]::Min($left, $box.X); $top = [Math]::Min($top, $box.Y)
         $right = [Math]::Max($right, $box.X + $box.Width); $bottom = [Math]::Max($bottom, $box.Y + $box.Height)
+        # 保留每个词框，使桥接层能识别同一 OCR 行中的远隔图标标签。
+        $words += @{ text = [string]$word.Text; x = $box.X * $ratioX; y = $box.Y * $ratioY; width = $box.Width * $ratioX; height = $box.Height * $ratioY }
       }
-      $blocks += @{ text = [string]$line.Text; x = $left * $ratioX; y = $top * $ratioY; width = ($right - $left) * $ratioX; height = ($bottom - $top) * $ratioY }
+      $blocks += @{ text = [string]$line.Text; x = $left * $ratioX; y = $top * $ratioY; width = ($right - $left) * $ratioX; height = ($bottom - $top) * $ratioY; words = @($words) }
     }
     $candidates += @{ language = $language.LanguageTag; angle = $recognized.TextAngle; blocks = @($blocks) }
   }

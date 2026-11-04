@@ -9,11 +9,13 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { DEFAULT_SHORTCUTS } = require('../src/core/shortcuts.cjs');
 const { applySettingsFixture } = require('./settings-fixture.cjs');
 const { createUiDriver } = require('./ui-driver.cjs');
+const { generalSettingsDefaults } = require('../src/core/store.cjs');
+const { defaultWindowGeometry } = require('../src/core/appearance.cjs');
 const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex >= 0 ? path.resolve(process.argv[outputIndex + 1]) : path.resolve(__dirname, '../output/verification/2026-10-27-settings-recovery');
 app.setPath('userData', path.join(os.tmpdir(), `pickgloss-recovery-${process.pid}`));
 app.on('window-all-closed', () => {});
-let win, panelWin, failStartup = true, failShortcuts = true, closed = 0, phase = '初始化';
+let win, panelWin, failStartup = true, failShortcuts = true, failGeneralReset = true, closed = 0, phase = '初始化';
 const calls = [], unexpected = [], consoleErrors = [];
 const current = { view: 'settings', settingsSection: 'general', history: [], session: null, status: {},
   settings: { text: {}, vision: {}, translation: {}, search: {}, serviceProfiles: {}, prefs: {
@@ -40,6 +42,14 @@ ipcMain.handle('pickgloss:action', async (_, action, payload = {}) => {
     if (failStartup && payload.prefs?.launchAtLogin !== undefined) return { ok: false, error: '虚构 Windows 登录项写入失败' };
     if (failShortcuts && payload.prefs?.shortcuts) return { ok: false, error: '虚构快捷键无法注册' };
     current.settings = applySettingsFixture(current.settings, payload); await push();
+    return { ok: true, value: current.settings };
+  }
+  if (action === 'reset-general-settings') {
+    await delay(100);
+    if (failGeneralReset) return { ok: false, error: '虚构常规设置恢复失败' };
+    current.settings = applySettingsFixture(current.settings, { prefs: { ...generalSettingsDefaults(),
+      windowGeometry: { ...(current.settings.prefs.windowGeometry || defaultWindowGeometry()), sizes: defaultWindowGeometry().sizes } } });
+    await push();
     return { ok: true, value: current.settings };
   }
   if (action === 'open-shortcuts') { current.settingsSection = 'shortcuts'; current.view = 'settings'; await push(); }
@@ -91,6 +101,25 @@ app.whenReady().then(async () => {
     await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
     await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     await fs.writeFile(path.join(output, '识图模式偏好.png'), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
+    phase = '全部常规设置恢复';
+    const shortcutsBeforeReset = structuredClone(current.settings.prefs.shortcuts);
+    await driver.click('恢复所有常规设置');
+    await driver.waitFor('document.querySelector(".general-reset").textContent.includes("虚构常规设置恢复失败")', '恢复失败明确反馈', { allowErrors: true });
+    assert.equal(current.settings.prefs.showOrb, false, '恢复失败保留原值');
+    assert.equal(await evaluate('document.querySelector("[name=showOrb]").checked'), false);
+    assert.equal(await evaluate('document.querySelector("[data-general-reset-feedback]").textContent'), '');
+    failGeneralReset = false;
+    await driver.click('恢复所有常规设置', { allowErrors: true });
+    await driver.waitFor('document.querySelector("[data-general-reset-feedback]").textContent==="已恢复所有常规设置"', '恢复成功显示反馈');
+    assert.equal(current.settings.prefs.showOrb, true); assert.equal(current.settings.prefs.captureExplainMode, 'immediate');
+    assert.equal(await evaluate('document.querySelector("[name=showOrb]").checked'), true);
+    assert.equal(await evaluate('document.querySelector("[name=captureExplainMode]").value'), 'immediate');
+    assert.deepEqual(current.settings.prefs.shortcuts, shortcutsBeforeReset, '不覆盖快捷键');
+    assert.equal(current.settingsSection, 'general');
+    await win.setSize(300, 520);
+    await evaluate('document.querySelector(".general-reset").scrollIntoView({block:"end"})');
+    await fs.writeFile(path.join(output, '恢复所有常规设置.png'), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
+    assert.equal(await evaluate('document.querySelector(".general-settings").scrollWidth<=document.querySelector(".general-settings").clientWidth+1'), true, '小窗恢复区不能横向溢出');
     phase = '快捷键恢复';
     await evaluate('[...document.querySelectorAll(".settings-navigation button")].find(node=>node.textContent==="快捷键").click()');
     await driver.waitFor('document.querySelector("[data-settings-section=shortcuts]").hidden===false', '快捷键页');
@@ -143,7 +172,7 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate('Boolean(document.querySelector("[data-menu-command=toggle-pin], [data-menu-command=toggle-wide]"))'), false);
     assert.deepEqual(unexpected, []); assert.deepEqual(consoleErrors, []);
     await fs.writeFile(path.join(output, '设置恢复检查.json'), JSON.stringify({ 通过: true,
-      覆盖: ['自启动失败回滚且可关闭', '保存回声保留节点', '快捷键顶部及本页恢复可关闭', '两个入口指定模式', '移除菜单两行', '联网不在设置页控制', '识图提示词先保存再请求'],
+      覆盖: ['自启动失败回滚且可关闭', '保存回声保留节点', '全部常规设置恢复及失败重试', '快捷键顶部及本页恢复可关闭', '两个入口指定模式', '移除菜单两行', '联网不在设置页控制', '识图提示词先保存再请求'],
       证据范围: '正式预加载及隐藏 Electron；虚构 IPC 故障，无真实登录项/全局快捷键写入', 调用数量: calls.length }, null, 2));
     console.log(`设置恢复及截图入口检查通过：${output}`);
     clearTimeout(timeout); win.destroy(); panelWin?.destroy(); app.exit(0);

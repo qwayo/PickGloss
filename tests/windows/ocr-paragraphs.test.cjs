@@ -86,6 +86,7 @@ test('WinRT 候选先按原始行判质量；低质量不合并且候选角度�
     language: 'zh-Hans', angle: 6.5,
     blocks: ['0', '」', '3', '《', '僅', 'hin'].map((text, index) => ({
       text, x: 20, y: 10 + index * 11, width: 30, height: 10,
+      words: [{ text, x: 20, y: 10 + index * 11, width: 30, height: 10 }],
     })),
   };
   const selected = await recognizeWindows({
@@ -94,6 +95,7 @@ test('WinRT 候选先按原始行判质量；低质量不合并且候选角度�
 
   assert.deepEqual(selected.quality, { reliable: false, reason: 'quality' });
   assert.equal(selected.blocks.length, candidate.blocks.length, '不能让段落聚合改变低质量后备判定');
+  assert.ok(selected.blocks.every(block => !Object.hasOwn(block, 'words')), '原始词框只供 helper 内部几何处理');
   assert.equal(selected.angle, 6.5);
 });
 
@@ -113,4 +115,54 @@ test('可靠 WinRT 行合并后仍保留 TextAngle 供 core 校正', async () =>
   assert.equal(selected.blocks.length, 1);
   assert.equal(selected.blocks[0].text, 'First wrapped line\nSecond wrapped line');
   assert.equal(selected.angle, 6.5);
+});
+
+test('同一 OCR 行里远隔的桌面图标标签按词框间距拆开', async () => {
+  const selected = await recognizeWindows({
+    imageData: makeImage(bounds.width, bounds.height), sourceLanguage: 'en-US',
+    spawnImpl: spawnWith({ ok: true, candidates: [{
+      language: 'en-US', angle: 0,
+      blocks: [{
+        text: 'BaiduNetdisk WorkBuddy', x: 30, y: 20, width: 220, height: 16,
+        words: [
+          { text: 'BaiduNetdisk', x: 30, y: 20, width: 90, height: 16 },
+          { text: 'WorkBuddy', x: 174, y: 20, width: 76, height: 16 },
+        ],
+      }],
+    }] }),
+  });
+
+  assert.deepEqual(selected.blocks.map(block => block.text), ['BaiduNetdisk', 'WorkBuddy']);
+  assert.deepEqual(selected.blocks.map(({ x, y, width, height }) => ({ x, y, width, height })), [
+    { x: 30, y: 20, width: 90, height: 16 },
+    { x: 174, y: 20, width: 76, height: 16 },
+  ]);
+});
+
+test('句内英文常规词距与中文紧邻分词不按远隔图标规则拆开', async () => {
+  const selected = await recognizeWindows({
+    imageData: makeImage(bounds.width, bounds.height), sourceLanguage: 'zh-Hans',
+    spawnImpl: spawnWith({ ok: true, candidates: [{
+      language: 'zh-Hans', angle: 0,
+      blocks: [
+        {
+          text: 'BaiduNetdisk WorkBuddy', x: 30, y: 20, width: 172, height: 16,
+          words: [
+            { text: 'BaiduNetdisk', x: 30, y: 20, width: 90, height: 16 },
+            { text: 'WorkBuddy', x: 126, y: 20, width: 76, height: 16 },
+          ],
+        },
+        {
+          text: '桌面图标', x: 30, y: 60, width: 55, height: 16,
+          words: [
+            { text: '桌面', x: 30, y: 60, width: 26, height: 16 },
+            { text: '图标', x: 59, y: 60, width: 26, height: 16 },
+          ],
+        },
+      ],
+    }] }),
+  });
+
+  assert.deepEqual(selected.blocks.map(block => block.text), ['BaiduNetdisk WorkBuddy', '桌面图标']);
+  assert.ok(selected.blocks.every(block => !Object.hasOwn(block, 'words')), '原始词框只供 helper 内部几何处理');
 });

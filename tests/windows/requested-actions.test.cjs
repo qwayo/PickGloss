@@ -10,7 +10,7 @@ const IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAw
 
 async function application() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pickgloss-requested-actions-'));
-  const failures = new Set(), uncertain = new Set(), trashed = [], loginCalls = [], requests = [], captures = [], translationHeightCalls = [], translationPins = [];
+  const failures = new Set(), uncertain = new Set(), trashed = [], loginCalls = [], requests = [], captures = [], translationHeightCalls = [], translationPins = [], restoredGeometry = [], clipboardTexts = [];
   const store = createStore({ directory, encrypt: value => Buffer.from(value), decrypt: value => value.toString(), trash: async target => {
     const id = path.basename(target); if (failures.has(id)) throw Error('模拟回收失败');
     const destination = path.join(directory, '回收保留-' + id); await fs.rename(target, destination); trashed.push(destination);
@@ -27,8 +27,10 @@ async function application() {
     showTranslation: () => ({ bounds: { x: 30, y: 40, width: 420, height: 246 }, image: { left: 0, top: 0, width: 20, height: 20 }, controls: { left: 0, top: 26, width: 420, height: 220 } }),
     resizeTranslationHeight: (...args) => { translationHeightCalls.push(args); return { height: Math.min(480, args[1]) }; },
     setTranslationControlsPinned: value => translationPins.push(value),
-    hideTranslation() {}, openPanel() {}, setOrb() {}, setOrbPreferences() {}, hoverOrb() {}, startSelection() {}, setAppearance() {}, async beginCapture(options) { captures.push(options); } };
-  const electron = { app, clipboard: { writeText() {} }, net: { fetch: async (url, options) => {
+    hideTranslation() {}, openPanel() {}, setOrb() {}, setOrbPreferences() {}, hoverOrb() {}, startSelection() {}, setAppearance() {},
+    flushWindowState: async () => true, restoreWindowState: geometry => { restoredGeometry.push(geometry); return geometry.wide; },
+    async beginCapture(options) { captures.push(options); } };
+  const electron = { app, clipboard: { writeText: value => clipboardTexts.push(value) }, net: { fetch: async (url, options) => {
     const request = { url, options }; requests.push(request);
     if (respond) return respond(request);
     if (options.method === 'GET') return Response.json({ data: [{ id: '当前密钥可用的模型' }] });
@@ -41,7 +43,7 @@ async function application() {
     fixture: { store, desktop, settings: await store.getSettings() } };
   vm.createContext(context);
   vm.runInContext(await fs.readFile(target, 'utf8') + '\nstore=fixture.store;desktop=fixture.desktop;settings=fixture.settings;globalThis.testApp={handle,state,drain:async()=>{await translationJob?.promise;await Promise.all([...jobs.values()].map(job=>job.promise));}};', context);
-  return { ...context.testApp, store, failures, uncertain, trashed, loginCalls, requests, captures, translationHeightCalls, translationPins,
+  return { ...context.testApp, store, failures, uncertain, trashed, loginCalls, requests, captures, translationHeightCalls, translationPins, restoredGeometry, clipboardTexts,
     loginFailure: value => { loginFailure = value; }, recognize: value => { recognition = value; }, respond: value => { respond = value; } };
 }
 
@@ -231,15 +233,19 @@ test('深度联网失败保留实际模式与错误，不伪装为已联网完�
   assert.equal((await app.store.getSettings()).prefs.screenshotTranslation.translationMode, 'deep');
 });
 
-test('手动识图重试跳过本地识别，请求期间及失败后都保留实际识别模式', async () => {
+test('手动识图重试跳过本地识别，请求期间及失败后都保留实际识别模式', { timeout: 10000 }, async () => {
   const app = await application();
   await app.handle('save-settings', { text: { baseUrl: 'https://text.invalid/v1', model: '虚构模型' } });
   let recognitions = 0;
   app.recognize(async () => { recognitions++; return { blocks: [{ text: 'Quark', x: 0, y: 0, width: 1, height: 1 }] }; });
   await app.handle('capture-done', { mode: 'translate', rect: {} }); await app.drain();
   const previous = (await app.state()).translation;
-  let failRequest;
-  app.respond(() => new Promise((_resolve, reject) => { failRequest = reject; }));
+  let failRequest, attempts = 0;
+  app.respond(() => {
+    attempts++;
+    return attempts === 1 ? new Promise((_resolve, reject) => { failRequest = reject; })
+      : Promise.reject(Error('模拟识图网络持续失败'));
+  });
   await app.handle('retry-translation', { id: previous.id, recognitionMode: 'vision' });
   while (!failRequest) await new Promise(resolve => setTimeout(resolve, 1));
   const pending = { ...(await app.state()).translation };
@@ -250,6 +256,7 @@ test('手动识图重试跳过本地识别，请求期间及失败后都保留�
   assert.equal(recognitions, 1, '手动识图重试不能再次调用本地 OCR');
   const failed = (await app.state()).translation;
   assert.equal(failed.status, 'failed'); assert.equal(failed.method, 'vision');
+  assert.equal(attempts, 3, '持续网络失败经过有限自动恢复后结束，而非留下无人应答的夹具请求');
   assert.equal(failed.fallbackReason, 'manual');
   assert.equal((await app.store.getSettings()).prefs.screenshotTranslation.recognitionMode, undefined, '本次识图重试不能改变后续默认模式');
   await assert.rejects(app.handle('retry-translation', { id: failed.id, recognitionMode: '未知模式' }), /识别模式无效/);
@@ -358,6 +365,46 @@ test('组合常规设置中的自启更新失败时一并回滚其他开关，�
   assert.equal((await app.state()).settings.prefs.showOrb, false); assert.equal((await app.state()).settings.prefs.selectionEnabled, false);
 });
 
+test('恢复全部常规设置只重置本页字段与两种尺寸，保留语言服务外观快捷键和窗口位置', async () => {
+  const app = await application();
+  const initial = (await app.state()).settings;
+  await app.handle('save-settings', { autosave: true,
+    text: { baseUrl: 'https://text.invalid/v1', model: '保留的文字模型', apiKey: '虚构密钥' },
+    prefs: { showOrb: false, selectionEnabled: false, orbAction: 'capture', orbQuietFade: false, orbEdgeCollapse: false,
+      captureDefaultMode: 'translate', captureExplainMode: 'prompt', pinSound: false, launchAtLogin: true, webSearchEnabled: true,
+      screenshotTranslation: { sourceLanguage: 'en', targetLanguage: 'ja', translationMode: 'deep', searchEnabled: true, searchScope: 'both' },
+      shortcuts: { ...initial.prefs.shortcuts, capture: 'Ctrl+Alt+X' },
+      windowGeometry: { panel: { x: 100, y: 60 }, orb: { x: 10, y: 20 }, wide: true,
+        sizes: { compact: { width: 350, height: 510 }, reading: { width: 920, height: 720 } } } } });
+  await app.handle('open-settings', { section: 'general' });
+  const before = (await app.state()).settings;
+  await app.handle('reset-general-settings');
+  const current = await app.state(), prefs = current.settings.prefs;
+  for (const key of ['showOrb', 'selectionEnabled', 'orbQuietFade', 'orbEdgeCollapse', 'pinSound']) assert.equal(prefs[key], true, key);
+  assert.equal(prefs.launchAtLogin, false); assert.equal(prefs.orbAction, 'chat');
+  assert.equal(prefs.captureDefaultMode, 'explain'); assert.equal(prefs.captureExplainMode, 'immediate');
+  assert.equal(prefs.screenshotTranslation.translationMode, 'standard');
+  assert.equal(prefs.screenshotTranslation.targetLanguage, 'ja'); assert.equal(prefs.screenshotTranslation.sourceLanguage, 'en');
+  assert.equal(prefs.screenshotTranslation.searchEnabled, true); assert.equal(prefs.webSearchEnabled, true);
+  assert.deepEqual(prefs.appearance, before.prefs.appearance); assert.deepEqual(prefs.shortcuts, before.prefs.shortcuts);
+  assert.deepEqual(current.settings.text, before.text);
+  assert.deepEqual(prefs.windowGeometry, { ...before.prefs.windowGeometry,
+    sizes: { compact: { width: 300, height: 483 }, reading: { width: 860, height: 690 } } });
+  assert.equal(app.restoredGeometry.length, 1); assert.equal(current.view, 'settings'); assert.equal(current.settingsSection, 'general');
+  assert.equal((await app.store.getSettings({ includeSecrets: true })).text.apiKey, '虚构密钥');
+});
+
+test('恢复常规设置遇到登录项错误时全部回滚，不改窗口尺寸且可再次恢复', async () => {
+  const app = await application();
+  await app.handle('save-settings', { autosave: true, prefs: { launchAtLogin: true, showOrb: false, captureDefaultMode: 'translate' } });
+  const before = (await app.state()).settings.prefs;
+  app.loginFailure(true);
+  await assert.rejects(app.handle('reset-general-settings'), /无法更新 Windows/);
+  assert.deepEqual((await app.state()).settings.prefs, before); assert.equal(app.restoredGeometry.length, 0);
+  app.loginFailure(false); await app.handle('reset-general-settings');
+  assert.equal((await app.state()).settings.prefs.launchAtLogin, false); assert.equal(app.restoredGeometry.length, 1);
+});
+
 test('截图翻译走独立结果窗；重复截图取消旧识别，迟到结果不能覆盖新截图', async () => {
   const app = await application();
   await app.handle('save-settings', { text: { providerId: 'custom', baseUrl: 'https://text.invalid/v1', model: '测试模型' } });
@@ -375,6 +422,68 @@ test('截图翻译走独立结果窗；重复截图取消旧识别，迟到结�
   assert.equal((await app.state()).translation.blocks[0].text, '新截图原文');
   assert.equal(app.requests.length, 1); assert.equal((await app.state()).history.length, 0);
   await app.handle('close-translation', { id: current.id }); assert.equal((await app.state()).translation, null);
+});
+
+test('截图直接翻译软件名称与缩写，首译有效后完整交付且不要求核对', async () => {
+  const app = await application();
+  await app.handle('save-settings', { text: { baseUrl: 'https://text.invalid/v1', model: '虚构直接翻译模型' } });
+  const sources = ['Obsidian', 'QQ', 'WorkBuddy', 'Ctrl+C'];
+  const targets = ['黑曜石', 'QQ', '工作伙伴', 'Ctrl+C'];
+  app.recognize(async () => ({ blocks: sources.map(text => ({ text, x: 0, y: 0, width: 1, height: 1 })) }));
+  app.respond(({ options }) => {
+    const input = JSON.parse(JSON.parse(options.body).messages[1].content);
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ translations: input.lines.map(line => ({ id: line.id, translation: targets[line.id] })) }) } }] });
+  });
+  await app.handle('capture-done', { mode: 'translate', rect: {} }); await app.drain();
+  const result = (await app.state()).translation;
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(result.blocks.map(block => block.status), sources.map(() => 'complete'));
+  assert.deepEqual(result.blocks.map(block => block.translation), targets);
+  assert.deepEqual(result.pendingIds, []);
+  assert.equal(app.requests.length, 1, '有效首译不需要为缩写或软件名称再请求保留证明');
+  await app.handle('copy-translation', { id: result.id });
+  assert.equal(app.clipboardTexts.at(-1), targets.join('\n\n'));
+});
+
+test('截图服务鉴权失败直接展示原因，不在默认覆盖菜单中隐藏单块错误', async () => {
+  const app = await application();
+  await app.handle('save-settings', { text: { baseUrl: 'https://text.invalid/v1', model: '虚构鉴权失败模型' } });
+  app.recognize(async () => ({ blocks: [{ text: 'Obsidian', x: 0, y: 0, width: 1, height: 1 }] }));
+  app.respond(() => new Response('虚构鉴权失败', { status: 401 }));
+  await app.handle('capture-done', { mode: 'translate', rect: {} }); await app.drain();
+  const result = (await app.state()).translation;
+  assert.equal(result.options.displayMode, 'overlay');
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /401|鉴权/);
+  assert.equal(app.requests.length, 1, '鉴权错误不会因重试重复请求');
+});
+
+test('截图局部重试保留成功译文、复用识别快照，并在语言改变时重新识别', async () => {
+  const app = await application();
+  await app.handle('save-settings', { text: { baseUrl: 'https://text.invalid/v1', model: '虚构批量模型' } });
+  let recognized = 0, failing = true;
+  app.recognize(async () => { recognized++; return { blocks: Array.from({ length: 30 }, (_, id) => ({ text: `Menu item ${id}`, x: 0, y: 0, width: 1, height: 1 })) }; });
+  app.respond(({ options }) => {
+    const input = JSON.parse(JSON.parse(options.body).messages[1].content);
+    if (failing && input.lines.some(line => line.id >= 24)) return new Response('虚构批次服务失败', { status: 503 });
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ translations: input.lines.map(line => ({ id: line.id, translation: `菜单项 ${line.id}` })) }) } }] });
+  });
+  await app.handle('capture-done', { mode: 'translate', rect: {} }); await app.drain();
+  const first = (await app.state()).translation;
+  assert.equal(first.status, 'partial'); assert.ok(first.pendingIds.length > 0);
+  assert.ok(first.blocks.some(block => block.status === 'complete')); assert.equal(recognized, 1);
+  await app.handle('copy-translation', { id: first.id });
+  assert.match(app.clipboardTexts.at(-1), /菜单项 0/); assert.match(app.clipboardTexts.at(-1), /〔翻译失败〕Menu item/);
+  await assert.rejects(app.handle('retry-translation', { id: first.id, pendingOnly: 'yes' }), /局部重试参数无效/);
+  const pending = [...first.pendingIds], requestsBefore = app.requests.length;
+  failing = false;
+  await app.handle('retry-translation', { id: first.id, pendingOnly: true, options: first.options }); await app.drain();
+  const retried = (await app.state()).translation;
+  assert.equal(retried.status, 'complete'); assert.equal(retried.pendingIds.length, 0); assert.equal(recognized, 1);
+  const retriedIds = app.requests.slice(requestsBefore).flatMap(request => JSON.parse(JSON.parse(request.options.body).messages[1].content).lines.map(line => line.id));
+  assert.deepEqual([...new Set(retriedIds)].sort((a, b) => a - b), pending.sort((a, b) => a - b));
+  await app.handle('retry-translation', { id: retried.id, pendingOnly: true, options: { ...retried.options, targetLanguage: 'ja' } }); await app.drain();
+  assert.equal(recognized, 2, '修改目标语言不能复用旧译文');
 });
 
 test('截图翻译高度反馈只接受当前截图的有限合法尺寸，旧截图测量不会改动新窗口', async () => {

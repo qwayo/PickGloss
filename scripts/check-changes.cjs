@@ -24,6 +24,7 @@ function buildSteps(selected, { interactive, ocr, output }) {
   const steps = [], uncovered = [];
   const has = id => selected.some(check => check.id === id);
   if (has('ui') || has('settings')) steps.push({ id: 'native-build', name: '准备隐藏桌面专项所需的原生助手', command: process.execPath, args: [path.join(__dirname, 'build-native.cjs')] });
+  if (has('ui')) steps.push({ id: 'paragraph-context', name: '多行划词上下文范围与提供方边界', command: process.execPath, args: [path.join(__dirname, 'check-paragraph-context.cjs')] });
   if (has('ui')) steps.push({ id: 'ui', name: '基础隐藏界面', command: process.execPath, args: [path.join(__dirname, 'check-ui.cjs'), '--output-dir', path.join(output, 'ui')] });
   if (has('settings')) {
     steps.push(step('settings-save', '设置真实临时存储、失败草稿与恢复及正常动效阅读位置', 'check-ui-appearance.cjs', ['--normal-motion']));
@@ -37,6 +38,7 @@ function buildSteps(selected, { interactive, ocr, output }) {
   if (has('history') || has('settings')) steps.push(step('history-settings', '历史批量操作及服务设置', 'check-history-settings-ui.cjs'));
   if (has('translation')) {
     steps.push(step('translation-ui', '截图翻译普通 UI 合同（无 Windows OCR）', 'check-screenshot-translation.cjs', ['--ui-only']));
+    steps.push(step('translation-partial-ui', '部分译文与局部重试界面', 'check-translation-partial.cjs'));
     if (ocr) steps.push(step('translation-ocr', '截图翻译 Windows 中英文 OCR 与覆盖像素', 'check-screenshot-translation.cjs', ['--native-ocr'], 180000));
     else uncovered.push({ 能力: 'Windows OCR 与中英文识别语言', 原因: '普通隐藏 CI 仅运行固定 OCR 材料的 UI 合同', 入口: 'npm run check:changes -- --ocr；需要 Windows OCR、英文和简体中文识别语言' });
   }
