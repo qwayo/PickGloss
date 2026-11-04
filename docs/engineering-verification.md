@@ -125,7 +125,9 @@ node_modules/.bin/electron.cmd scripts/check-settings-visual-repair.cjs
 
 `scripts/check-startup-native.cjs` 是单独的 Windows 原生接口探针，会实际写入两个带进程号的临时登录项，并在 finally 中仅清理自己的精确名称、读回确认不存在；正式 PickGloss 项及正常设置不修改。用于区分名称、参数匹配和系统拒绝，不能替代重启登录验收。
 
-截图翻译提示词增加普通词规则和至多一次漏译复核。复核保留完整截图语境及实际联网资料，只更新疑似漏译条目，继续使用原模式的思考参数；不重写已有译文和图像坐标。自动测试与实际供应商输出必须分开记录，少量词语成功不代表任意输入准确率。
+截图翻译分批提交稳定 ID，对缺项、空译文及临时请求失败最多自动恢复两次，逐轮缩小批次，保留已完成译文和原图坐标。有效非空译文直接交付，不再要求模型提供原样保留理由或将残留外文标为待核对；软件名称优先译出，真实代码、路径及固有缩写按原意处理。`tests/core/translation.test.cjs` 和 `tests/windows/requested-actions.test.cjs` 覆盖直接交付、鉴权错误、有限自动恢复及缓存；`scripts/check-translation-partial.cjs` 覆盖正式双渲染器的恢复状态和最终失败呈现。自动测试与实际供应商输出必须分开记录，少量词语成功不代表任意输入准确率。
+
+`scripts/check-ocr-desktop-labels.cjs` 使用隔离目录和隐藏自建画布，逐项记录本机 Windows OCR 的合成桌面标签识别结果。脚本正常退出只代表诊断完成，不代表全部文字识别正确，也不能代替用户原截图验收。
 
 截图翻译菜单的地球按钮以当前快速／深度模式为作用域；前后端判定与两次切换恢复的矩阵由 `tests/renderer/translation-search.test.cjs` 覆盖。旧 `deepSearchEnabled` 迁移后保留原先仅深度联网的含义。设置页只提供识图的立即／提示词选项，不展示翻译联网范围。
 

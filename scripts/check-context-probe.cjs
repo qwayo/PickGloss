@@ -32,10 +32,8 @@ function verify(row) {
   const context = String(row.response.context || ''), reason = String(row.response.reason || '');
   if (row.rule === '取得上下文') {
     if (context !== row.expectedContext || reason) return { verdict: '失败', failure: '有效单段选区未返回完整且准确的上下文。' };
-  } else if (row.rule === '不得混入邻段') {
-    if (context !== row.expectedContext && !(context === '' && reason)) return { verdict: '失败', failure: '上下文混入邻段或无原因地丢弃。' };
   } else {
-    if (context || !reason || (row.rule === '超限' && !reason.includes('6000')) || (row.rule === '跨段' && !reason.includes('段落'))) return { verdict: '失败', failure: '跨段或超限材料未被明确拒绝。' };
+    if (context || !reason || (row.rule === '超限' && !reason.includes('6000'))) return { verdict: '失败', failure: '超限材料未被明确拒绝。' };
   }
   return { verdict: '通过' };
 }
@@ -49,7 +47,7 @@ try {
   fs.writeFileSync(path.join(output, '原生夹具输出.json'), run.stdout || '', 'utf8');
   if (run.error || run.status !== 0) throw new Error('原生夹具未完成：' + (run.error?.message || run.stderr || run.status));
   const data = JSON.parse(run.stdout.trim());
-  const expectedCount = chromium ? 13 : 12;
+  const expectedCount = 14;
   if (!Array.isArray(data.results) || data.results.length !== expectedCount) throw new Error(`原生夹具未完成全部 ${expectedCount} 个场景。`);
   report.results = data.results.map(row => ({ ...row, ...verify(row) }));
   exitCode = report.results.some(row => row.verdict === '前置条件不足') ? 2 : report.results.some(row => row.verdict === '失败') ? 1 : 0;

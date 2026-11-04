@@ -62,6 +62,7 @@ async function checkMenu() {
   await until(() => evaluate(`document.querySelector('[data-settings-section="general"]')?.hidden === false`), '菜单直达常规设置');
 }
 async function click(selector) {
+  await driver.waitFor(`!document.documentElement.classList.contains('layout-preparing')`, '窗口尺寸与终态排版均已提交', { stage: `点击控件 ${selector}`, allowErrors: true });
   await driver.waitFor(`Boolean(document.querySelector(${quoteJavaScriptString(selector)})?.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))`, '切换动画结束且控件可见', { stage: `点击控件 ${selector}`, allowErrors: true });
   await driver.click(undefined, { selector, stage: `点击控件 ${selector}` });
 }
@@ -307,7 +308,8 @@ app.whenReady().then(async () => {
       await handle('wide', { wide: false }); await until(() => !state.status.windowTransitioning, '收窄');
     }
     const frames = await evaluate('window.__sampling=false;window.__paneFrames');
-    assert.ok(panel.resizeCalls.every(b => [300,860].includes(b.width)), '原生尺寸只能使用两种目标宽度，不得存在持续换行的中间宽度');
+    assert.ok(panel.resizeCalls.every(b => b.width >= 300 && b.width <= 860), '原生尺寸过渡必须保持在两种目标宽度之间');
+    assert.ok(panel.resizeCalls.some(b => b.width > 300 && b.width < 860), '正常动效必须实际经过中间宽度，正文排版保持冻结');
     assert.ok(frames.length > 5); assert.equal(frames.some(f => f.overlap > 1 || f.transform !== 'none'), false, '原文与回答不能在展开中重叠或对文字叠加变换');
     await handle('wide', { wide: true }); await delay(60); await handle('wide', { wide: false }); await until(() => !state.status.windowTransitioning, '即时反向');
     assert.equal(panel.getBounds().width, 300);

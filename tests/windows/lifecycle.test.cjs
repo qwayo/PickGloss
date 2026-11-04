@@ -344,7 +344,7 @@ test('恢复离屏位置和工作区变化时窗口可见，不覆盖较大屏�
   assert.equal(made[0].getBounds().width, 1200); assert.equal(made[0].getBounds().height, 780);
 });
 
-test('展开先等旧文字退出绘制，再一次提交目标尺寸；反向不保存过渡尺寸', async () => {
+test('展开先等旧文字退出绘制，再逐帧改变窗口尺寸；反向不保存过渡尺寸', async () => {
   const writes = [];
   const { desktop, made, time, ipcMain, statuses } = desktopHarness({ animate: true, onWindowState: async value => writes.push(JSON.parse(JSON.stringify(value))) });
   desktop.openPanel(); const win = made[0]; win.setBounds({ x: 1010, y: 150, width: 335, height: 510 });
@@ -356,12 +356,79 @@ test('展开先等旧文字退出绘制，再一次提交目标尺寸；反向�
   ipcMain.emit('pickgloss:layout-ready', { ...event, senderFrame: {} }, prepare.id);
   assert.equal(win.frames.length, 0, '子框架不能确认布局');
   ipcMain.emit('pickgloss:layout-ready', event, prepare.id);
-  assert.equal(win.frames.length, 1); assert.equal(win.getBounds().width, 860);
+  assert.equal(win.frames.length, 0, 'ACK 后先从当前尺寸开始过渡，不得跳到终点');
+  time.advance(200);
+  assert.ok(win.frames.length >= 8, '约200毫秒内通过多个原生尺寸帧过渡');
+  assert.equal(win.getBounds().width, 860);
   assert.equal(statuses.at(-1).windowTransitioning, false);
-  desktop.setWide(false); desktop.setWide(true); desktop.setWide(false); time.advance(150);
+  desktop.setWide(false); desktop.setWide(true); desktop.setWide(false);
+  const reverse = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+  ipcMain.emit('pickgloss:layout-ready', event, reverse.id); time.advance(200);
   assert.deepEqual({ ...win.getBounds() }, compact);
   assert.equal(await desktop.flushWindowState(), true);
   for (const write of writes) { assert.equal(write.sizes.compact.width, 335); assert.equal(write.sizes.reading.width, 860); }
+});
+
+test('小窗与阅读视图切换在约200毫秒内平滑过渡，连续反向不保存中间尺寸', async () => {
+  const writes = [];
+  const { desktop, made, time, ipcMain } = desktopHarness({ animate: true, timerQuantum: 16,
+    onWindowState: async value => writes.push(JSON.parse(JSON.stringify(value))) });
+  desktop.openPanel(); const win = made[0];
+  win.setBounds({ x: 1100, y: 100, width: 335, height: 510 });
+  const compact = { ...win.getBounds() }; win.frames.length = 0;
+  const acknowledge = () => {
+    const message = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+    assert.equal(message.phase, 'prepare');
+    ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, message.id);
+  };
+
+  desktop.setWide(true); acknowledge();
+  assert.deepEqual({ ...win.getBounds() }, compact, 'ACK 后不能跳到目标尺寸');
+  time.advance(80);
+  const expandedMidpoint = { ...win.getBounds() };
+  assert.ok(expandedMidpoint.width > compact.width && expandedMidpoint.width < 860, '展开应出现可见的宽度中间帧');
+  assert.ok(expandedMidpoint.height > compact.height && expandedMidpoint.height < 690, '展开应出现可见的高度中间帧');
+  assert.ok(Math.abs(expandedMidpoint.x + expandedMidpoint.width - (compact.x + compact.width)) <= 1, '靠右展开时中间帧继续贴住屏幕右缘');
+  assert.ok(win.frames.length >= 3, '展开期间应有多个原生尺寸帧');
+  assert.deepEqual({ ...desktop.getWindowState().sizes.compact }, { width: 335, height: 510 });
+  assert.deepEqual({ ...desktop.getWindowState().sizes.reading }, { width: 860, height: 690 });
+
+  desktop.setWide(false); acknowledge(); time.advance(32);
+  desktop.setWide(true); acknowledge();
+  time.advance(192);
+  assert.notDeepEqual({ ...win.getBounds() }, { x: 575, y: 100, width: 860, height: 690 }, '尚未到约200毫秒时不能提前结束');
+  time.advance(16);
+  assert.deepEqual({ ...win.getBounds() }, { x: 575, y: 100, width: 860, height: 690 }, '再次展开应落在目标尺寸与目标位置');
+  desktop.setWide(false); acknowledge(); time.advance(208);
+  assert.deepEqual({ ...win.getBounds() }, compact, '往返后恢复原小窗位置和尺寸');
+  assert.deepEqual({ ...desktop.getWindowState().sizes.compact }, { width: 335, height: 510 }, '过渡尺寸不得替代用户小窗尺寸');
+  assert.deepEqual({ ...desktop.getWindowState().sizes.reading }, { width: 860, height: 690 }, '过渡尺寸不得替代用户阅读视图尺寸');
+  assert.equal(await desktop.flushWindowState(), true);
+  assert.ok(writes.every(value => value.sizes.compact.width === 335 && value.sizes.compact.height === 510 &&
+    value.sizes.reading.width === 860 && value.sizes.reading.height === 690), '写盘只保留两档用户尺寸，不保存中间帧');
+});
+
+test('连续反向展开沿用本轮小窗锚点，不从收缩中间帧重新选边', () => {
+  const { desktop, made, time, ipcMain } = desktopHarness({ animate: true });
+  desktop.openPanel(); const win = made[0];
+  win.setBounds({ x: 500, y: 100, width: 300, height: 483 });
+  const compact = { ...win.getBounds() };
+  const acknowledge = () => {
+    const prepare = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+    ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, prepare.id);
+  };
+
+  desktop.setWide(true); acknowledge(); time.advance(208);
+  assert.deepEqual({ ...win.getBounds() }, { x: 500, y: 100, width: 860, height: 690 });
+  desktop.setWide(false); acknowledge(); time.advance(80);
+  assert.ok(win.getBounds().width > compact.width && win.getBounds().width < 860, '收缩应到达中间尺寸');
+  desktop.setWide(true); acknowledge(); time.advance(208);
+
+  assert.deepEqual({ ...win.getBounds() }, { x: 500, y: 100, width: 860, height: 690 },
+    '反向展开应沿用最初选定的左侧锚点，避免从收缩中间帧改选右侧并横移197像素');
+  desktop.setWide(false); acknowledge(); time.advance(208);
+  assert.deepEqual({ ...win.getBounds() }, compact, '完成反向后小窗必须回到原位置');
+  desktop.dispose();
 });
 
 test('快捷命令唤回与迟到布局确认不能先跳到旧目标', () => {
@@ -370,7 +437,24 @@ test('快捷命令唤回与迟到布局确认不能先跳到旧目标', () => {
   desktop.openPanel(undefined, { preserveTransition: true }); assert.equal(win.getBounds().width, 300);
   desktop.setWide(false);
   ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, old.id);
-  assert.equal(win.getBounds().width, 300); time.advance(150); assert.equal(win.getBounds().width, 300);
+  assert.equal(win.getBounds().width, 300, '旧 ACK 不得开始新目标的尺寸过渡');
+  const current = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+  ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, current.id);
+  time.advance(200); assert.equal(win.getBounds().width, 300);
+});
+
+test('超时后迟到的布局确认不能结束正在进行的尺寸过渡', () => {
+  const { desktop, made, ipcMain, time } = desktopHarness({ animate: true });
+  desktop.openPanel(); const win = made[0]; desktop.setWide(true);
+  const prepare = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+  time.advance(120);
+  const beforeLateAck = { ...win.getBounds() };
+  assert.ok(beforeLateAck.width > 300 && beforeLateAck.width < 860, '准备超时后应已进入原生尺寸过渡');
+  ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, prepare.id);
+  assert.deepEqual({ ...win.getBounds() }, beforeLateAck, '迟到确认不得直接提交目标尺寸');
+  time.advance(200);
+  assert.equal(win.getBounds().width, 860);
+  desktop.dispose();
 });
 
 test('普通打开与带新选区的打开继续完成现有动画，不受保留过渡选项影响', () => {
@@ -381,24 +465,31 @@ test('普通打开与带新选区的打开继续完成现有动画，不受保�
   assert.deepEqual({ ...win.getBounds() }, { x: 62, y: 74, width: 300, height: 483 });
 });
 
-test('粗计时、原生调用耗时与提前唤醒均不再触发逐帧原生缩放', () => {
+test('粗计时、原生调用耗时与提前唤醒仍保持平滑尺寸过渡', () => {
   for (const options of [{}, { timerQuantum: 15.625, nativeCost: 2 }, { timerQuantum: 15.625, timerDelays: [15.625, 8, 20.5], nativeCost: 2 }]) {
     const { desktop, made, time } = desktopHarness({ animate: true, ...options }); desktop.openPanel(); const win = made[0];
     win.frames.length = 0; desktop.setWide(true); time.advance(370);
-    assert.equal(win.frames.length, 1); assert.equal(win.getBounds().width, 860);
+    assert.ok(win.frames.length >= 8, `提前唤醒或原生耗时不能退化为一次目标尺寸提交：${JSON.stringify(options)}，帧数=${win.frames.length}，尺寸=${win.getBounds().width}`);
+    assert.equal(win.getBounds().width, 860);
   }
 });
 
 test('手动移动或调整尺寸会清理窗口动画，用户尺寸保持独立', async () => {
-  const { desktop, made, time } = desktopHarness({ animate: true });
+  const { desktop, made, time, ipcMain } = desktopHarness({ animate: true });
   desktop.openPanel(); const win = made[0];
-  desktop.setWide(true); time.advance(80);
+  const acknowledge = () => {
+    const prepare = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+    ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, prepare.id);
+  };
+  desktop.setWide(true); acknowledge(); time.advance(80);
+  assert.ok(win.getBounds().width > 300 && win.getBounds().width < 860, '手动移动测试应从真实中间帧开始');
   const event = { prevented: false, preventDefault() { this.prevented = true; } };
   win.emit('will-move', event, { ...win.getBounds(), x: 123, y: 87 });
   assert.equal(event.prevented, true);
   time.advance(500);
   assert.deepEqual({ ...win.getBounds() }, { x: 123, y: 87, width: 860, height: 690 });
-  desktop.setWide(false); time.advance(80);
+  desktop.setWide(false); acknowledge(); time.advance(80);
+  assert.ok(win.getBounds().width > 300 && win.getBounds().width < 860, '手动调整尺寸测试应从真实中间帧开始');
   win.emit('will-resize'); win.setBounds({ x: 133, y: 97, width: 420, height: 610 }); time.advance(500);
   assert.deepEqual({ ...win.getBounds() }, { x: 133, y: 97, width: 420, height: 610 });
   assert.equal(desktop.getWindowState().sizes.compact.width, 420);
@@ -407,13 +498,21 @@ test('手动移动或调整尺寸会清理窗口动画，用户尺寸保持独�
 });
 
 test('系统或应用减少动态效果时直接完成原生窗口切换', () => {
-  const { desktop, made, time, animationSettings } = desktopHarness({ animate: true });
+  const { desktop, made, time, animationSettings, ipcMain } = desktopHarness({ animate: true });
   desktop.openPanel(); animationSettings.prefersReducedMotion = true;
   desktop.setWide(true); assert.equal(made[0].getBounds().width, 860);
   animationSettings.prefersReducedMotion = false;
   desktop.setAppearance({ current: { mode: 'dark', material: 'solid' }, reducedMotion: true });
   desktop.setWide(false); assert.equal(made[0].getBounds().width, 300);
   time.advance(500); assert.equal(made[0].getBounds().width, 300);
+  desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, reducedMotion: false });
+  desktop.setWide(true);
+  const current = made[0].messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+  ipcMain.emit('pickgloss:layout-ready', { sender: made[0].webContents, senderFrame: made[0].webContents.mainFrame }, current.id);
+  time.advance(80);
+  desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, reducedMotion: true });
+  assert.equal(made[0].getBounds().width, 860, '动效偏好在切换过程中改为减少时立即完成');
+  time.advance(500); assert.equal(made[0].getBounds().width, 860);
 });
 
 test('窗口写盘防抖且串行，失败保留内存并在退出刷新时重试', async () => {
@@ -515,8 +614,8 @@ test('置顶与无描边均不创建独立光晕窗，窗口显示和尺寸始�
   const { desktop, made, time } = desktopHarness({ animate: true }); desktop.openPanel(); const win = made[0];
   for (const pinOutline of ['blue', 'none', 'orange']) {
     desktop.setAppearance({ current: { mode: 'dark', material: 'glass' }, pinOutline }); desktop.setPinned(true);
-    desktop.setWide(true); time.advance(150); assert.equal(win.getBounds().width, 860);
-    desktop.setWide(false); time.advance(150); assert.equal(win.getBounds().width, 300);
+    desktop.setWide(true); time.advance(320); assert.equal(win.getBounds().width, 860);
+    desktop.setWide(false); time.advance(320); assert.equal(win.getBounds().width, 300);
     assert.equal(made.length, 1); assert.equal(win.isVisible(), true);
   }
   desktop.setPinned(false); desktop.dispose(); time.advance(500); assert.equal(made.length, 1);

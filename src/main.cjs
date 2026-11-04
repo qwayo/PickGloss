@@ -5,7 +5,8 @@ const fsSync = require('node:fs');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { app, ipcMain, globalShortcut, session: electronSession, safeStorage, shell, dialog, net, clipboard, nativeImage } = require('electron');
-const { createStore } = require('./core/store.cjs');
+const { createStore, generalSettingsDefaults } = require('./core/store.cjs');
+const { defaultWindowGeometry } = require('./core/appearance.cjs');
 const { historyEntry, queryHistory } = require('./core/history.cjs');
 const { buildMessages, streamCompletion, testProvider, resolveProvider } = require('./core/provider.cjs');
 const { streamSearchedAnswer } = require('./core/request-flow.cjs');
@@ -153,18 +154,20 @@ function currentTranslation(id) {
   return translation;
 }
 function layoutTranslation(item, { resetPosition = false, activate = false } = {}) {
-  const extraHeight = item.status === 'failed' ? 56 : item.status === 'complete' && (item.method === 'vision' || item.unchangedCount > 0) ? 20 : 0;
+  const extraHeight = item.status === 'failed' ? 56 : item.status === 'partial' ? 52 : item.status === 'complete' && item.method === 'vision' ? 20 : 0;
   item.layout = desktop.showTranslation(item.placement, item.options.displayMode, { resetPosition, extraHeight,
     contentHeight: item.options.displayMode === 'compare' ? item.contentHeight : undefined, controlsPinned: item.controlsPinned === true, activate });
 }
-function startScreenshotTranslation(imageData, placement, input, recognitionMode = 'auto') {
+function startScreenshotTranslation(imageData, placement, input, recognitionMode = 'auto', previousResult = null) {
   if (!['auto', 'vision'].includes(recognitionMode)) throw new Error('截图识别模式无效。');
   // 查看原图是本次结果的临时状态；新的翻译必须先呈现译文。
   const options = translationOptions({ ...settings.prefs.screenshotTranslation, ...input, showOriginal: false });
+  if (previousResult && ['sourceLanguage', 'targetLanguage', 'translationMode', 'searchEnabled', 'searchScope'].some(key => previousResult.options?.[key] !== options[key])) previousResult = null;
   const resetPosition = translation?.placement !== placement;
   const controlsPinned = !resetPosition && translation?.controlsPinned === true;
   translationJob?.abort.abort();
-  const item = translation = { id: randomUUID(), imageData, placement, options, controlsPinned, status: 'recognizing', method: recognitionMode === 'vision' ? 'vision' : 'windows-ocr', fallbackReason: recognitionMode === 'vision' ? 'manual' : '', blocks: [], error: '', warning: '' };
+  const cached = previousResult ? Object.fromEntries(['blocks', 'width', 'height', 'imageFingerprint', 'pendingIds', 'failedCount', 'overlayAvailable', 'thinking', 'search', 'recognizedLanguage'].map(key => [key, previousResult[key]])) : {};
+  const item = translation = { ...cached, id: randomUUID(), imageData, placement, options, controlsPinned, status: previousResult ? 'translating' : 'recognizing', method: recognitionMode === 'vision' ? 'vision' : 'windows-ocr', fallbackReason: recognitionMode === 'vision' ? 'manual' : '', blocks: cached.blocks || [], error: '', warning: '' };
   if (placement.sourceBinding && (!placement.source || placement.sourceInvalid)) {
     item.sourceInvalid = true;
     item.options = { ...options, displayMode: 'compare' };
@@ -179,19 +182,22 @@ function startScreenshotTranslation(imageData, placement, input, recognitionMode
       const configs = await store.getSettings({ includeSecrets: true });
       requireVerificationLocalService(configs.text); requireVerificationLocalService(configs.vision); requireVerificationLocalService(configs.translation);
       if (translationUsesSearch(options)) requireVerificationLocalService(configs.search);
-      const result = await translateScreenshot({ imageData, options, configs, recognize: recognizeWindows, recognitionMode,
+      const result = await translateScreenshot({ imageData, options, configs, recognize: recognizeWindows, recognitionMode, previousResult,
         fetchImpl: (...args) => net.fetch(...args), signal: job.abort.signal,
         onStage(stage, details) {
           if (translation !== item || job.abort.signal.aborted) return;
           item.status = stage;
           if (details) {
-            for (const key of ['method', 'fallbackReason', 'thinking', 'search']) if (details[key] !== undefined) item[key] = details[key];
+            for (const key of ['method', 'fallbackReason', 'thinking', 'search', 'blocks', 'width', 'height', 'overlayAvailable', 'pendingIds', 'failedCount']) if (details[key] !== undefined) item[key] = details[key];
             layoutTranslation(item);
           }
           scheduleEmit();
         } });
       if (translation !== item || job.abort.signal.aborted) return;
-      Object.assign(item, result, { status: 'complete' });
+      const allFailed = result.blocks.length > 0 && result.blocks.every(block => block.status === 'failed');
+      const failureReasons = [...new Set(result.blocks.filter(block => block.status === 'failed').map(block => block.error).filter(Boolean))].slice(0, 2).join('；');
+      Object.assign(item, result, { options: item.options, status: allFailed ? 'failed' : result.pendingIds?.length ? 'partial' : 'complete',
+        error: result.failedCount ? `翻译失败：${failureReasons || '模型未返回有效译文，请检查服务配置。'}` : '' });
       if (!result.overlayAvailable) {
         item.options = { ...options, displayMode: 'compare' };
       }
@@ -486,6 +492,16 @@ async function handle(action,payload={}) {
       result = settings;
       break;
     }
+    case 'reset-general-settings': {
+      // 先排空旧尺寸写入，防止迟到的窗口保存覆盖本次默认尺寸。
+      if (await desktop.flushWindowState() === false) throw new Error('窗口设置尚未保存，请重试恢复常规设置。');
+      const geometry = { ...settings.prefs.windowGeometry, sizes: defaultWindowGeometry().sizes };
+      await handle('save-settings', { prefs: { ...generalSettingsDefaults(), windowGeometry: geometry }, autosave: true });
+      wide = desktop.restoreWindowState(geometry);
+      if (await desktop.flushWindowState() === false) throw new Error('常规选项已恢复，但窗口状态暂未写入磁盘，请重试。');
+      result = settings;
+      break;
+    }
     case 'fetch-models': {
       if (!['text', 'vision', 'translation'].includes(payload.kind)) throw new Error('模型类型无效。');
       const input = payload.config || {}, configs = await store.getSettings({ includeSecrets: true });
@@ -557,7 +573,9 @@ async function handle(action,payload={}) {
     case 'capture-cancel': desktop.cancelCapture();break;
     case 'retry-translation': {
       const item = currentTranslation(payload.id);
-      startScreenshotTranslation(item.imageData, item.placement, payload.options ?? item.options, payload.recognitionMode ?? 'auto');
+      if (payload.pendingOnly !== undefined && typeof payload.pendingOnly !== 'boolean') throw new Error('局部重试参数无效。');
+      startScreenshotTranslation(item.imageData, item.placement, payload.options ?? item.options, payload.recognitionMode ?? 'auto',
+        payload.pendingOnly === true && item.pendingIds?.length ? item : null);
       break;
     }
     case 'set-translation-preferences': {
@@ -607,8 +625,11 @@ async function handle(action,payload={}) {
     }
     case 'copy-translation': {
       const item = currentTranslation(payload.id);
-      if (item.status !== 'complete') throw new Error('翻译尚未完成。');
-      clipboard.writeText(item.blocks.map(block => payload.includeOriginal ? `${block.text}\n${block.translation}` : block.translation).join('\n\n'));
+      if (!['complete', 'partial'].includes(item.status)) throw new Error('翻译尚未完成。');
+      clipboard.writeText(item.blocks.map(block => {
+        const translated = block.status === 'failed' ? `〔翻译失败〕${block.text}` : block.translation;
+        return payload.includeOriginal ? `${block.text}\n${translated}` : translated;
+      }).join('\n\n'));
       return null;
     }
     case 'translation-source-invalid':
