@@ -5,17 +5,18 @@ function applySettingsFixture(settings, changes) {
   if (changes.prefs?.screenshotTranslation) next.prefs.screenshotTranslation = { ...settings.prefs?.screenshotTranslation, ...changes.prefs.screenshotTranslation };
   function profile(previous = {}, input = {}) {
     const result = { ...previous, hasKey: input.clearKey === true ? false : !!input.apiKey || previous.hasKey === true };
-    for (const key of ['baseUrl', 'model', 'protocol']) if (input[key] !== undefined) result[key] = input[key];
+    for (const key of ['baseUrl', 'model', 'protocol', 'providerId', 'label']) if (input[key] !== undefined) result[key] = input[key];
     delete result.apiKey; delete result.clearKey; return result;
   }
-  for (const kind of ['text', 'vision', 'translation', 'search']) {
+  for (const kind of ['text', 'vision', 'translation', 'ocr', 'search']) {
     const profiles = next.serviceProfiles[kind] = { ...next.serviceProfiles[kind] };
     for (const [id, input] of Object.entries(changes.serviceProfiles?.[kind] || {})) profiles[id] = profile(profiles[id], input);
     const input = changes[kind];
     if (input) {
-      const id = input.providerId || settings[kind]?.providerId || 'custom';
+      const providerId = input.providerId || settings[kind]?.providerId || 'custom';
+      const id = input.profileId || providerId;
       profiles[id] = profile(profiles[id] || settings[kind], input);
-      next[kind] = { providerId: id, ...profiles[id] };
+      next[kind] = { ...profiles[id], providerId, ...(input.profileId ? { profileId: id } : {}) };
     }
   }
   return next;

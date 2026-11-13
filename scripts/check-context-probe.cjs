@@ -47,7 +47,7 @@ try {
   fs.writeFileSync(path.join(output, '原生夹具输出.json'), run.stdout || '', 'utf8');
   if (run.error || run.status !== 0) throw new Error('原生夹具未完成：' + (run.error?.message || run.stderr || run.status));
   const data = JSON.parse(run.stdout.trim());
-  const expectedCount = 14;
+  const expectedCount = chromium ? 15 : 14;
   if (!Array.isArray(data.results) || data.results.length !== expectedCount) throw new Error(`原生夹具未完成全部 ${expectedCount} 个场景。`);
   report.results = data.results.map(row => ({ ...row, ...verify(row) }));
   exitCode = report.results.some(row => row.verdict === '前置条件不足') ? 2 : report.results.some(row => row.verdict === '失败') ? 1 : 0;

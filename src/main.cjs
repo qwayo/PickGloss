@@ -13,11 +13,12 @@ const { streamSearchedAnswer } = require('./core/request-flow.cjs');
 const { searchWeb } = require('./core/search.cjs');
 const { createSourceIcons, decodeSourceIcon } = require('./core/source-icons.cjs');
 const { createSourceIconProxy } = require('./core/source-icon-proxy.cjs');
-const { MODEL_PROVIDERS, SEARCH_PROVIDERS } = require('./core/services.cjs');
+const { MODEL_PROVIDERS, SEARCH_PROVIDERS, OCR_PROVIDERS } = require('./core/services.cjs');
 const { listModels } = require('./core/models.cjs');
 const { uuid } = require('./core/validation.cjs');
 const { applyLoginSetting } = require('./windows/startup.cjs');
-const { translationOptions, translationUsesSearch, translateScreenshot, TRANSLATION_LANGUAGES } = require('./core/translation.cjs');
+const { translationOptions, translationUsesSearch, translateScreenshot, ocrModelFingerprint, TRANSLATION_LANGUAGES } = require('./core/translation.cjs');
+const { testOcrModel } = require('./core/translation-ocr.cjs');
 const { recognizeWindows } = require('./windows/ocr.cjs');
 const { createDesktop } = require('./windows/desktop.cjs');
 const { COMMANDS, createShortcutController } = require('./core/shortcuts.cjs');
@@ -82,6 +83,19 @@ function requireMode(value, mode) {
   if (!modes.has(mode) || (value.kind === 'image') !== (mode === 'visual')) throw new Error('解释模式无效。');
   return mode;
 }
+function savedModelConfig(configs, kind, input = {}) {
+  const active = configs[kind];
+  if (!input.profileId && (!input.providerId || (!active?.profileId && input.providerId === active?.providerId))) return active;
+  const id = input.profileId || input.providerId;
+  const profiles = configs.serviceProfiles?.[kind];
+  const saved = profiles && Object.hasOwn(profiles, id) ? profiles[id] : undefined;
+  return saved && (saved.providerId ?? id) === input.providerId ? saved : {};
+}
+
+function serviceSecretSelection(input = {}) {
+  return input.apiKey || input.clearKey ? false : input.profileId || input.providerId || true;
+}
+
 function requireVerificationLocalService(config) {
   if (!verificationDirectory || !config?.baseUrl) return;
   const host = new URL(config.baseUrl).hostname.toLowerCase();
@@ -140,7 +154,7 @@ async function state() {
   await loadHistory();
   return { view, session: active() || null, history: queryHistory(historyCache, { query: historyQuery, savedOnly: historySavedOnly }),
     historyQuery, historySavedOnly, historyOpenId, settings, settingsSection,
-    serviceCatalog: { models: MODEL_PROVIDERS || [], search: SEARCH_PROVIDERS || [] },
+    serviceCatalog: { models: MODEL_PROVIDERS, search: SEARCH_PROVIDERS, ocr: OCR_PROVIDERS },
     translation, translationLanguages: TRANSLATION_LANGUAGES, captureMode,
     settingsFilePath: path.join(app.getPath('userData'), 'data', 'settings.json'),
     pinned, wide, pinFeedback, status, capture: desktop.captureState() };
@@ -163,11 +177,13 @@ function startScreenshotTranslation(imageData, placement, input, recognitionMode
   // 查看原图是本次结果的临时状态；新的翻译必须先呈现译文。
   const options = translationOptions({ ...settings.prefs.screenshotTranslation, ...input, showOriginal: false });
   if (previousResult && ['sourceLanguage', 'targetLanguage', 'translationMode', 'searchEnabled', 'searchScope'].some(key => previousResult.options?.[key] !== options[key])) previousResult = null;
+  const ocrFingerprint = recognitionMode === 'auto' ? ocrModelFingerprint(settings.ocr) : '';
+  if (previousResult && (previousResult.ocrFingerprint || '') !== ocrFingerprint) previousResult = null;
   const resetPosition = translation?.placement !== placement;
   const controlsPinned = !resetPosition && translation?.controlsPinned === true;
   translationJob?.abort.abort();
   const cached = previousResult ? Object.fromEntries(['blocks', 'width', 'height', 'imageFingerprint', 'pendingIds', 'failedCount', 'overlayAvailable', 'thinking', 'search', 'recognizedLanguage'].map(key => [key, previousResult[key]])) : {};
-  const item = translation = { ...cached, id: randomUUID(), imageData, placement, options, controlsPinned, status: previousResult ? 'translating' : 'recognizing', method: recognitionMode === 'vision' ? 'vision' : 'windows-ocr', fallbackReason: recognitionMode === 'vision' ? 'manual' : '', blocks: cached.blocks || [], error: '', warning: '' };
+  const item = translation = { ...cached, id: randomUUID(), imageData, placement, options, controlsPinned, status: previousResult ? 'translating' : 'recognizing', method: previousResult?.method || (recognitionMode === 'vision' ? 'vision' : ocrFingerprint ? 'model-ocr' : 'windows-ocr'), fallbackReason: recognitionMode === 'vision' ? 'manual' : '', blocks: cached.blocks || [], error: '', warning: '' };
   if (placement.sourceBinding && (!placement.source || placement.sourceInvalid)) {
     item.sourceInvalid = true;
     item.options = { ...options, displayMode: 'compare' };
@@ -179,8 +195,16 @@ function startScreenshotTranslation(imageData, placement, input, recognitionMode
   job.promise = (async () => {
     try {
       settings = await store.saveSettings({ prefs: { screenshotTranslation: options } });
-      const configs = await store.getSettings({ includeSecrets: true });
+      const configs = await store.getSettings({ serviceSecrets: saved => {
+        const automatic = recognitionMode === 'auto';
+        const customOcr = automatic && saved.ocr?.providerId === 'custom';
+        const secrets = { ocr: customOcr, search: translationUsesSearch(options) };
+        if (automatic) secrets[resolveProvider(saved, 'translation').source] = true;
+        if (!customOcr) secrets[resolveProvider(saved, 'vision').source] = true;
+        return secrets;
+      } });
       requireVerificationLocalService(configs.text); requireVerificationLocalService(configs.vision); requireVerificationLocalService(configs.translation);
+      if (recognitionMode === 'auto' && configs.ocr?.providerId === 'custom') requireVerificationLocalService(configs.ocr);
       if (translationUsesSearch(options)) requireVerificationLocalService(configs.search);
       const result = await translateScreenshot({ imageData, options, configs, recognize: recognizeWindows, recognitionMode, previousResult,
         fetchImpl: (...args) => net.fetch(...args), signal: job.abort.signal,
@@ -189,6 +213,9 @@ function startScreenshotTranslation(imageData, placement, input, recognitionMode
           item.status = stage;
           if (details) {
             for (const key of ['method', 'fallbackReason', 'thinking', 'search', 'blocks', 'width', 'height', 'overlayAvailable', 'pendingIds', 'failedCount']) if (details[key] !== undefined) item[key] = details[key];
+            if (details.overlayAvailable === false && item.options.displayMode !== 'compare') {
+              item.options = { ...item.options, displayMode: 'compare' };
+            }
             layoutTranslation(item);
           }
           scheduleEmit();
@@ -198,9 +225,7 @@ function startScreenshotTranslation(imageData, placement, input, recognitionMode
       const failureReasons = [...new Set(result.blocks.filter(block => block.status === 'failed').map(block => block.error).filter(Boolean))].slice(0, 2).join('；');
       Object.assign(item, result, { options: item.options, status: allFailed ? 'failed' : result.pendingIds?.length ? 'partial' : 'complete',
         error: result.failedCount ? `翻译失败：${failureReasons || '模型未返回有效译文，请检查服务配置。'}` : '' });
-      if (!result.overlayAvailable) {
-        item.options = { ...options, displayMode: 'compare' };
-      }
+      if (!result.overlayAvailable) item.options = { ...item.options, displayMode: 'compare' };
       layoutTranslation(item);
     } catch (error) {
       if (translation !== item || job.abort.signal.aborted) return;
@@ -236,11 +261,15 @@ async function startRequest(target, question = '', options = {}) {
   if(quitting)throw new Error('正在保存并退出，请稍后再试。');
   const s=requireSession(target.id), mode=requireMode(s,target.mode), key=s.id+':'+mode;
   if(jobs.has(key))throw new Error('当前模式正在生成，请先停止或等待完成。');
-  const configs=await store.getSettings({includeSecrets:true});
+  const useSearch = options.withoutSearch !== true && (options.forceSearch === true || s.webSearchEnabled === true);
+  const modelKind = s.kind === 'image' ? 'vision' : 'text';
+  const configs = await store.getSettings({ serviceSecrets: saved => ({
+    [resolveProvider(saved, modelKind).source]: true, search: useSearch,
+  }) });
   if(cache.get(s.id)!==s)throw new Error('此会话已删除。');
   if(jobs.has(key))throw new Error('当前模式正在生成，请先停止或等待完成。');
   if(quitting)throw new Error('正在保存并退出，请稍后再试。');
-  const {config}=resolveProvider(configs,s.kind==='image'?'vision':'text');
+  const {config}=resolveProvider(configs,modelKind);
   if(!config?.baseUrl||!config?.model) { settingsReturn=view;settingsSection='service';view='settings';throw new Error('请先配置对应的 AI 服务地址和模型。'); }
   requireVerificationLocalService(config);
   const thread=s.threads[mode];
@@ -253,7 +282,6 @@ async function startRequest(target, question = '', options = {}) {
   }
   const snapshot = { ...s, threads: { ...s.threads, [mode]: { ...thread, messages: history } } };
   const messages=buildMessages(snapshot,mode,question);
-  const useSearch = options.withoutSearch !== true && (options.forceSearch === true || s.webSearchEnabled === true);
   if (useSearch) requireVerificationLocalService(configs.search);
   if(question && !previous)thread.messages.push({id:randomUUID(),role:'user',content:question,status:'complete'});
   const reply=previous || {id:randomUUID(),role:'assistant'};
@@ -307,7 +335,7 @@ async function handle(action,payload={}) {
       const work = orbActivationWork.then(async () => {
         if (settings.prefs.orbAction === 'capture') return handle('start-capture');
         if (desktop.isPanelVisible()) {
-          if (!(await desktop.flushDrafts())) throw new Error('有更改尚未保存，请检查当前提示后重试。');
+          if (!(await desktop.flushDrafts({ allowSettingsErrors: true }))) throw new Error('会话草稿尚未保存，请检查当前提示后重试。');
           desktop.hidePanel();desktop.closeMenu?.();await emit();return null;
         }
         return handle('open-latest-session');
@@ -363,6 +391,11 @@ async function handle(action,payload={}) {
       const s=requireSession(payload.id);if(s.kind!=='text')throw new Error('截图会话请使用截图说明。');
       if(s.threads.context.messages.length)throw new Error('这段上下文已用于解释；修改材料请新建会话。');
       s.context=text(payload.context,6000,'上下文',false).trim();s.contextOrigin='手动补充的段落';s.contextReason='';s.contextPending=false;s.activeMode='context';await persist(s);if(activeId===s.id)view='explain';break;
+    }
+    case 'select-context': {
+      const s=requireSession(payload.id);if(s.kind!=='text')throw new Error('截图会话请使用截图说明。');
+      if(s.threads.context.messages.length)throw new Error('这段上下文已用于解释；修改材料请新建会话。');
+      desktop.startContextSelection(s.id);view='explain';break;
     }
     case 'set-note': {
       const s=requireSession(payload.id);if(s.kind!=='image')throw new Error('当前不是截图会话。');
@@ -432,7 +465,7 @@ async function handle(action,payload={}) {
     }
     case 'open-session': await selectSession(payload.id);desktop.openPanel();break;
     case 'open-latest-session': {
-      if (!(await desktop.flushDrafts())) throw new Error('有更改尚未保存，请检查当前提示后重试。');
+      if (!(await desktop.flushDrafts({ allowSettingsErrors: true }))) throw new Error('会话草稿尚未保存，请检查当前提示后重试。');
       await loadHistory();
       // 不沿用管理页的搜索与收藏筛选，也不创建空白会话或重新请求模型。
       const latest = queryHistory(historyCache)[0];
@@ -467,7 +500,7 @@ async function handle(action,payload={}) {
       if (payload.autosave !== undefined && typeof payload.autosave !== 'boolean') throw new Error('自动保存状态无效。');
       await searchPreferenceWrite;
       if (verificationDirectory) {
-        for (const config of [payload.text, payload.vision, payload.translation, payload.search]) requireVerificationLocalService(config);
+        for (const config of [payload.text, payload.vision, payload.translation, payload.ocr, payload.search]) requireVerificationLocalService(config);
         for (const profiles of Object.values(payload.serviceProfiles || {})) for (const config of Object.values(profiles || {})) requireVerificationLocalService(config);
       }
       let previous;
@@ -488,7 +521,7 @@ async function handle(action,payload={}) {
       if (previous.prefs.selectionEnabled !== settings.prefs.selectionEnabled) desktop.startSelection(!verificationDirectory && settings.prefs.selectionEnabled!==false);
       if (JSON.stringify(previous.prefs.appearance) !== JSON.stringify(settings.prefs.appearance)) desktop.setAppearance(settings.prefs.appearance);
       // 外观编辑会连续预览与保存，保存后留在当前页面以便继续调整。
-      if (payload.autosave !== true && (payload.text !== undefined || payload.vision !== undefined || payload.translation !== undefined || payload.search !== undefined || (payload.prefs?.appearance === undefined && payload.prefs?.shortcuts === undefined && payload.prefs?.pinSound === undefined))) view=settingsReturn;
+      if (payload.autosave !== true && (payload.text !== undefined || payload.vision !== undefined || payload.translation !== undefined || payload.ocr !== undefined || payload.search !== undefined || (payload.prefs?.appearance === undefined && payload.prefs?.shortcuts === undefined && payload.prefs?.pinSound === undefined))) view=settingsReturn;
       result = settings;
       break;
     }
@@ -503,11 +536,12 @@ async function handle(action,payload={}) {
       break;
     }
     case 'fetch-models': {
-      if (!['text', 'vision', 'translation'].includes(payload.kind)) throw new Error('模型类型无效。');
-      const input = payload.config || {}, configs = await store.getSettings({ includeSecrets: true });
+      if (!['text', 'vision', 'translation', 'ocr'].includes(payload.kind)) throw new Error('模型类型无效。');
+      const input = payload.config || {};
+      const configs = await store.getSettings({ serviceSecrets: { [payload.kind]: serviceSecretSelection(input) } });
       const providerId = input.providerId || configs[payload.kind]?.providerId;
-      if (!MODEL_PROVIDERS.some(provider => provider.id === providerId)) throw new Error('模型服务无效。');
-      const current = providerId === configs[payload.kind]?.providerId ? configs[payload.kind] : configs.serviceProfiles?.[payload.kind]?.[providerId] || {};
+      if (payload.kind === 'ocr' ? providerId !== 'custom' : !MODEL_PROVIDERS.some(provider => provider.id === providerId)) throw new Error('模型服务无效。');
+      const current = savedModelConfig(configs, payload.kind, input);
       const baseUrl = input.baseUrl ?? current.baseUrl;
       if (current.apiKey && !input.apiKey && !input.clearKey && new URL(baseUrl).origin !== new URL(current.baseUrl).origin) throw new Error('服务地址已变更，请重新输入密钥或明确清除已有密钥。');
       const config = { baseUrl, apiKey: input.clearKey ? '' : input.apiKey || current.apiKey || '' };
@@ -515,21 +549,28 @@ async function handle(action,payload={}) {
       return listModels({ config, fetchImpl: (...args) => net.fetch(...args) });
     }
     case 'test-provider': {
-      if(!['text','vision','translation'].includes(payload.kind))throw new Error('模型类型无效。');
-      const configs=await store.getSettings({includeSecrets:true});
+      if(!['text','vision','translation','ocr'].includes(payload.kind))throw new Error('模型类型无效。');
       const requested=payload.config||{};
-      const {source}=resolveProvider({...configs,[payload.kind]:requested},payload.kind);
-      const selectedId=(source!==payload.kind ? payload.fallbackConfig : requested)?.providerId;
-      const current=selectedId && selectedId!==configs[source]?.providerId ? configs.serviceProfiles?.[source]?.[selectedId] || {} : configs[source];
-      const input=source!==payload.kind ? payload.fallbackConfig||current : requested;
+      const {source}=resolveProvider({[payload.kind]:requested},payload.kind);
+      const inputDraft = source === payload.kind ? requested : payload.fallbackConfig || undefined;
+      const configs = await store.getSettings({ serviceSecrets: { [source]: serviceSecretSelection(inputDraft) } });
+      if (payload.kind === 'ocr' && (requested.providerId || configs.ocr?.providerId) !== 'custom') throw new Error('请先选择自定义 OCR 模型。');
+      const current = savedModelConfig(configs, source, inputDraft);
+      const input = inputDraft || current;
       if(current?.apiKey&&!input.apiKey&&!input.clearKey&&new URL(input.baseUrl).origin!==new URL(current.baseUrl).origin)throw new Error('服务地址已变更，请重新输入密钥或明确清除已有密钥。');
       const config={baseUrl:input.baseUrl,model:input.model,apiKey:input.clearKey?'':input.apiKey||current?.apiKey||''};
       requireVerificationLocalService(config);
-      await testProvider({config,vision:payload.kind==='vision',translation:payload.kind==='translation',fetchImpl:(...args)=>net.fetch(...args)});
+      const fetchImpl = (...args) => net.fetch(...args);
+      if (payload.kind === 'ocr') {
+        await testOcrModel({ config, fetchImpl });
+        return { message: 'OCR 模型已识别测试图片中的文字。' };
+      }
+      await testProvider({config,vision:payload.kind==='vision',translation:payload.kind==='translation',fetchImpl});
       return {message:source!==payload.kind?`已使用文字模型完成${payload.kind==='translation'?'翻译':'识图'}测试；实际效果仍需用具体内容体验。`:'测试请求成功；具体模型回答质量仍需用实际内容体验。'};
     }
     case 'test-search-provider': {
-      const input=payload.config || {}, configs=await store.getSettings({includeSecrets:true});
+      const input=payload.config || {};
+      const configs = await store.getSettings({ serviceSecrets: { search: serviceSecretSelection(input) } });
       const providerId=input.providerId || configs.search?.providerId;
       const current=providerId && providerId!==configs.search?.providerId ? configs.serviceProfiles?.search?.[providerId] || {} : configs.search || {};
       const config={providerId,protocol:providerId==='custom'?(input.protocol ?? current.protocol ?? 'exa'):providerId,
@@ -574,8 +615,11 @@ async function handle(action,payload={}) {
     case 'retry-translation': {
       const item = currentTranslation(payload.id);
       if (payload.pendingOnly !== undefined && typeof payload.pendingOnly !== 'boolean') throw new Error('局部重试参数无效。');
-      startScreenshotTranslation(item.imageData, item.placement, payload.options ?? item.options, payload.recognitionMode ?? 'auto',
-        payload.pendingOnly === true && item.pendingIds?.length ? item : null);
+      const previousResult = payload.pendingOnly === true && item.pendingIds?.length ? item : null;
+      const recognitionMode = previousResult?.fallbackReason === 'manual' ? 'vision' : payload.recognitionMode ?? 'auto';
+      const options = { ...(payload.options ?? item.options) };
+      if (item.overlayAvailable === false || item.sourceInvalid) options.displayMode = settings.prefs.screenshotTranslation.displayMode;
+      startScreenshotTranslation(item.imageData, item.placement, options, recognitionMode, previousResult);
       break;
     }
     case 'set-translation-preferences': {
@@ -595,6 +639,7 @@ async function handle(action,payload={}) {
     case 'set-translation-options': {
       const item = currentTranslation(payload.id), options = translationOptions({ ...item.options, ...payload.options });
       if (item.sourceInvalid && options.displayMode === 'overlay') throw new Error('来源窗口或位置已变化，请重新框选后覆盖译文。');
+      if (item.overlayAvailable === false && options.displayMode === 'overlay') throw new Error('当前识别结果没有文字位置，请查看对照翻译。');
       if (options.displayMode === 'compare') options.showOriginal = false;
       if (['sourceLanguage', 'targetLanguage', 'translationMode', 'searchEnabled', 'searchScope'].some(key => options[key] !== item.options[key])) throw new Error('修改翻译设置后请重新翻译。');
       // 显示切换不覆盖下拉框刚保存的语言，也不保存临时的原图状态。
@@ -701,6 +746,18 @@ async function applySelectionContext(data) {
   await persist(s);scheduleEmit();
 }
 
+async function applyContextSelection(data) {
+  const s=requireSession(data.sessionId);
+  if(s.kind!=='text')throw new Error('截图会话请使用截图说明。');
+  if(s.threads.context.messages.length)throw new Error('这段上下文已用于解释；修改材料请新建会话。');
+  s.context=text(data.text,6000,'上下文',false).trim();
+  s.contextOrigin='手动划词补充的上下文';s.contextReason='';s.contextPending=false;s.activeMode='context';
+  await persist(s);
+  activeId=s.id;view='explain';
+  if(settings.text?.model&&settings.text?.baseUrl)await startRequest({id:s.id,mode:'context'});
+  scheduleEmit();
+}
+
 async function start() {
   if(process.platform!=='win32')throw new Error('此版本仅面向 Windows。');
   electronSession.defaultSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
@@ -714,7 +771,7 @@ async function start() {
     onStatus:patch=>{if(typeof patch.wide==='boolean')wide=patch.wide;Object.assign(status,patch);scheduleEmit();},onWindowState:async geometry=>{
     // 存储队列按最新磁盘设置合并，窗口移动不能覆盖随后保存的服务或外观设置。
     settings=await store.saveSettings({prefs:{windowGeometry:geometry}});
-  },onSelection:acceptCapturedSelection,onSelectionContext:applySelectionContext});
+  },onSelection:acceptCapturedSelection,onSelectionContext:applySelectionContext,onContextSelection:applyContextSelection});
   ipcMain.handle('pickgloss:action',async(event,action,payload)=>{
     if(!desktop.authorize(event,action))return{ok:false,error:'此窗口不能执行该操作。'};
     if(action==='bootstrap')bridgeReady++;
@@ -751,7 +808,19 @@ async function quit() {
   try { if(desktop)draftsSaved = await desktop.flushDrafts(); }
   catch { draftsSaved = false; }
   if(!draftsSaved) {
-    quitting=false;status.error='有更改尚未保存，已取消退出。请检查当前提示后重试。';desktop.openPanel();await emit();return;
+    let discardChanges = false;
+    try {
+      const result = await dialog.showMessageBox({
+        type: 'warning', title: '存在尚未保存的更改',
+        message: '部分更改无法保存。',
+        detail: '选择“放弃更改并退出”会丢弃尚未保存的内容。选择“继续编辑”会返回应用处理。',
+        buttons: ['继续编辑', '放弃更改并退出'], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      discardChanges = result.response === 1;
+    } catch {}
+    if (!discardChanges) {
+      quitting=false;status.error='有更改尚未保存。继续编辑可返回处理，或再次退出并选择放弃更改。';desktop.openPanel();await emit();return;
+    }
   }
   let windowSaved = true;
   try { if(desktop)windowSaved = await desktop.flushWindowState(); }

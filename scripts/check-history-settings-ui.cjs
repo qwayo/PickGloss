@@ -1,5 +1,6 @@
 'use strict';
 const { applySettingsFixture } = require('./settings-fixture.cjs');
+const { quoteJavaScriptString } = require('./javascript-string.cjs');
 // 使用虚构状态和 IPC 检查历史批量操作与服务表单；不读取用户设置、密钥或访问外网。
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
@@ -292,7 +293,7 @@ app.whenReady().then(async () => {
     assert.doesNotMatch(await win.webContents.executeJavaScript(`document.querySelector('[data-provider="translation"] .model-fetch-hint').textContent`), /支持识图/);
     await click(`document.querySelector('[data-provider="translation"] .model-option:nth-child(2)')`, '选择翻译模型 ID');
     await win.webContents.executeJavaScript(`(() => {const node=document.querySelector('[name="translation-model"]');node.value='';node.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-    await click(`document.querySelector('[data-provider="translation"] button.secondary:not(.model-fetch-button)')`, '测试沿用文字模型的翻译配置');
+    await click(`document.querySelector('[data-provider="translation"] .model-test-button')`, '测试沿用文字模型的翻译配置');
     await waitFor(`document.querySelector('[data-provider="translation"] .test-result.success')`, '翻译服务测试成功');
     const translationTest = calls.find(item => item.action === 'test-provider' && item.payload.kind === 'translation');
     assert.deepEqual(JSON.parse(JSON.stringify(translationTest.payload)), { kind: 'translation',
@@ -305,20 +306,48 @@ app.whenReady().then(async () => {
     assert.equal(savedService.payload.translation.apiKey, '虚构翻译密钥');
     assert.equal(savedService.payload.serviceProfiles.translation.custom.apiKey, '虚构翻译密钥');
 
+    await click(`document.querySelector('[data-kind="ocr"]')`, '打开 OCR 模型设置');
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="ocr-provider"]').value`), 'windows');
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-ocr-custom]').hidden`), true);
+    const selectOcr = value => win.webContents.executeJavaScript(`(() => {
+      const node = document.querySelector('[name="ocr-provider"]');
+      node.value = ${quoteJavaScriptString(value)};
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await selectOcr('custom');
+    await waitFor(`!document.querySelector('[data-ocr-custom]').hidden`, '显示自定义 OCR 配置');
+    await win.webContents.executeJavaScript(`(() => {
+      for (const [name, value] of [['ocr-baseUrl', 'http://127.0.0.1:8000/v1'], ['ocr-model', '虚构识别模型']]) {
+        const node = document.querySelector('[name="' + name + '"]');
+        node.value = value;
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`);
+    await waitForCall('save-settings', item => item.payload.ocr?.model === '虚构识别模型');
+    await click(`document.querySelector('[data-ocr-custom] .model-test-button')`, '测试 OCR 连接');
+    const ocrTest = await waitForCall('test-provider', item => item.payload.kind === 'ocr');
+    assert.equal(ocrTest.payload.config.baseUrl, 'http://127.0.0.1:8000/v1');
+    await waitFor(`document.querySelector('[data-ocr-custom] .test-result.success')`, 'OCR 连接测试反馈');
+    await selectOcr('windows');
+    await waitForCall('save-settings', item => item.payload.ocr?.providerId === 'windows');
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-ocr-custom]').hidden`), true);
+    await selectOcr('custom');
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="ocr-model"]').value`), '虚构识别模型');
+
     await click(`document.querySelector('[data-kind="text"]')`, '切回文字服务测试');
-    await click(`document.querySelector('[data-provider="text"] button.secondary:not(.model-fetch-button)')`, '开始连接测试');
+    await click(`document.querySelector('[data-provider="text"] .model-test-button')`, '开始连接测试');
     await waitFor(`document.querySelector('[data-provider="text"] .test-result.pending')`, '显示中性测试状态');
     assert.equal(await win.webContents.executeJavaScript(`getComputedStyle(document.querySelector('[data-provider="text"] .test-result')).color`), await colorFor('--muted'));
     await waitFor(`document.querySelector('[data-provider="text"] .test-result.success')`, '连接成功反馈');
     assert.equal(await win.webContents.executeJavaScript(`getComputedStyle(document.querySelector('[data-provider="text"] .test-result')).color`), await colorFor('--success'));
     failConnection = true;
-    await click(`document.querySelector('[data-provider="text"] button.secondary:not(.model-fetch-button)')`, '再次测试连接');
+    await click(`document.querySelector('[data-provider="text"] .model-test-button')`, '再次测试连接');
     await waitFor(`document.querySelector('[data-provider="text"] .test-result.failure')`, '连接失败反馈');
     assert.equal(await win.webContents.executeJavaScript(`getComputedStyle(document.querySelector('[data-provider="text"] .test-result')).color`), await colorFor('--danger'));
 
     await win.webContents.executeJavaScript(`document.documentElement.dataset.appearance='light'`);
     failConnection = false;
-    await click(`document.querySelector('[data-provider="text"] button.secondary:not(.model-fetch-button)')`, '浅色主题再次测试连接');
+    await click(`document.querySelector('[data-provider="text"] .model-test-button')`, '浅色主题再次测试连接');
     await waitFor(`document.querySelector('[data-provider="text"] .test-result.success')`, '浅色主题连接成功反馈');
     assert.equal(await win.webContents.executeJavaScript(`getComputedStyle(document.querySelector('[data-provider="text"] .test-result')).color`), await colorFor('--success'));
 

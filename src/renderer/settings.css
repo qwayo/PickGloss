@@ -1,5 +1,5 @@
 /* 设置沿用主题语义色；独立字段就地编辑，状态不占据主操作位置。 */
-.settings-body .mode-tabs[aria-label="服务类型"]{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;width:100%;max-width:900px;margin-inline:auto}
+.settings-body .mode-tabs[aria-label="服务类型"]{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;width:100%;max-width:900px;margin-inline:auto}
 .settings-body>.settings-navigation button,.settings-body .mode-tabs[aria-label="服务类型"] button{min-width:0;padding-inline:2px;text-align:center;white-space:nowrap;justify-content:center}
 .settings-body>.settings-navigation .mode-indicator,.settings-body .mode-tabs[aria-label="服务类型"] .mode-indicator{border-radius:2px}
 .settings-page-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:12px}
@@ -29,6 +29,9 @@
 .settings-save-issue>span{flex:1 1 100%}
 .settings-save-issue .setting-retry{font-size:11px;min-height:23px;padding:2px 6px;color:var(--ink);background:var(--surface-secondary);border:1px solid var(--line);border-radius:5px}
 .settings-section>.setting-save-state{margin:0 0 7px}
+.service-provider-select{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;align-items:center}
+.service-provider-select>.label{grid-column:1/-1}
+.service-provider-select>select:last-child{grid-column:1/-1}
 .general-settings>.window-settings{margin-top:24px}
 .general-settings .window-settings-copy h3{font-size:13px}
 .general-settings .window-settings-copy p{font-size:12px}

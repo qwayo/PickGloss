@@ -46,8 +46,12 @@ function renderer(invoke = async () => ({ ok: true })) {
       class: options.class || 'small-button', disabled: Boolean(options.disabled), onclick: action }, options.icon ? icon(options.icon) : null, options.iconOnly ? null : label);
     notice = (title, description, actions=[], error=false) => testElement('div', {class:error ? 'notice error' : 'notice', title, description}, actions);
     render = () => {};
+    const anchorRestoreCalls = [];
+    restoreReadingAnchor = anchor => anchorRestoreCalls.push(anchor);
     globalThis.audit = { setState: value => state=value, webSearchButton, toggleWebSearch, webSearchEnabled, retrySearch,
-      searchStatusView, searchSourcesView, explainView, composer, serviceCatalog, loadSourceIcon, sourceSiteIcon };
+      searchStatusView, searchSourcesView, explainView, composer, serviceCatalog, loadSourceIcon, sourceSiteIcon,
+      settingsAutosave, flushDraft, syncWindowLayout, anchorRestoreCalls,
+      resizeViewport: (width, height) => { window.innerWidth = width; window.innerHeight = height; } };
   `;
   const autosave = fs.readFileSync(path.join(__dirname, '../../src/renderer/settings-autosave.js'), 'utf8').replace(/^export /gm, '');
   vm.runInContext(autosave + '\n' + source.replace(/^import .*;\s*$/gm, '').replace(/void bootstrap\(\);\s*$/, '') + harness, context);
@@ -190,4 +194,23 @@ test('网站图标失败只短时缓存，过期展开时重试，成功后同�
   assert.equal(ui.sourceSiteIcon('https://first.example.com/c').children[0].tag, 'img');
   await ui.loadSourceIcon('https://first.example.com/c', target, '回答C', 3);
   assert.equal(ui.calls.length, 2, '成功图标在同域名复用');
+});
+
+test('服务设置保存失败时关闭面板仍可隐藏并保留失败项', async () => {
+  const ui = renderer(async action => action === 'save-settings'
+    ? { ok: false, error: '服务地址已跨主机、协议或端口更改，请重新输入该服务的密钥或明确清除原密钥。' }
+    : { ok: true });
+  const saved = await ui.settingsAutosave.commit('service:text:custom', { text: { baseUrl: 'http://127.0.0.1:9000/v1' } });
+  assert.equal(saved.ok, false);
+  assert.equal(await ui.flushDraft(), false, '普通导航仍提醒用户修复未保存设置');
+  assert.equal(await ui.flushDraft({ allowSettingsErrors: true }), true, '显式关闭不被服务设置错误拦住');
+  assert.deepEqual(Array.from(ui.settingsAutosave.failedKeys()), ['service:text:custom'], '隐藏面板后可恢复处理这项草稿');
+});
+
+test('自由缩放期间不反复校正阅读滚动锚点', () => {
+  const ui = renderer();
+  ui.setState({ view: 'explain', session: session({ activeMode: 'context' }) });
+  ui.resizeViewport(520, 650); ui.syncWindowLayout();
+  ui.resizeViewport(700, 720); ui.syncWindowLayout();
+  assert.equal(ui.anchorRestoreCalls.length, 0, '尺寸变化只让正文自然重排，模式动画仍单独恢复锚点');
 });

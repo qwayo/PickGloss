@@ -13,18 +13,70 @@ const TEXT = { providerId:'custom',baseUrl:'https://text.example/v1',model:'固�
 const VISION = { providerId:'custom',baseUrl:'https://vision.example/v1',model:'固定识图模型',apiKey:'fictional-vision-key' };
 const SEARCH = { providerId:'exa',baseUrl:'https://search.example/search',apiKey:'fictional-search-key' };
 
-async function application(respond, existingDirectory) {
+test('同一厂商和模型可保存多套密钥，重启后按所选配置发起请求', async () => {
+  const app = await configured();
+  const workId = 'model-1234567890abcdef1234567890abcdef';
+  const localId = 'model-fedcba0987654321fedcba0987654321';
+  const unreadableId = 'model-11111111111111111111111111111111';
+  const unreadableKey = 'fictional-unreadable-key';
+  const work = { providerId: 'custom', label: '工作账号', baseUrl: TEXT.baseUrl, model: TEXT.model, apiKey: 'fictional-work-key' };
+  const local = { providerId: 'custom', label: '本机服务', baseUrl: 'http://127.0.0.1:8888/v1', model: TEXT.model };
+  await app.handle('save-settings', {
+    serviceProfiles: { text: { [workId]: work, [localId]: local, [unreadableId]: { ...work, apiKey: unreadableKey } } },
+    text: { providerId: 'custom', profileId: workId },
+  });
+  const restarted = await application(undefined, app.directory, unreadableKey);
+  const settings = (await restarted.state()).settings;
+  assert.equal(settings.text.profileId, workId);
+  assert.equal(settings.serviceProfiles.text[workId].label, work.label);
+  assert.equal(settings.serviceProfiles.text[workId].hasKey, true);
+  assert.equal(settings.serviceProfiles.text[localId].hasKey, false);
+  assert.equal('apiKey' in settings.serviceProfiles.text[workId], false);
+
+  const session = await restarted.handle('new-text', { text: '术语', context: '固定解释材料。' });
+  await restarted.handle('start-explanation', session);
+  await restarted.drain();
+  assert.equal(restarted.requests.at(-1).headers.Authorization, `Bearer ${work.apiKey}`);
+  await restarted.handle('fetch-models', { kind: 'text', config: { providerId: 'custom', profileId: workId, baseUrl: work.baseUrl } });
+  assert.equal(restarted.requests.at(-1).url, `${work.baseUrl}/models`);
+  assert.equal(restarted.requests.at(-1).headers.Authorization, `Bearer ${work.apiKey}`);
+  await restarted.handle('fetch-models', { kind: 'text', config: { providerId: 'custom', profileId: localId, baseUrl: local.baseUrl } });
+  assert.equal(restarted.requests.at(-1).headers.Authorization, undefined);
+  await restarted.handle('test-provider', { kind: 'text', config: { providerId: 'custom', profileId: localId, baseUrl: local.baseUrl, model: local.model } });
+  assert.equal(restarted.requests.at(-1).url, `${local.baseUrl}/chat/completions`);
+  assert.equal(restarted.requests.at(-1).headers.Authorization, undefined);
+  await assert.rejects(restarted.handle('test-provider', {
+    kind: 'text', config: { providerId: 'custom', profileId: unreadableId, baseUrl: work.baseUrl, model: work.model },
+  }), { code: 'DECRYPTION_FAILED' });
+  await assert.rejects(restarted.handle('test-provider', {
+    kind: 'text', config: { providerId: 'custom', profileId: workId, baseUrl: local.baseUrl, model: work.model },
+  }), /重新输入密钥/);
+  await restarted.handle('save-settings', { text: { providerId: 'custom', profileId: unreadableId } });
+  await restarted.handle('capture-done', { rect: {} });
+  await restarted.drain();
+  assert.equal(restarted.requests.at(-1).headers.Authorization, `Bearer ${VISION.apiKey}`, '独立识图配置无需解密文字模型密钥');
+  await restarted.handle('save-settings', { text: { providerId: 'custom' } });
+  await restarted.handle('test-provider', { kind: 'text', config: { providerId: 'custom', baseUrl: TEXT.baseUrl, model: TEXT.model } });
+  assert.equal(restarted.requests.at(-1).headers.Authorization, `Bearer ${TEXT.apiKey}`);
+});
+
+async function application(respond, existingDirectory, unreadableKey) {
   const directory=existingDirectory||await fs.mkdtemp(path.join(os.tmpdir(),'pickgloss-services-actions-'));
   const transform=value=>Buffer.from(value).map(byte=>byte^0xa5);
-  const store=createStore({directory,encrypt:value=>transform(Buffer.from(value)),decrypt:value=>transform(value).toString('utf8')});
+  const store=createStore({directory,encrypt:value=>transform(Buffer.from(value)),decrypt:value=>{
+    const key = transform(value).toString('utf8');
+    if (key === unreadableKey) throw Error('虚构密钥无法解密');
+    return key;
+  }});
   await store.init();
-  const requests=[];
-  const desktop={broadcast(){},captureState:()=>null,finishCapture:()=>IMAGE,openPanel(){},setOrb(){},setOrbPreferences(){},hoverOrb(){},startSelection(){},setAppearance(){}};
+  const requests=[], contextTargets=[];
+  const desktop={broadcast(){},captureState:()=>null,finishCapture:()=>IMAGE,openPanel(){},setOrb(){},setOrbPreferences(){},hoverOrb(){},startSelection(){},startContextSelection:id=>contextTargets.push(id),setAppearance(){}};
   const app={setPath(){},getPath:()=>directory,setName(){},setAppUserModelId(){},requestSingleInstanceLock:()=>true,on(){},whenReady:()=>new Promise(()=>{})};
   const electron={app,net:{fetch:async(url,options)=>{
-    const request={url,headers:options.headers,body:JSON.parse(options.body),signal:options.signal};requests.push(request);
+    const request={url,headers:options.headers,body:options.body && JSON.parse(options.body),signal:options.signal};requests.push(request);
     const custom=await respond?.(request,requests);
     if(custom)return custom;
+    if(url.endsWith('/models'))return Response.json({data:[{id:TEXT.model}]});
     if(url===SEARCH.baseUrl)return Response.json({results:[{title:'固定测试来源',url:'https://source.example/article',highlights:['联网资料中的固定依据。']}]});
     const query=request.body.messages.at(-1)?.content==='请只输出本次使用的一个简短搜索查询。';
     return Response.json({choices:[{message:{content:query?'目标词的公开背景':'结合资料的固定回答 [1]'}}]});
@@ -35,9 +87,9 @@ async function application(respond, existingDirectory) {
   vm.createContext(context);
   vm.runInContext(await fs.readFile(source,'utf8')+`
     store=testStore;desktop=testDesktop;settings=testSettings;
-    globalThis.servicesTest={handle,state,acceptCapturedSelection,applySelectionContext,setSourceIcons:value=>sourceIcons=value,drain:()=>Promise.all([...jobs.values()].map(job=>job.promise))};
+    globalThis.servicesTest={handle,state,acceptCapturedSelection,applySelectionContext,applyContextSelection,setSourceIcons:value=>sourceIcons=value,drain:()=>Promise.all([...jobs.values()].map(job=>job.promise))};
   `,context);
-  return {...context.servicesTest,store,requests,directory};
+  return {...context.servicesTest,store,requests,contextTargets,directory};
 }
 
 async function configured(respond, directory) {
@@ -240,6 +292,22 @@ test('迟到上下文绑定原会话并尊重手动补充，不触发模型',asy
   await app.applySelectionContext({requestId:'1:2',context:'不该覆盖的自动段落',contextOrigin:'UIA 所在段落'});
   assert.equal((await app.store.getSession(second)).context,'用户手动补充的段落');
   assert.equal((await app.state()).session.contextPending,false);assert.equal(app.requests.length,0);
+});
+
+test('补充上下文入口绑定原会话并只启动一次语境解释',async()=>{
+  const app=await configured();
+  const target=await app.handle('new-text',{text:'目标词'});
+  await app.handle('select-context',{id:target.id});
+  assert.deepEqual(app.contextTargets,[target.id]);
+
+  await app.applyContextSelection({sessionId:target.id,text:'只取这次划选的语境句子。'});
+  await app.drain();
+
+  const saved=await app.store.getSession(target.id);
+  assert.equal(saved.context,'只取这次划选的语境句子。');
+  assert.equal(saved.contextOrigin,'手动划词补充的上下文');
+  assert.equal(app.requests.length,1,'一次选区只能启动一轮语境解释');
+  assert.ok(JSON.stringify(app.requests[0].body.messages).includes('只取这次划选的语境句子。'));
 });
 
 test('测试未选中的厂商时只使用该厂商保存的密钥',async()=>{

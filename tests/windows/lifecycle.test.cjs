@@ -26,8 +26,8 @@ function clock(quantum = 0, timerDelays = []) {
 }
 
 // 使用真实桌面模块和假窗口，不创建 Electron 或访问用户桌面。
-function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, windowsBuild = 26100, materialError = false, frameHelperMissing = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, nativeCapture = null, dipScale = 1, sourceFactory } = {}) {
-  const made = [], messages = [], statuses = [], selections = [], selectionUpdates = [], commands = [], actions = [], trays = [], menus = [], ipcMain = new EventEmitter(), time = clock(timerQuantum, timerDelays);
+function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, onContextSelection, windowsBuild = 26100, materialError = false, frameHelperMissing = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, nativeCapture = null, dipScale = 1, sourceFactory } = {}) {
+  const made = [], messages = [], statuses = [], selections = [], selectionUpdates = [], contextSelections = [], commands = [], actions = [], trays = [], menus = [], ipcMain = new EventEmitter(), time = clock(timerQuantum, timerDelays);
   const nativeTheme = Object.assign(new EventEmitter(), { shouldUseDarkColors: false, shouldUseDarkColorsForSystemIntegratedUI: false, themeSource: 'system' });
   const animationSettings = { prefersReducedMotion: !animate, shouldRenderRichAnimation: true };
   let workArea = { x: 0, y: 0, width: 1440, height: 900 }, focused = null;
@@ -97,9 +97,11 @@ function desktopHarness({ loading = false, animate = false, blurOnHide = false, 
     ...time, clearInterval() {}, setInterval() {},
   });
   const desktop = mod.exports.createDesktop({ captureFactory: () => nativeCapture, sourceFactory, onAction: (...args) => actions.push(args), onSelection: data => { selections.push(data);return onSelection?.(data); },
-    onSelectionContext: data => { selectionUpdates.push(data);return onSelectionContext?.(data); }, onStatus: value => statuses.push(value), onWindowState });
+    onSelectionContext: data => { selectionUpdates.push(data);return onSelectionContext?.(data); },
+    onContextSelection: data => { contextSelections.push(data);return onContextSelection?.(data); },
+    onStatus: value => statuses.push(value), onWindowState });
   desktop.setAppearance({ current: { mode: 'light', material: 'solid' }, reducedMotion: false }); statuses.length = 0;
-  return { desktop, made, messages, statuses, selections, selectionUpdates, commands, worker, ipcMain, time, nativeTheme, animationSettings, trays, menus, actions,
+  return { desktop, made, messages, statuses, selections, selectionUpdates, contextSelections, commands, worker, ipcMain, time, nativeTheme, animationSettings, trays, menus, actions,
     focusOutside() { const previous = focused; focused = null; previous?.emit('blur'); },
     changeDisplay(area) { workArea = area; electron.screen.emit('display-metrics-changed'); } };
 }
@@ -357,19 +359,19 @@ test('展开先等旧文字退出绘制，再逐帧改变窗口尺寸；反向�
   assert.equal(win.frames.length, 0, '子框架不能确认布局');
   ipcMain.emit('pickgloss:layout-ready', event, prepare.id);
   assert.equal(win.frames.length, 0, 'ACK 后先从当前尺寸开始过渡，不得跳到终点');
-  time.advance(200);
-  assert.ok(win.frames.length >= 8, '约200毫秒内通过多个原生尺寸帧过渡');
+  time.advance(260);
+  assert.ok(win.frames.length >= 12, '过渡期间分多次更新原生尺寸');
   assert.equal(win.getBounds().width, 860);
   assert.equal(statuses.at(-1).windowTransitioning, false);
   desktop.setWide(false); desktop.setWide(true); desktop.setWide(false);
   const reverse = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
-  ipcMain.emit('pickgloss:layout-ready', event, reverse.id); time.advance(200);
+  ipcMain.emit('pickgloss:layout-ready', event, reverse.id); time.advance(260);
   assert.deepEqual({ ...win.getBounds() }, compact);
   assert.equal(await desktop.flushWindowState(), true);
   for (const write of writes) { assert.equal(write.sizes.compact.width, 335); assert.equal(write.sizes.reading.width, 860); }
 });
 
-test('小窗与阅读视图切换在约200毫秒内平滑过渡，连续反向不保存中间尺寸', async () => {
+test('小窗与阅读视图分帧切换，连续反向不保存中间尺寸', async () => {
   const writes = [];
   const { desktop, made, time, ipcMain } = desktopHarness({ animate: true, timerQuantum: 16,
     onWindowState: async value => writes.push(JSON.parse(JSON.stringify(value))) });
@@ -395,11 +397,11 @@ test('小窗与阅读视图切换在约200毫秒内平滑过渡，连续反向�
 
   desktop.setWide(false); acknowledge(); time.advance(32);
   desktop.setWide(true); acknowledge();
-  time.advance(192);
-  assert.notDeepEqual({ ...win.getBounds() }, { x: 575, y: 100, width: 860, height: 690 }, '尚未到约200毫秒时不能提前结束');
-  time.advance(16);
+  time.advance(224);
+  assert.notDeepEqual({ ...win.getBounds() }, { x: 575, y: 100, width: 860, height: 690 }, '尚未到目标时长不能提前结束');
+  time.advance(48);
   assert.deepEqual({ ...win.getBounds() }, { x: 575, y: 100, width: 860, height: 690 }, '再次展开应落在目标尺寸与目标位置');
-  desktop.setWide(false); acknowledge(); time.advance(208);
+  desktop.setWide(false); acknowledge(); time.advance(272);
   assert.deepEqual({ ...win.getBounds() }, compact, '往返后恢复原小窗位置和尺寸');
   assert.deepEqual({ ...desktop.getWindowState().sizes.compact }, { width: 335, height: 510 }, '过渡尺寸不得替代用户小窗尺寸');
   assert.deepEqual({ ...desktop.getWindowState().sizes.reading }, { width: 860, height: 690 }, '过渡尺寸不得替代用户阅读视图尺寸');
@@ -418,15 +420,15 @@ test('连续反向展开沿用本轮小窗锚点，不从收缩中间帧重新�
     ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, prepare.id);
   };
 
-  desktop.setWide(true); acknowledge(); time.advance(208);
+  desktop.setWide(true); acknowledge(); time.advance(272);
   assert.deepEqual({ ...win.getBounds() }, { x: 500, y: 100, width: 860, height: 690 });
   desktop.setWide(false); acknowledge(); time.advance(80);
   assert.ok(win.getBounds().width > compact.width && win.getBounds().width < 860, '收缩应到达中间尺寸');
-  desktop.setWide(true); acknowledge(); time.advance(208);
+  desktop.setWide(true); acknowledge(); time.advance(272);
 
   assert.deepEqual({ ...win.getBounds() }, { x: 500, y: 100, width: 860, height: 690 },
     '反向展开应沿用最初选定的左侧锚点，避免从收缩中间帧改选右侧并横移197像素');
-  desktop.setWide(false); acknowledge(); time.advance(208);
+  desktop.setWide(false); acknowledge(); time.advance(272);
   assert.deepEqual({ ...win.getBounds() }, compact, '完成反向后小窗必须回到原位置');
   desktop.dispose();
 });
@@ -440,7 +442,7 @@ test('快捷命令唤回与迟到布局确认不能先跳到旧目标', () => {
   assert.equal(win.getBounds().width, 300, '旧 ACK 不得开始新目标的尺寸过渡');
   const current = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
   ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, current.id);
-  time.advance(200); assert.equal(win.getBounds().width, 300);
+  time.advance(260); assert.equal(win.getBounds().width, 300);
 });
 
 test('超时后迟到的布局确认不能结束正在进行的尺寸过渡', () => {
@@ -452,7 +454,7 @@ test('超时后迟到的布局确认不能结束正在进行的尺寸过渡', ()
   assert.ok(beforeLateAck.width > 300 && beforeLateAck.width < 860, '准备超时后应已进入原生尺寸过渡');
   ipcMain.emit('pickgloss:layout-ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame }, prepare.id);
   assert.deepEqual({ ...win.getBounds() }, beforeLateAck, '迟到确认不得直接提交目标尺寸');
-  time.advance(200);
+  time.advance(260);
   assert.equal(win.getBounds().width, 860);
   desktop.dispose();
 });
@@ -468,7 +470,7 @@ test('普通打开与带新选区的打开继续完成现有动画，不受保�
 test('粗计时、原生调用耗时与提前唤醒仍保持平滑尺寸过渡', () => {
   for (const options of [{}, { timerQuantum: 15.625, nativeCost: 2 }, { timerQuantum: 15.625, timerDelays: [15.625, 8, 20.5], nativeCost: 2 }]) {
     const { desktop, made, time } = desktopHarness({ animate: true, ...options }); desktop.openPanel(); const win = made[0];
-    win.frames.length = 0; desktop.setWide(true); time.advance(370);
+    win.frames.length = 0; desktop.setWide(true); time.advance(400);
     assert.ok(win.frames.length >= 8, `提前唤醒或原生耗时不能退化为一次目标尺寸提交：${JSON.stringify(options)}，帧数=${win.frames.length}，尺寸=${win.getBounds().width}`);
     assert.equal(win.getBounds().width, 860);
   }
@@ -614,8 +616,8 @@ test('置顶与无描边均不创建独立光晕窗，窗口显示和尺寸始�
   const { desktop, made, time } = desktopHarness({ animate: true }); desktop.openPanel(); const win = made[0];
   for (const pinOutline of ['blue', 'none', 'orange']) {
     desktop.setAppearance({ current: { mode: 'dark', material: 'glass' }, pinOutline }); desktop.setPinned(true);
-    desktop.setWide(true); time.advance(320); assert.equal(win.getBounds().width, 860);
-    desktop.setWide(false); time.advance(320); assert.equal(win.getBounds().width, 300);
+    desktop.setWide(true); time.advance(380); assert.equal(win.getBounds().width, 860);
+    desktop.setWide(false); time.advance(380); assert.equal(win.getBounds().width, 300);
     assert.equal(made.length, 1); assert.equal(win.isVisible(), true);
   }
   desktop.setPinned(false); desktop.dispose(); time.advance(500); assert.equal(made.length, 1);
@@ -1283,6 +1285,69 @@ test('主动取消后旧入口失效，重新划词只解释最新材料', async
   }
 });
 
+test('划词补充等待超时后，后续普通划词仍显示解释入口', () => {
+  const { desktop, made, worker, commands, time, contextSelections } = desktopHarness();
+  desktop.startSelection(true);
+  desktop.openPanel();
+  desktop.startContextSelection('虚构会话ID');
+  const entry = made.find(win => win.kind === 'selection');
+  assert.equal(entry.getBounds().width, 286);
+  assert.equal(entry.ignoresMouse, true, '提示不应拦截原应用的鼠标操作');
+  assert.equal(made.find(win => win.kind === 'panel').isVisible(), false);
+  const armCancellation = commands.at(-1);
+  worker.emit('message', { type: 'pending-cancelled', requestId: armCancellation.requestId });
+
+  time.advance(3500);
+  assert.equal(entry.isVisible(), false, '短提示应自行收起');
+  time.advance(41500);
+  assert.equal(desktop.isPanelVisible(), true, '等待超时后返回原面板');
+  assert.ok(contextSelections.length === 0, '没有划词时不应写入上下文');
+  const timeoutCancellation = commands.at(-1);
+  worker.emit('message', { type: 'pending-cancelled', requestId: timeoutCancellation.requestId });
+
+  desktop.hidePanel();
+  worker.emit('message', { type: 'selection', text: '下一次正常划词', point: { x: 900, y: 300 } });
+  assert.equal(entry.isVisible(), true, '超时后的新划词应显示普通解释入口');
+  assert.equal(entry.getBounds().width, 34);
+  assert.equal(entry.ignoresMouse, false, '普通解释入口应恢复可点击状态');
+  assert.ok(contextSelections.length === 0, '普通划词不应进入过期的上下文目标');
+});
+
+test('补充上下文立即使用本次划选文字，不等待自动段落扩展', async () => {
+  const { desktop, worker, commands, contextSelections, selectionUpdates, made } = desktopHarness();
+  desktop.startSelection(true);
+  desktop.openPanel();
+  desktop.startContextSelection('虚构会话ID');
+  worker.emit('message', { type: 'pending-cancelled', requestId: commands.at(-1).requestId });
+  worker.emit('message', {
+    type: 'selection', requestId: 41, text: '本次手动选取的句子', context: '', contextPending: true,
+    point: { x: 900, y: 300 },
+  });
+
+  assert.equal(contextSelections.length, 1, '收到确认选区后立即提交');
+  assert.equal(contextSelections[0].text, '本次手动选取的句子');
+  worker.emit('message', { type: 'selection-context', requestId: 41, context: '自动扩展出来的整段文字' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(contextSelections.length, 1, '迟到的自动扩展不能覆盖用户本次划选');
+  assert.equal(selectionUpdates.length, 0);
+  assert.equal(made.find(win => win.kind === 'panel').isVisible(), true, '提交后重新打开解释会话');
+});
+
+test('Esc取消上下文划词等待，后续划词恢复普通入口', () => {
+  const { desktop, made, worker, commands, contextSelections } = desktopHarness();
+  desktop.startSelection(true);
+  desktop.openPanel();
+  desktop.startContextSelection('虚构会话ID');
+  worker.emit('message', { type: 'pending-cancelled', requestId: commands.at(-1).requestId });
+  worker.emit('message', { type: 'dismiss' });
+  assert.equal(made.find(win => win.kind === 'panel').isVisible(), true);
+  assert.equal(made.find(win => win.kind === 'selection').isVisible(), false);
+  worker.emit('message', { type: 'pending-cancelled', requestId: commands.at(-1).requestId });
+  worker.emit('message', { type: 'selection', text: '普通划词', point: { x: 900, y: 300 } });
+  assert.equal(contextSelections.length, 0, '取消后不再向旧上下文会话写入');
+  assert.equal(made.find(win => win.kind === 'selection').isVisible(), true);
+});
+
 test('打开其他流程后迟到的旧选区不重开入口，新划词仍可接纳', async () => {
   const { desktop, made, selections, commands, worker } = desktopHarness();
   desktop.startSelection(true);
@@ -1380,8 +1445,9 @@ test('界面崩溃后托盘重建面板，迟到的旧窗口关闭不移除新�
 test('退出草稿确认只接受正确窗口主框架的本轮 ACK，超时返回失败', async () => {
   const { desktop, made, messages, ipcMain, time } = desktopHarness();
   desktop.openPanel();
-  const pending = desktop.flushDrafts();
+  const pending = desktop.flushDrafts({ allowSettingsErrors: true });
   const token = messages.at(-1)[1], webContents = made[0].webContents;
+  assert.deepEqual(messages.at(-1)[2], { allowSettingsErrors: true }, '由调用方指定的关闭策略传到 renderer');
   ipcMain.emit('pickgloss:flushed', { sender: {}, senderFrame: {} }, token, true);
   assert.equal(ipcMain.listenerCount('pickgloss:flushed'), 1);
   ipcMain.emit('pickgloss:flushed', { sender: webContents, senderFrame: webContents.mainFrame }, token, true);
@@ -1431,7 +1497,7 @@ test('悬浮球连续点击依次开关，不并发打开窗口；空历史回�
 
 test('悬浮球关闭前保存草稿，失败不隐藏且后续点击可重试', async()=>{
   const app=mainHarness();app.flags.visible=true;app.flags.ack=false;
-  await assert.rejects(app.handle('orb-activate'),/有更改尚未保存/);
+  await assert.rejects(app.handle('orb-activate'),/会话草稿尚未保存/);
   assert.equal(app.calls.hide,0);assert.equal(app.flags.visible,true);
   app.flags.ack=true;await app.handle('orb-activate');assert.equal(app.calls.hide,1);
 });

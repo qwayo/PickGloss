@@ -1,6 +1,6 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
-const allowed = new Set(['bootstrap','new-text','set-context','set-note','set-mode','set-draft','start-explanation','send-question','stop','copy-answer','open-link','favorite','open-history','open-session','delete-session','open-settings','save-settings','test-provider','start-capture','capture-done','capture-cancel','close','pin','wide','show-orb','selection-open','menu','quit','navigate']);
+const allowed = new Set(['bootstrap','new-text','set-context','select-context','set-note','set-mode','set-draft','start-explanation','send-question','stop','copy-answer','open-link','favorite','open-history','open-session','delete-session','open-settings','save-settings','test-provider','start-capture','capture-done','capture-cancel','close','pin','wide','show-orb','selection-open','menu','quit','navigate']);
 allowed.add('reset-window-size');
 allowed.add('reset-general-settings');
 allowed.add('open-latest-session');
@@ -23,8 +23,8 @@ contextBridge.exposeInMainWorld('pickgloss', Object.freeze({
     return ipcRenderer.invoke('pickgloss:action', action, payload);
   },
   onBeforeQuit(callback) {
-    const listener = async (_event, token) => {
-      try { ipcRenderer.send('pickgloss:flushed', token, await callback() === true); }
+    const listener = async (_event, token, options) => {
+      try { ipcRenderer.send('pickgloss:flushed', token, await callback(options) === true); }
       catch { ipcRenderer.send('pickgloss:flushed', token, false); }
     };
     ipcRenderer.on('pickgloss:flush', listener);

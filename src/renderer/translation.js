@@ -57,7 +57,7 @@ function sampleBackground(context, block, width, height) {
 
 function blockLayout(context, block, data) {
   // OCR 段落框覆盖多行，字号依据平均行高；整段高度只决定可容纳的排版面积。
-  const sourceLines = data.method === 'windows-ocr' ? Math.max(1, (block.text || '').split(/\r?\n/).length) : 1;
+  const sourceLines = data.method !== 'vision' ? Math.max(1, (block.text || '').split(/\r?\n/).length) : 1;
   const lineHeight = block.height / sourceLines;
   const padding = data.method === 'vision' ? 8 : Math.min(2, block.height * .06);
   const x = Math.max(0, block.x - padding), y = Math.max(0, block.y - padding);
@@ -92,7 +92,8 @@ function translationStatus(data, changedOptions, localError) {
   if (['preparing-search', 'searching'].includes(data.status)) return data.status === 'searching' ? '联网查询中…' : '准备联网…';
   if (data.status === 'failed') return ['preparing', 'searching'].includes(data.search?.status) ? '联网失败' : data.method === 'vision' ? '识图失败' : '翻译失败';
   if (data.status === 'stopped') return '已停止';
-  if (data.status === 'recognizing') return data.method === 'vision' ? '识图中…' : '本地 OCR · 识别中';
+  const ocrLabel = data.method === 'model-ocr' ? '自定义 OCR' : '本地 OCR';
+  if (data.status === 'recognizing') return data.method === 'vision' ? '识图中…' : `${ocrLabel} · 识别中`;
   if (['complete', 'partial'].includes(data.status) && changedOptions) return changedOptions;
   if (data.status === 'partial') return `部分完成 · ${data.failedCount || 0} 处翻译失败`;
   if (data.method === 'vision') {
@@ -100,7 +101,7 @@ function translationStatus(data, changedOptions, localError) {
     return data.status === 'translating' ? `${mode}中…` : mode;
   }
   const completed = data.blocks?.filter(block => block.status === 'complete').length || 0;
-  return data.status === 'translating' ? completed ? `翻译中 · ${completed}/${data.blocks.length}` : '本地 OCR · 翻译中' : '本地 OCR · 完成';
+  return data.status === 'translating' ? completed ? `翻译中 · ${completed}/${data.blocks.length}` : `${ocrLabel} · 翻译中` : `${ocrLabel} · 完成`;
 }
 
 export function createTranslationUI({ root, invoke, role = 'controls' }) {
@@ -262,8 +263,12 @@ export function createTranslationUI({ root, invoke, role = 'controls' }) {
       render(current, languages);
     }
   };
-  const selectedOptions = () => ({ ...current.options, sourceLanguage: chosen.sourceLanguage, targetLanguage: chosen.targetLanguage,
-    translationMode: chosen.translationMode ?? 'standard', ...translationSearchPreferences(chosen) });
+  const selectedOptions = () => ({
+    ...current.options,
+    displayMode: current.overlayAvailable === false || current.sourceInvalid ? preferences?.displayMode ?? 'overlay' : current.options.displayMode,
+    sourceLanguage: chosen.sourceLanguage, targetLanguage: chosen.targetLanguage,
+    translationMode: chosen.translationMode ?? 'standard', ...translationSearchPreferences(chosen),
+  });
 
   function render(data, availableLanguages, availablePreferences) {
     rememberComparisonView();

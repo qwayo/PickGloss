@@ -32,11 +32,11 @@ function validateSources(input) {
 }
 
 function resolveProvider(settings, kind) {
-  if (!['text', 'vision', 'translation'].includes(kind)) throw failure('INVALID_CONFIG', '模型类型无效。');
+  if (!['text', 'vision', 'translation', 'ocr'].includes(kind)) throw failure('INVALID_CONFIG', '模型类型无效。');
   const model = settings?.[kind]?.model;
   if (model != null && typeof model !== 'string') throw failure('INVALID_CONFIG', '模型名称必须是文字。');
   // 留空模型时沿用整套文字配置；独立配置不完整时提示修正，不拼接不同服务的密钥。
-  const source = kind !== 'text' && !model?.trim() ? 'text' : kind;
+  const source = ['vision', 'translation'].includes(kind) && !model?.trim() ? 'text' : kind;
   return { source, config: settings?.[source] };
 }
 

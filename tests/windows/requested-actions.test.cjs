@@ -17,9 +17,10 @@ async function application() {
     if (uncertain.has(id)) throw Error('模拟回收接口在目录已移动后报错');
   } });
   await store.init();
-  let loginFailure = false, respond, loginEnabled = false;
+  let loginFailure = false, respond, loginEnabled = false, quitResponse = 0, quitCalls = 0;
   const app = { isPackaged: true, setPath() {}, getPath: () => directory, setName() {}, setAppUserModelId() {}, requestSingleInstanceLock: () => true,
     on() {}, whenReady: () => new Promise(() => {}),
+    quit() { quitCalls++; },
     getLoginItemSettings: () => ({ openAtLogin: loginEnabled, executableWillLaunchAtLogin: loginEnabled }),
     setLoginItemSettings(value) { if (loginFailure) throw Error('模拟登录项失败'); loginEnabled = value.openAtLogin; loginCalls.push(value); } };
   const placement = { region: { x: 30, y: 40, width: 20, height: 20 }, displayBounds: { x: 0, y: 0, width: 800, height: 600 } };
@@ -28,9 +29,10 @@ async function application() {
     resizeTranslationHeight: (...args) => { translationHeightCalls.push(args); return { height: Math.min(480, args[1]) }; },
     setTranslationControlsPinned: value => translationPins.push(value),
     hideTranslation() {}, openPanel() {}, setOrb() {}, setOrbPreferences() {}, hoverOrb() {}, startSelection() {}, setAppearance() {},
-    flushWindowState: async () => true, restoreWindowState: geometry => { restoredGeometry.push(geometry); return geometry.wide; },
+    flushWindowState: async () => true, restoreWindowState: geometry => { restoredGeometry.push(geometry); return geometry.wide; }, dispose() {},
     async beginCapture(options) { captures.push(options); } };
-  const electron = { app, clipboard: { writeText: value => clipboardTexts.push(value) }, net: { fetch: async (url, options) => {
+  const quitDialogs = [];
+  const electron = { app, dialog: { showMessageBox: async options => (quitDialogs.push(options), { response: quitResponse }) }, clipboard: { writeText: value => clipboardTexts.push(value) }, net: { fetch: async (url, options) => {
     const request = { url, options }; requests.push(request);
     if (respond) return respond(request);
     if (options.method === 'GET') return Response.json({ data: [{ id: '当前密钥可用的模型' }] });
@@ -42,9 +44,10 @@ async function application() {
     process: { argv: [], env: {}, pid: 1, execPath: 'E:\\测试应用\\PickGloss.exe' }, URL, AbortController, structuredClone, setTimeout, clearTimeout,
     fixture: { store, desktop, settings: await store.getSettings() } };
   vm.createContext(context);
-  vm.runInContext(await fs.readFile(target, 'utf8') + '\nstore=fixture.store;desktop=fixture.desktop;settings=fixture.settings;globalThis.testApp={handle,state,drain:async()=>{await translationJob?.promise;await Promise.all([...jobs.values()].map(job=>job.promise));}};', context);
+  vm.runInContext(await fs.readFile(target, 'utf8') + '\nstore=fixture.store;desktop=fixture.desktop;settings=fixture.settings;globalThis.testApp={handle,state,quit,drain:async()=>{await translationJob?.promise;await Promise.all([...jobs.values()].map(job=>job.promise));}};', context);
   return { ...context.testApp, store, failures, uncertain, trashed, loginCalls, requests, captures, translationHeightCalls, translationPins, restoredGeometry, clipboardTexts,
-    loginFailure: value => { loginFailure = value; }, recognize: value => { recognition = value; }, respond: value => { respond = value; } };
+    loginFailure: value => { loginFailure = value; }, recognize: value => { recognition = value; }, respond: value => { respond = value; },
+    quitResponse: value => { quitResponse = value; }, quitCalls: () => quitCalls, quitDialogs };
 }
 
 test('通用截图入口继承常规默认模式，明确指定模式的入口优先且不改默认值', async () => {
@@ -55,6 +58,15 @@ test('通用截图入口继承常规默认模式，明确指定模式的入口�
   await app.handle('start-capture', { mode: 'explain' }); assert.equal(app.captures.at(-1).mode, 'explain');
   assert.equal((await app.state()).settings.prefs.captureDefaultMode, 'translate');
   await assert.rejects(app.handle('start-capture', { mode: 'invalid' }), /截图模式无效/);
+});
+
+test('设置草稿无法保存时退出提供继续编辑和明确放弃选项', async () => {
+  const app = await application();
+  app.quitResponse(0); await app.quit();
+  assert.equal(app.quitCalls(), 0, '选择继续编辑不会退出');
+  assert.deepEqual(Array.from(app.quitDialogs[0].buttons), ['继续编辑', '放弃更改并退出']);
+  app.quitResponse(1); await app.quit();
+  assert.equal(app.quitCalls(), 1, '只有明确选择放弃后才退出');
 });
 
 test('立即识别模式在框选完成后自动识图，旧自动解释字段不控制新行为', async () => {
@@ -91,6 +103,44 @@ test('识图提示词模式不影响独立的截图翻译流程', async () => {
   await app.handle('capture-done', { mode: 'translate', rect: {} }); await app.drain();
   assert.equal(app.requests.length, 1);
   assert.equal((await app.state()).translation.status, 'complete');
+});
+
+test('截图翻译按已保存的自定义 OCR 配置识别，纯文本结果自动显示为对照', async () => {
+  const app = await application();
+  const baseUrl = 'http://127.0.0.1:8000/v1';
+  await app.handle('save-settings', {
+    text: { baseUrl: 'https://text.invalid/v1', model: '虚构翻译模型' },
+    ocr: { providerId: 'custom', baseUrl, model: '虚构识别模型' },
+  });
+  app.recognize(async () => assert.fail('自定义 OCR 不调用 Windows OCR'));
+  app.respond(({ url }) => Response.json({ choices: [{ message: { content: url.startsWith(baseUrl)
+    ? 'Visible text' : JSON.stringify({ translations: [{ id: 0, translation: '可见文字' }] }) } }] }));
+  await app.handle('capture-done', { mode: 'translate', rect: {} });
+  await app.drain();
+  assert.deepEqual(app.requests.map(request => request.url), [`${baseUrl}/chat/completions`, 'https://text.invalid/v1/chat/completions']);
+  const { translation } = await app.state();
+  assert.equal(translation.method, 'model-ocr');
+  assert.equal(translation.options.displayMode, 'compare');
+  assert.equal(translation.blocks[0].translation, '可见文字');
+  await assert.rejects(app.handle('set-translation-options', { id: translation.id, options: { displayMode: 'overlay' } }), /没有文字位置/);
+  await app.handle('retry-translation', { id: translation.id, options: translation.options });
+  await app.drain();
+  assert.equal((await app.state()).translation.options.displayMode, 'compare');
+  assert.equal((await app.store.getSettings()).prefs.screenshotTranslation.displayMode, 'overlay');
+});
+
+test('自定义 OCR 连接测试提交可识别的样图，并校验识别结果', async () => {
+  const app = await application();
+  const config = { providerId: 'custom', baseUrl: 'http://localhost:8000/v1', model: '虚构识别模型' };
+  app.respond(() => Response.json({ choices: [{ message: { content: 'O C R' } }] }));
+  const result = await app.handle('test-provider', { kind: 'ocr', config });
+  assert.match(result.message, /已识别/);
+  const body = JSON.parse(app.requests[0].options.body);
+  assert.equal(body.model, config.model);
+  const { url } = body.messages[1].content[1].image_url;
+  assert.equal(Buffer.from(url.split(',')[1], 'base64').readUInt32BE(16), 128);
+  app.respond(() => Response.json({ choices: [{ message: { content: '{"blocks":[]}' } }] }));
+  await assert.rejects(app.handle('test-provider', { kind: 'ocr', config }), /未能识别样图/);
 });
 
 test('语言选择立即成为下次截图的默认值，切换显示不会把语言改回上次译文所用语言', async () => {

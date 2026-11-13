@@ -5,6 +5,7 @@ const { resolveProvider, normalizeConfig, streamCompletion } = require('./provid
 const { searchWeb } = require('./search.cjs');
 const { SEARCH_PROVIDERS } = require('./services.cjs');
 const { resolveTranslationThinking } = require('./translation-thinking.cjs');
+const { recognizeWithModel } = require('./translation-ocr.cjs');
 const { createHash } = require('node:crypto');
 
 const TRANSLATION_BATCH_BLOCK_LIMIT = 24;
@@ -393,10 +394,17 @@ function reusableOptions(options) {
     .map(key => [key, options[key]]));
 }
 
-function previousResultBlocks(previousResult, { bytes, width, height, options, recognitionMode }) {
-  if (!previousResult || recognitionMode === 'vision' || previousResult.imageFingerprint !== imageFingerprint(bytes)
+function ocrModelFingerprint(config) {
+  if (config?.providerId !== 'custom') return '';
+  return createHash('sha256').update(JSON.stringify([config.profileId, config.baseUrl, config.model])).digest('hex');
+}
+
+function previousResultBlocks(previousResult, { bytes, width, height, options, recognitionMode, ocrFingerprint }) {
+  if (!previousResult || (recognitionMode === 'vision' && (previousResult.method !== 'vision' || previousResult.fallbackReason !== 'manual'))
+    || previousResult.imageFingerprint !== imageFingerprint(bytes)
     || previousResult.width !== width || previousResult.height !== height
-    || !['windows-ocr', 'vision'].includes(previousResult.method)
+    || !['windows-ocr', 'model-ocr', 'vision'].includes(previousResult.method)
+    || (previousResult.ocrFingerprint || '') !== ocrFingerprint
     || !Array.isArray(previousResult.blocks) || !previousResult.blocks.length) return null;
   const expectedOptions = reusableOptions(options), actualOptions = previousResult.options;
   if (!actualOptions || Object.keys(expectedOptions).some(key => actualOptions[key] !== expectedOptions[key])) return null;
@@ -457,7 +465,9 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
   if (!['auto', 'vision'].includes(recognitionMode)) throw failure('INVALID_INPUT', '识图模式无效。');
   const options = translationOptions(input), bytes = png(imageData);
   const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
-  const cachedBlocks = previousResultBlocks(previousResult, { bytes, width, height, options, recognitionMode });
+  const ocrFingerprint = recognitionMode === 'auto' ? ocrModelFingerprint(configs?.ocr) : '';
+  const ocrMethod = ocrFingerprint ? 'model-ocr' : 'windows-ocr';
+  const cachedBlocks = previousResultBlocks(previousResult, { bytes, width, height, options, recognitionMode, ocrFingerprint });
   ensureNotAborted(signal);
   const deepMode = options.translationMode === 'deep';
   const searchRequested = translationUsesSearch(options);
@@ -469,7 +479,11 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
   const visionConfig = visionSelection.config;
   const textReady = hasProviderConfig(textConfig);
   const visionReady = hasProviderConfig(visionConfig);
-  let method = cachedBlocks ? previousResult.method : recognitionMode === 'vision' || !textReady ? 'vision' : 'windows-ocr';
+  if (ocrFingerprint) {
+    if (!textReady) throw failure('INVALID_CONFIG', '使用自定义 OCR 时，请先在 AI 服务中配置文字模型或翻译模型。');
+    normalizeConfig(configs.ocr);
+  }
+  let method = cachedBlocks ? previousResult.method : recognitionMode === 'vision' || !textReady ? 'vision' : ocrMethod;
   let fallbackReason = cachedBlocks ? previousResult.fallbackReason || '' : recognitionMode === 'vision' ? 'manual' : method === 'vision' ? 'not-configured' : '';
   let noTextService = recognitionMode === 'auto' && !textReady;
   const cachedSearch = cachedBlocks ? reusableSearchState(previousResult, options) : null;
@@ -484,12 +498,12 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
     catch (error) {
       searchState.status = 'preparing';
       emitTranslationStage(onStage, 'preparing-search', { method, fallbackReason,
-        thinking: operationThinking(pendingThinking(options.translationMode, method === 'windows-ocr' ? textConfig : visionConfig), 'preflight'), search: searchState });
+        thinking: operationThinking(pendingThinking(options.translationMode, method === 'vision' ? visionConfig : textConfig), 'preflight'), search: searchState });
       throw error;
     }
   }
 
-  if (deepMode && method === 'windows-ocr') {
+  if (deepMode && method !== 'vision') {
     try {
       const adapter = resolveFinalThinking(textConfig, 'deep');
       finalConfig = textConfig; finalThinking = adapter.metadata; generationOptions = adapter.generationOptions;
@@ -513,10 +527,15 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
   }
 
   if (recognitionMode === 'auto' && textReady && !cachedBlocks) {
-    emitTranslationStage(onStage, 'recognizing', { method: 'windows-ocr', fallbackReason: '',
+    emitTranslationStage(onStage, 'recognizing', { method, fallbackReason: '',
       thinking: operationThinking(finalThinking || pendingThinking(options.translationMode, textConfig), 'recognition', 'pending', null), search: searchState });
-    try { recognition = await recognize({ imageData, sourceLanguage: options.sourceLanguage, signal }); }
+    try {
+      recognition = method === 'model-ocr'
+        ? await recognizeWithModel({ config: configs.ocr, imageData, width, height, language: languageName(options.sourceLanguage), signal, fetchImpl })
+        : await recognize({ imageData, sourceLanguage: options.sourceLanguage, signal });
+    }
     catch (error) {
+      if (method === 'model-ocr') throw error;
       const code = error?.code;
       if (signal?.aborted || code === 'ABORTED') throw error;
       if (['INPUT_TOO_LONG', 'IMAGE_TOO_LARGE', 'INVALID_IMAGE', 'OCR_INVALID', 'INVALID_CONFIG', 'INVALID_INPUT'].includes(code)) throw error;
@@ -526,7 +545,10 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
       else throw error;
     }
     if (!fallbackReason) {
-      if (!Array.isArray(recognition?.blocks) || recognition.blocks.length === 0) fallbackReason = 'empty';
+      if (!Array.isArray(recognition?.blocks) || recognition.blocks.length === 0) {
+        if (method === 'model-ocr') throw failure('OCR_EMPTY', 'OCR 模型没有识别到文字，请调整框选区域或更换模型。');
+        fallbackReason = 'empty';
+      }
       else {
         // 先完整校验输入边界，再依据 OCR 自身的保守质量信号决定是否交给识图模型。
         const candidateBlocks = ocrBlocks(recognition, width, height);
@@ -553,7 +575,7 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
       throw error;
     }
   }
-  if (method === 'windows-ocr' && !deepMode) {
+  if (method !== 'vision' && !deepMode) {
     const adapter = resolveFinalThinking(textConfig, 'standard');
     finalConfig = textConfig; finalThinking = adapter.metadata; generationOptions = adapter.generationOptions;
   } else if (method === 'vision' && !deepMode) {
@@ -565,7 +587,8 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
   }
   if (!finalThinking) finalThinking = pendingThinking(options.translationMode, finalConfig);
 
-  if (method === 'windows-ocr' || cachedBlocks) {
+  if (method !== 'vision' || cachedBlocks) {
+    const overlayAvailable = (cachedBlocks ? previousResult : recognition).overlayAvailable !== false;
     const blocks = localBlocks.map(block => ({ ...block, status: block.status || 'pending', translation: block.translation || '' }));
     let sources = cachedSearch ? [...searchState.sources] : [];
     if (searchRequested && !cachedSearch) {
@@ -579,15 +602,15 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
       const counts = translationCounts(snapshot);
       emitTranslationStage(onStage, 'translating', { method, fallbackReason: '',
         thinking: operationThinking(finalThinking, 'translation'), search: searchState,
-        blocks: snapshot, width, height, overlayAvailable: true, ...counts });
+        blocks: snapshot, width, height, overlayAvailable, ...counts });
     };
     emitProgress(blocks);
     const translated = await translateBlocksPartially({ config: finalConfig, blocks, options, sources, signal, fetchImpl, generationOptions,
       timeoutMs: deepMode ? 180000 : 60000, onUpdate: emitProgress });
     const rotationAdjusted = cachedBlocks ? Boolean(previousResult.rotationAdjusted) : Math.abs(Number(recognition.angle) || 0) >= 1;
-    return translationResult({ blocks: translated, width, height, method, fallbackReason, recognizedLanguage: recognition.language || '',
-      overlayAvailable: true, rotationAdjusted, warning: method === 'vision' ? fallbackWarning(fallbackReason, noTextService) : '',
-      thinking: finalThinking, search: searchState, options, bytes });
+    return { ...translationResult({ blocks: translated, width, height, method, fallbackReason, recognizedLanguage: recognition.language || '',
+      overlayAvailable, rotationAdjusted, warning: method === 'vision' ? fallbackWarning(fallbackReason, noTextService) : '',
+      thinking: finalThinking, search: searchState, options, bytes }), ocrFingerprint };
   }
 
   if (!finalConfig?.baseUrl || !finalConfig?.model) throw failure('INVALID_CONFIG', '请在 AI 服务中配置文字翻译模型，或支持图片的识图模型。');
@@ -649,4 +672,4 @@ async function translateScreenshot({ imageData, options: input, configs, recogni
     thinking: finalThinking, search: searchState, options, bytes });
 }
 
-module.exports = { TRANSLATION_LANGUAGES, translationOptions, translationUsesSearch, translateScreenshot, ocrBlocks };
+module.exports = { TRANSLATION_LANGUAGES, translationOptions, translationUsesSearch, translateScreenshot, ocrBlocks, ocrModelFingerprint };

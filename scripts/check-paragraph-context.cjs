@@ -24,7 +24,7 @@ try {
   fs.writeFileSync(path.join(output, '范围提供方输出.txt'), run.stdout || '', 'utf8');
   if (run.error || run.status !== 0) throw new Error('原生范围提供方检查失败：' + (run.stdout || run.stderr || run.status));
   report.results = (run.stdout || '').trim().split(/\r?\n/);
-  if ((run.stdout.match(/^通过：/gm) || []).length !== 22 || (run.stdout.match(/^失败：/gm) || []).length !== 0) throw new Error('确定性原生范围场景未完整通过。');
+  if ((run.stdout.match(/^通过：/gm) || []).length !== 27 || (run.stdout.match(/^失败：/gm) || []).length !== 0) throw new Error('确定性原生范围场景未完整通过。');
   exitCode = 0;
 } catch (error) { report.error = error.message; }
 report.exitCode = exitCode;

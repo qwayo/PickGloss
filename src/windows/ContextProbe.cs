@@ -24,14 +24,15 @@ internal interface IContextTextRange {
 }
 
 internal interface IContextTextPatternSource {
-    IContextTextRange GetDocumentRange();
-    IContextTextRange RangeFromChild(object child);
+    IContextTextRange GetDocumentRange(object rangeIdentity);
+    IContextTextRange RangeFromChild(object child, object rangeIdentity);
 }
 
 internal sealed class UiaContextTextRange : IContextTextRange {
     readonly TextPatternRange range;
-    internal UiaContextTextRange(TextPatternRange value) { range = value; }
-    public IContextTextRange Clone() { return new UiaContextTextRange(range.Clone()); }
+    readonly object rangeIdentity;
+    internal UiaContextTextRange(TextPatternRange value, object identity = null) { range = value; rangeIdentity = identity; }
+    public IContextTextRange Clone() { return new UiaContextTextRange(range.Clone(), rangeIdentity); }
     public void ExpandToParagraph() { range.ExpandToEnclosingUnit(TextUnit.Paragraph); }
     public int MoveEndpointByParagraph(ContextRangeEndpoint endpoint, int count) {
         return range.MoveEndpointByUnit(endpoint == ContextRangeEndpoint.Start ? TextPatternRangeEndpoint.Start : TextPatternRangeEndpoint.End, TextUnit.Paragraph, count);
@@ -56,34 +57,74 @@ internal sealed class UiaContextTextRange : IContextTextRange {
         return target != null && range.Compare(target.range);
     }
     public string GetText(int maxLength) { return range.GetText(maxLength); }
-    public object GetOwnerIdentity() { return range.GetEnclosingElement(); }
+    public object GetOwnerIdentity() { return rangeIdentity ?? range.GetEnclosingElement(); }
 }
 
 internal sealed class UiaContextTextPatternSource : IContextTextPatternSource {
     readonly TextPattern pattern;
     internal UiaContextTextPatternSource(TextPattern value) { pattern = value; }
-    public IContextTextRange GetDocumentRange() { return new UiaContextTextRange(pattern.DocumentRange); }
-    public IContextTextRange RangeFromChild(object child) {
+    public IContextTextRange GetDocumentRange(object rangeIdentity) { return new UiaContextTextRange(pattern.DocumentRange, rangeIdentity); }
+    public IContextTextRange RangeFromChild(object child, object rangeIdentity) {
         var element = child as AutomationElement;
         if (element == null) throw new InvalidOperationException("UIA 子控件类型不匹配。");
-        return new UiaContextTextRange(pattern.RangeFromChild(element));
+        return new UiaContextTextRange(pattern.RangeFromChild(element), rangeIdentity);
     }
 }
 
 internal static class ContextScopeResolver {
     // DocumentRange 仅用作该 TextPattern 的可信范围边界；实际输出仍由段落读取器限界。
     internal static IContextTextRange GetRange(IContextTextPatternSource pattern, object patternOwner,
-        object selectedOwner, bool documentOwner, out bool providerReturnedRange) {
+        object selectedOwner, bool documentOwner, out bool providerReturnedRange, object rangeIdentity = null) {
         providerReturnedRange = false;
         if (pattern == null || patternOwner == null || selectedOwner == null) return null;
         try {
             // RangeFromChild 只接受 TextPattern 的后代；Document 自身必须以 DocumentRange 作为可信边界。
             var range = documentOwner && Object.Equals(patternOwner, selectedOwner)
-                ? pattern.GetDocumentRange()
-                : pattern.RangeFromChild(selectedOwner);
+                ? pattern.GetDocumentRange(rangeIdentity)
+                : pattern.RangeFromChild(selectedOwner, rangeIdentity);
             providerReturnedRange = true;
             return range;
         } catch { return null; }
+    }
+    internal static bool SameRange(IContextTextRange first, IContextTextRange second) {
+        return first != null && second != null &&
+            first.CompareEndpoint(ContextRangeEndpoint.Start, second, ContextRangeEndpoint.Start) == 0 &&
+            first.CompareEndpoint(ContextRangeEndpoint.End, second, ContextRangeEndpoint.End) == 0;
+    }
+}
+
+internal static class ContextElementScope {
+    internal static bool IsBoundary(ControlType type) {
+        return type == ControlType.Group || type == ControlType.ListItem || type == ControlType.DataItem;
+    }
+    internal static bool IsSafe(AutomationElement element, uint processId) {
+        try { return element != null && IsBoundary(element.Current.ControlType) &&
+            element.Current.ProcessId == processId && !element.Current.IsPassword; }
+        catch { return false; }
+    }
+    internal static List<AutomationElement> AncestorsOf(AutomationElement patternOwner, AutomationElement child, uint processId) {
+        var result = new List<AutomationElement>();
+        try {
+            var current = child;
+            for (int depth = 0; depth < 12 && current != null; depth++) {
+                if (current.Equals(patternOwner)) return result;
+                if (current.Current.ProcessId != processId || current.Current.IsPassword) return new List<AutomationElement>();
+                if (IsSafe(current, processId)) result.Add(current);
+                current = TreeWalker.ControlViewWalker.GetParent(current);
+            }
+        } catch { }
+        return new List<AutomationElement>();
+    }
+    internal static bool IsWithin(AutomationElement ancestor, AutomationElement child, uint processId) {
+        try {
+            var current = child;
+            for (int depth = 0; depth < 12 && current != null; depth++) {
+                if (current.Equals(ancestor)) return current.Current.ProcessId == processId && !current.Current.IsPassword;
+                if (current.Current.ProcessId != processId || current.Current.IsPassword) return false;
+                current = TreeWalker.ControlViewWalker.GetParent(current);
+            }
+        } catch { }
+        return false;
     }
 }
 
@@ -100,6 +141,21 @@ internal static class ParagraphContextReader {
     static bool Contains(IContextTextRange outer, IContextTextRange inner) {
         return outer.CompareEndpoint(ContextRangeEndpoint.Start, inner, ContextRangeEndpoint.Start) <= 0 &&
             outer.CompareEndpoint(ContextRangeEndpoint.End, inner, ContextRangeEndpoint.End) >= 0;
+    }
+    internal static string ReadInlineScope(IContextTextRange scope, IContextTextRange selected) {
+        if (scope.CompareEndpoint(ContextRangeEndpoint.Start, selected, ContextRangeEndpoint.Start) > 0 ||
+            scope.CompareEndpoint(ContextRangeEndpoint.End, selected, ContextRangeEndpoint.Start) <= 0) return "";
+        if (scope.CompareEndpoint(ContextRangeEndpoint.End, selected, ContextRangeEndpoint.End) < 0) {
+            var tail = selected.Clone();
+            tail.MoveEndpointByRange(ContextRangeEndpoint.Start, scope, ContextRangeEndpoint.End);
+            var rawTail = tail.GetText(3);
+            if (rawTail == null || rawTail.Length >= 3 || !String.IsNullOrWhiteSpace(rawTail)) return "";
+        }
+        var raw = scope.GetText(ReadLimit);
+        if (raw == null || raw.Length >= ReadLimit) return "";
+        // Chromium 可能在行内对象两侧插入分隔符。保留真正的段落换行。
+        var text = Clean(raw.Replace("\r\n", "\n").Replace("\n\uFFFC\n", ""));
+        return text.Length <= MaximumContextLength && text.IndexOfAny(ParagraphBreaks) < 0 ? text : "";
     }
     static bool SameOwner(IContextTextRange first, IContextTextRange second) {
         return Object.Equals(first.GetOwnerIdentity(), second.GetOwnerIdentity());
@@ -149,13 +205,19 @@ internal static class ParagraphContextReader {
         } catch { return false; }
     }
 
-    internal static ContextReadResult Read(IContextTextRange selected, IContextTextRange scope, bool editOwner) {
+    internal static ContextReadResult Read(IContextTextRange selected, IContextTextRange scope, bool editOwner, bool extendAdjacent = true) {
         const string boundaryFailure = "当前应用未提供可靠的控件或段落边界，请手动补充上下文。";
         if (selected == null || (scope == null && !editOwner)) return new ContextReadResult("", boundaryFailure);
         try {
             object owner = selected.GetOwnerIdentity();
             if (owner == null || (scope != null && !Object.Equals(owner, scope.GetOwnerIdentity()))) return new ContextReadResult("", boundaryFailure);
             if (scope != null && !Contains(scope, selected)) return new ContextReadResult("", boundaryFailure);
+
+            if (scope != null && !extendAdjacent) {
+                // 内联链接和表情可能把视觉上的同一行切成多个 UIA 段。
+                var scopedText = ReadInlineScope(scope, selected);
+                if (scopedText.Length > 0) return new ContextReadResult(scopedText, "");
+            }
 
             // ExpandToEnclosingUnit 会把跨单位范围缩短到起点所在单位；因此分别定位选区起点段和末尾选中字符所在段。
             var first = selected.Clone();
@@ -189,6 +251,8 @@ internal static class ParagraphContextReader {
             string context = Clean(raw);
             if (context.Length == 0) return new ContextReadResult("", boundaryFailure);
             if (context.Length > MaximumContextLength) return new ContextReadResult("", "选区首尾段落超过 6000 个字符，请手动精简上下文。");
+
+            if (!extendAdjacent) return new ContextReadResult(context, "");
 
             var current = core;
             string currentText = context;
@@ -268,7 +332,9 @@ public static class ContextProbe {
         using(cache.Activate())owner=AutomationElement.FocusedElement;
         double x=Convert.ToDouble(input["x"]),y=Convert.ToDouble(input["y"]);
         var type=owner.Cached.ControlType;
-        if(owner.Cached.ProcessId!=pid || owner.Cached.IsPassword || (type!=ControlType.Edit && type!=ControlType.Document)) throw new InvalidOperationException("手势焦点控件不属于当前进程、是密码控件或不是可读文档/编辑框。");
+        if(owner.Cached.ProcessId!=pid || owner.Cached.IsPassword ||
+            (type!=ControlType.Edit && type!=ControlType.Document && !ContextElementScope.IsBoundary(type)))
+            throw new InvalidOperationException("手势焦点控件不属于当前进程、是密码控件或不是可读文本控件。");
         object raw;
         if(!owner.TryGetCachedPattern(TextPattern.Pattern,out raw)) throw new InvalidOperationException("手势焦点控件未提供 TextPattern。");
         var pattern=(TextPattern)raw; var before=pattern.GetSelection();
@@ -331,13 +397,15 @@ public static class ContextProbe {
             }
             var starts = new List<AutomationElement>();
             if(gestureOwner!=null) starts.Add(gestureOwner);
-            else {
-                try { starts.Add(AutomationElement.FocusedElement); } catch { }
-                try { starts.Add(AutomationElement.FromPoint(new Point(Convert.ToDouble(input["x"]), Convert.ToDouble(input["y"])))); } catch { }
-            }
+            else try { starts.Add(AutomationElement.FocusedElement); } catch { }
+            AutomationElement pointElement = null;
+            try {
+                pointElement = AutomationElement.FromPoint(new Point(Convert.ToDouble(input["x"]), Convert.ToDouble(input["y"])));
+                if (gestureOwner == null && !starts.Contains(pointElement)) starts.Add(pointElement);
+            } catch { }
             foreach (var start in starts) {
                 var element = start;
-                for (int depth = 0; depth < (gestureOwner==null?9:1) && element != null; depth++) {
+                for (int depth = 0; depth < 9 && element != null; depth++) {
                     try {
                         if (element.Current.ProcessId != pid || element.Current.IsPassword) break;
                         object raw;
@@ -356,33 +424,83 @@ public static class ContextProbe {
                                     string context = "", reason = "当前应用未提供可靠的控件或段落边界，请手动补充上下文。";
                                     try {
                                         // 多段选区先按 TextUnit.Paragraph 补齐首尾段，再仅在同一可信控件范围内扩展一段。
-                                        var owner = element.Current.ControlType == ControlType.Edit ? element : selected.GetEnclosingElement();
+                                        var owner = element;
+                                        var selectedEnclosing = selected.GetEnclosingElement();
                                         bool editOwner = owner.Current.ControlType == ControlType.Edit && !owner.Current.IsPassword && owner.Current.ProcessId == pid;
                                         var selectedRange = new UiaContextTextRange(selected);
                                         IContextTextRange scopeRange = null;
                                         bool scopeWasReturned = false;
-                                        try {
-                                            if ((owner.Current.ControlType == ControlType.Edit || owner.Current.ControlType == ControlType.Document) && !owner.Current.IsPassword && owner.Current.ProcessId == pid) {
-                                                var candidateScope = ContextScopeResolver.GetRange(new UiaContextTextPatternSource(pattern), element, owner,
-                                                    element.Current.ControlType == ControlType.Document, out scopeWasReturned);
-                                                if (candidateScope == null) throw new InvalidOperationException("UIA 未提供可信范围。");
-                                                bool scopeContains = candidateScope.CompareEndpoint(ContextRangeEndpoint.Start, selectedRange, ContextRangeEndpoint.Start) <= 0 &&
-                                                    candidateScope.CompareEndpoint(ContextRangeEndpoint.End, selectedRange, ContextRangeEndpoint.End) >= 0;
-                                                if (scopeContains && Object.Equals(candidateScope.GetOwnerIdentity(), owner)) scopeRange = candidateScope;
-                                                else if (editOwner && selected.GetEnclosingElement().Equals(owner) && candidateScope.GetOwnerIdentity().Equals(owner)) {
-                                                    // 保留少数 UIA 提供方在末尾表情处端点不一致的单段兼容；仅接受同一 Edit 内完整单段范围。
-                                                    var scopeRaw = candidateScope.GetText(6003); var scopeText = CleanText(scopeRaw);
-                                                    if (scopeRaw.Length < 6003 && scopeText.Length > 0 && scopeText.Length <= 6000 && scopeText.IndexOfAny(new[] { '\r', '\n', '\u0085', '\u2028', '\u2029' }) < 0 && scopeText.IndexOf(text, StringComparison.Ordinal) >= 0) {
-                                                        context = scopeText; reason = "";
-                                                    }
+                                        var textPatternSource = new UiaContextTextPatternSource(pattern);
+                                        bool scopeIsPatternOwner = false;
+                                        if (!editOwner) {
+                                            // 浏览器评论常把实际选区包在 Text 子元素中。只尝试点位到当前 TextPattern 的祖先中最近的结构容器，并要求范围确实包含选区。
+                                            var candidateOwners = new List<AutomationElement>();
+                                            foreach (var candidateRoot in new[] { selectedEnclosing, pointElement, start }) {
+                                                foreach (var candidateOwner in ContextElementScope.AncestorsOf(element, candidateRoot, pid)) {
+                                                    if (!candidateOwners.Contains(candidateOwner)) candidateOwners.Add(candidateOwner);
                                                 }
                                             }
-                                        } catch { scopeWasReturned = false; scopeRange = null; }
+                                            bool hasStructuralOwners = candidateOwners.Count > 0;
+                                            foreach (var candidateOwner in candidateOwners) {
+                                                try {
+                                                    var candidateScope = ContextScopeResolver.GetRange(textPatternSource, element, candidateOwner, false, out scopeWasReturned, selectedEnclosing);
+                                                    var documentScope = textPatternSource.GetDocumentRange(null);
+                                                    if (candidateScope == null || ContextScopeResolver.SameRange(candidateScope, documentScope)) continue;
+                                                    int endComparison = candidateScope.CompareEndpoint(ContextRangeEndpoint.End, selectedRange, ContextRangeEndpoint.End);
+                                                    if (endComparison < 0 &&
+                                                        ContextElementScope.IsWithin(candidateOwner, selectedEnclosing, pid)) {
+                                                        // 反向划词可能把段尾换行带入选区。只接受同一容器内经端点确认的正文。
+                                                        var inline = ParagraphContextReader.ReadInlineScope(candidateScope, selectedRange);
+                                                        if (inline.Length > 0) { context = inline; reason = ""; break; }
+                                                    }
+                                                    if (endComparison >= 0 &&
+                                                        candidateScope.CompareEndpoint(ContextRangeEndpoint.Start, selectedRange, ContextRangeEndpoint.Start) <= 0) {
+                                                        scopeRange = candidateScope;
+                                                        // 范围扩到整段时，浏览器可能从文字节点切换到评论容器。用已验证的子范围约束段落端点。
+                                                        selectedRange = new UiaContextTextRange(selected, selectedEnclosing);
+                                                        break;
+                                                    }
+                                                } catch { scopeRange = null; }
+                                            }
+                                            if (scopeRange == null && !hasStructuralOwners &&
+                                                (owner.Current.ControlType == ControlType.Document || ContextElementScope.IsBoundary(owner.Current.ControlType))) {
+                                                try {
+                                                    var identity = owner.Current.ControlType == ControlType.Document ? null : selectedEnclosing;
+                                                    var candidateScope = ContextScopeResolver.GetRange(textPatternSource, element, owner, true, out scopeWasReturned, identity);
+                                                    if (candidateScope != null &&
+                                                        candidateScope.CompareEndpoint(ContextRangeEndpoint.Start, selectedRange, ContextRangeEndpoint.Start) <= 0 &&
+                                                        candidateScope.CompareEndpoint(ContextRangeEndpoint.End, selectedRange, ContextRangeEndpoint.End) >= 0) {
+                                                        scopeRange = candidateScope;
+                                                        scopeIsPatternOwner = owner.Current.ControlType == ControlType.Document;
+                                                        if (!scopeIsPatternOwner) selectedRange = new UiaContextTextRange(selected, identity);
+                                                    }
+                                                } catch { scopeRange = null; }
+                                            }
+                                        }
+                                        if (editOwner) {
+                                            try {
+                                                var candidateScope = ContextScopeResolver.GetRange(textPatternSource, element, owner, false, out scopeWasReturned);
+                                                if (candidateScope != null && candidateScope.GetOwnerIdentity().Equals(owner)) {
+                                                    bool scopeContains = candidateScope.CompareEndpoint(ContextRangeEndpoint.Start, selectedRange, ContextRangeEndpoint.Start) <= 0 &&
+                                                        candidateScope.CompareEndpoint(ContextRangeEndpoint.End, selectedRange, ContextRangeEndpoint.End) >= 0;
+                                                    if (scopeContains) scopeRange = candidateScope;
+                                                    else if (selectedEnclosing.Equals(owner)) {
+                                                        // 保留少数 Edit 提供方在末尾表情处端点不一致时的完整单段兼容。
+                                                        var scopeRaw = candidateScope.GetText(6003); var scopeText = CleanText(scopeRaw);
+                                                        if (scopeRaw.Length < 6003 && scopeText.Length > 0 && scopeText.Length <= 6000 &&
+                                                            scopeText.IndexOfAny(new[] { '\r', '\n', '\u0085', '\u2028', '\u2029' }) < 0 &&
+                                                            scopeText.IndexOf(text, StringComparison.Ordinal) >= 0) {
+                                                            context = scopeText; reason = "";
+                                                        }
+                                                    }
+                                                }
+                                            } catch { }
+                                        }
 
                                         // 同一 Edit 的 TextUnit 段落归属可在 RangeFromChild 不可用时作为边界证明；Document 不允许这样回退。
-                                        bool editOwnerMatches = editOwner && selected.GetEnclosingElement().Equals(owner);
+                                        bool editOwnerMatches = editOwner && ContextElementScope.IsWithin(owner, selectedEnclosing, pid);
                                         if (context.Length == 0 && (scopeRange != null || (!scopeWasReturned && editOwnerMatches))) {
-                                            var result = ParagraphContextReader.Read(selectedRange, scopeRange, editOwner);
+                                            var result = ParagraphContextReader.Read(selectedRange, scopeRange, editOwner, scopeRange == null || scopeIsPatternOwner);
                                             context = result.Context; reason = result.Reason;
                                         } else if (context.Length == 0 && reason.Length == 0) {
                                             reason = "当前应用未提供可靠的控件边界，请手动补充上下文。";
