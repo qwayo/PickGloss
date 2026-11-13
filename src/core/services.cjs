@@ -14,4 +14,9 @@ const SEARCH_PROVIDERS = Object.freeze([
   Object.freeze({ id: 'deepseek', name: 'DeepSeek', protocol: 'deepseek', baseUrl: 'https://api.deepseek.com/v1/tools/search', keyUrl: 'https://platform.deepseek.com/api_keys' }),
 ]);
 
-module.exports = { MODEL_PROVIDERS, SEARCH_PROVIDERS };
+const OCR_PROVIDERS = Object.freeze([
+  Object.freeze({ id: 'windows', name: 'Windows 内置 OCR', baseUrl: '' }),
+  Object.freeze({ id: 'custom', name: '自定义 OCR 模型', baseUrl: '' }),
+]);
+
+module.exports = { MODEL_PROVIDERS, SEARCH_PROVIDERS, OCR_PROVIDERS };

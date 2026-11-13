@@ -21,10 +21,10 @@ const { createTranslationTracker } = require('./translation-tracker.cjs');
 const { createOrbController } = require('./orb-controller.cjs');
 const { panelResizeBounds, validResizePayload } = require('./panel-resize.cjs');
 
-const PANEL_MOTION_DURATION = 200;
+const PANEL_MOTION_DURATION = 260;
 const PANEL_MOTION_FRAME = 16;
 
-function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, onWindowState, captureFactory = createScreenCapture, sourceFactory }) {
+function createDesktop({ onAction, onSelection, onSelectionContext, onContextSelection, onStatus, onWindowState, captureFactory = createScreenCapture, sourceFactory }) {
   const windows = new Map();
   let translationBinding = null;
   let translationControlsPinned = false;
@@ -40,6 +40,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
   let tray, worker, pending, heartbeatTimer, lastHeartbeat = 0, workerRestarts = 0;
   let closing = false, capture = null, pinned = false, wide = false, showOrb = true;
   let selectionGeneration = 0, selectionEntry = 0, pausedSelection = false;
+  let contextSelectionTarget = null, contextPromptTimer = null, contextSelectionTimeout = null;
   let cancellationId = 0, pendingCancellation = null;
   const selectionContexts = new Map();
   const panelSizes = { compact: { ...DEFAULT_PANEL_SIZES.compact }, reading: { ...DEFAULT_PANEL_SIZES.reading } };
@@ -79,7 +80,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       status: kind === 'translation' ? { ...state.status, appearanceMaterial: windowMaterials.get(win) || 'solid', nativeRoundedFrame: false } : state.status,
       session: null, history: [], capture: null };
     state = { ...state, translation: null };
-    if (kind === 'selection') return { ...state, capture: null, selectionEntry };
+    if (kind === 'selection') return { ...state, capture: null, selectionEntry, contextSelectionPrompt: Boolean(contextSelectionTarget) };
     if (kind !== 'capture') return { ...state, capture: null };
     const image = captureState();
     if (!image) { deliveredCaptureIds.delete(win.webContents); return { ...state, capture: null }; }
@@ -210,7 +211,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     stopAnimation(false, false, reducedMotion);
     if (reducedMotion) { setWindowBounds(win, target); rememberWindow('panel', win, false); onStatus({ wide, windowTransitioning: false }); return; }
     const current = animation = { win, target, id: ++layoutSerial, phase: 'preparing' };
-    // 先让旧文字退出绘制；收到 ACK 后平滑改变原生窗口边界，最后再提交新排版。
+    // 收到固定排版的 ACK 后再改变原生窗口边界，最后提交新排版。
     win.webContents.send('pickgloss:layout', { phase: 'prepare', id: current.id });
     // renderer 尚未载入或退出时仍能完成切换；超时开始原生过渡，迟到 ACK 不得提前提交。
     animationTimer = setTimeout(() => startPanelAnimation(current), 100);
@@ -487,7 +488,12 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     return true;
   }
 
-  function dismiss(cancelWorker = false) {
+  function dismiss(cancelWorker = false, cancelContextSelection = true) {
+    if (cancelContextSelection) {
+      contextSelectionTarget = null;
+      clearTimeout(contextSelectionTimeout); contextSelectionTimeout = null;
+    }
+    clearTimeout(contextPromptTimer); contextPromptTimer = null;
     if (pending?.requestId) {
       const record = selectionContexts.get(pending.requestId);
       if (record && !record.opened) selectionContexts.delete(pending.requestId);
@@ -524,6 +530,22 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
 
   function showSelection(data) {
     if (capture || pausedSelection) return;
+    if (contextSelectionTarget) {
+      const sessionId = contextSelectionTarget;
+      contextSelectionTarget = null;
+      clearTimeout(contextSelectionTimeout); contextSelectionTimeout = null;
+      clearTimeout(contextPromptTimer); contextPromptTimer = null;
+      windows.get('selection')?.hide();
+      if (data.type === 'selection-too-long') {
+        onStatus({ error: '选取的上下文超过长度限制，请缩短范围后重试。' });
+        openPanel();
+      } else {
+        void Promise.resolve(onContextSelection?.({ sessionId, text: data.text }))
+          .then(() => openPanel())
+          .catch(error => { onStatus({ error: error.message || '上下文暂未保存，请重新划词。' }); openPanel(); });
+      }
+      return;
+    }
     const point = screen.screenToDipPoint(data.point);
     for (const win of windows.values()) {
       if (!win.isVisible()) continue;
@@ -538,6 +560,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       while (selectionContexts.size > 32) finishSelectionContext(selectionContexts.keys().next().value, { context: '', reason: '上下文读取已结束，请手动补充或使用独立释义。' });
     }
     const win = selectionWindow();
+    win.setIgnoreMouseEvents?.(false);
     const expected = pending;
     const show = () => {
       if (pending !== expected) return;
@@ -677,11 +700,15 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       if (data.type === 'heartbeat') lastHeartbeat=Date.now();
       else if (data.type === 'ready') onStatus({selection:data.running?'划词入口已开启 · 不使用自动复制':'选区监听未启动，可使用粘贴或截图'});
       else if (data.type === 'selection' || data.type === 'selection-too-long') showSelection(data);
-      else if (data.type === 'dismiss') dismiss();
+      else if (data.type === 'dismiss') {
+        const wasSelectingContext = Boolean(contextSelectionTarget);
+        dismiss();
+        if (wasSelectingContext) openPanel();
+      }
       else if (data.type === 'pointer-down') {
         const point = screen.screenToDipPoint(data.point), win=windows.get('selection');
         if (win?.isVisible()) { const b=win.getBounds(); if (point.x>=b.x&&point.x<=b.x+b.width&&point.y>=b.y&&point.y<=b.y+b.height) return; }
-        dismiss();
+        dismiss(false, !contextSelectionTarget);
       } else if (data.type === 'error' || data.type === 'probe-unavailable') onStatus({selection:'选区读取暂不可用，请使用粘贴或截图'});
     });
     child.on('exit', () => {
@@ -966,7 +993,28 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
     return ({orb:['bootstrap','menu','orb-drag','orb-hover','open-latest-session'], menu:['bootstrap','menu-ready','menu-close','navigate','pin','wide','open-history','open-settings','open-appearance','open-shortcuts','shortcut-command','show-orb','toggle-selection','start-capture','quit'], selection:['bootstrap','selection-open'],capture:['bootstrap','capture-ready','capture-done','capture-cancel','set-translation-preferences']}[kind]||[]).includes(action);
   }
 
-  return { initTray, openPanel, startSelection, setOrb, menu, closeMenu, menuReady, prepareCapture, beginCapture, cancelCapture, finishCapture, finishCaptureWithPlacement, restoreCaptureSource, showTranslation, resizeTranslationHeight,
+  return { initTray, openPanel, startSelection, startContextSelection(sessionId) {
+      if (pausedSelection || !worker || typeof sessionId !== 'string' || !sessionId) throw new Error('划词监听当前不可用，请手动补充上下文。');
+      dismiss(true, false);
+      clearTimeout(contextSelectionTimeout); contextSelectionTimeout = null;
+      contextSelectionTarget = sessionId;
+      const win = selectionWindow();
+      const point = screen.getCursorScreenPoint();
+      win.setBounds(placeSelectionEntry(point, { width: 286, height: 48 }, screen.getDisplayNearestPoint(point).workArea));
+      win.setIgnoreMouseEvents?.(true);
+      if (lastState) win.webContents.send('pickgloss:state', surfaceState('selection', win, lastState));
+      win.showInactive();
+      windows.get('panel')?.hide();
+      contextPromptTimer = setTimeout(() => { if (contextSelectionTarget) win.hide(); }, 3500);
+      contextSelectionTimeout = setTimeout(() => {
+        if (!contextSelectionTarget) return;
+        contextSelectionTarget = null;
+        contextSelectionTimeout = null;
+        windows.get('selection')?.hide();
+        onStatus({ error: '划词补充等待已超时，请重新点击补充上下文。' });
+        openPanel();
+      }, 45000);
+    }, setOrb, menu, closeMenu, menuReady, prepareCapture, beginCapture, cancelCapture, finishCapture, finishCaptureWithPlacement, restoreCaptureSource, showTranslation, resizeTranslationHeight,
     hideTranslation, setTranslationControlsPinned, captureReady, authorize, stateFor,
     restoreWindowState, getWindowState, flushWindowState, setAppearance, dragOrb, resizePanel: resizePanelGesture,
     setOrbPreferences(prefs) { orbPreferences = { quietFadeEnabled: prefs?.orbQuietFade !== false, edgeCollapseEnabled: prefs?.orbEdgeCollapse !== false }; orbController?.configure({ ...orbPreferences, reducedMotion }); },
@@ -1024,18 +1072,18 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onStatus, on
       animatePanel(win, next);
       queueWindowState();
     },
-    flushDrafts() {
+    flushDrafts(options = {}) {
       const win=windows.get('panel');if(!win||win.isDestroyed())return Promise.resolve(true);
       return new Promise(resolve=>{
         const token=randomUUID();
         const finish=ok=>{clearTimeout(timer);ipcMain.removeListener('pickgloss:flushed',listener);resolve(ok);};
         const listener=(event,replyToken,ok)=>{if(event.sender===win.webContents&&event.senderFrame===win.webContents.mainFrame&&replyToken===token)finish(ok===true);};
         const timer=setTimeout(()=>finish(false),3000);
-        ipcMain.on('pickgloss:flushed',listener);win.webContents.send('pickgloss:flush',token);
+        ipcMain.on('pickgloss:flushed',listener);win.webContents.send('pickgloss:flush',token,options);
       });
     },
     async smoke() {const win=panel();await new Promise(resolve=>{if(win.webContents.isLoading())win.webContents.once('did-finish-load',resolve);else resolve();});return {windows:windows.size,displayCount:screen.getAllDisplays().length,rendererLoaded:!win.webContents.isLoading(),selectionWorker:!!worker};},
-    dispose() {closing=true;selectionGeneration++;capture=null;sourceWatcher?.dispose();if(captureReader)releaseCaptureReader(captureReader);clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);for(const win of windows.values())win.destroy();}
+    dispose() {closing=true;selectionGeneration++;capture=null;contextSelectionTarget=null;clearTimeout(contextPromptTimer);clearTimeout(contextSelectionTimeout);sourceWatcher?.dispose();if(captureReader)releaseCaptureReader(captureReader);clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);for(const win of windows.values())win.destroy();}
   };
 }
 module.exports={createDesktop};

@@ -326,6 +326,28 @@ test('分阶段文字已发布后 helper 超时也发送上下文缺失帧', () 
   assert.equal(probe.killed, true);
 });
 
+test('选中文字复核用时不挤占同一选区的上下文读取时间', () => {
+  for (const method of ['普通选区', '手势后备']) {
+    const worker = selectionWorker();
+    if (method === '普通选区') worker.select('词语');
+    else {
+      worker.down();
+      frame(worker.children[0], { ready: true });
+      worker.up();
+    }
+    const probe = worker.children[0];
+    const validationTimer = worker.timers.find(timer => !timer.cleared);
+    frame(probe, { valid: true, text: '词语', contextPending: true });
+    // 模拟第一阶段的原定截止点落在文字帧与段落帧之间。
+    if (!validationTimer.cleared) validationTimer.fn();
+    frame(probe, { contextComplete: true, context: '同一段落里的词语。' });
+    probe.emit('close');
+    const results = worker.messages.filter(message => message.type === 'selection-context');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].context, '同一段落里的词语。', method);
+  }
+});
+
 test('主动进入其他流程后，旧段落结果失效且后续新划词仍可用', () => {
   const worker = selectionWorker();
   worker.select('compound');

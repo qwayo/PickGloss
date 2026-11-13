@@ -44,11 +44,11 @@ async function shot(name) {
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
   await fs.writeFile(path.join(output, name), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
 }
-async function centeredTabs(selector, label) {
+async function centeredTabs(selector, label, count = 4) {
   const geometry = await evaluate(`(()=>{const tabs=document.querySelector(${quoteJavaScriptString(selector)}),box=tabs.getBoundingClientRect(),buttons=[...tabs.querySelectorAll('[role="tab"]')];return {width:box.width,items:buttons.map(node=>{const r=node.getBoundingClientRect();return {left:r.left-box.left,right:box.right-r.right,width:r.width,align:getComputedStyle(node).textAlign,overflow:node.scrollWidth>node.clientWidth}})}})()`);
-  assert.equal(geometry.items.length,4,label);
-  for (const item of geometry.items) { assert.ok(Math.abs(item.width-geometry.width/4)<1,label); assert.equal(item.align,'center',label); assert.equal(item.overflow,false,label); }
-  assert.ok(Math.abs(geometry.items[0].left-geometry.items[3].right)<1,label);
+  assert.equal(geometry.items.length,count,label);
+  for (const item of geometry.items) { assert.ok(Math.abs(item.width-geometry.width/count)<1,label); assert.equal(item.align,'center',label); assert.equal(item.overflow,false,label); }
+  assert.ok(Math.abs(geometry.items[0].left-geometry.items.at(-1).right)<1,label);
   observations.push({ 检查: label, 布局: geometry });
 }
 async function picker(selector, name) {
@@ -56,6 +56,7 @@ async function picker(selector, name) {
   await win.webContents.executeJavaScript(`(()=>{const node=document.querySelector(${quoteJavaScriptString(selector)});node.scrollIntoView({block:'center'});node.focus();node.showPicker()})()`, true);
   await waitFor(()=>evaluate(`document.querySelector(${quoteJavaScriptString(selector)}).matches(':open')`),'主题选择器展开');
   await shot(name);
+  const beforeEscape = calls.length;
   const hadDebugger = win.webContents.debugger.isAttached();
   if (!hadDebugger) win.webContents.debugger.attach('1.3');
   try {
@@ -63,7 +64,7 @@ async function picker(selector, name) {
     await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
   } finally { if (!hadDebugger) win.webContents.debugger.detach(); }
   await waitFor(()=>evaluate(`!document.querySelector(${quoteJavaScriptString(selector)}).matches(':open')`),'Esc 收起选择器');
-  assert.equal(calls.includes('close'),false,'Esc 只收起选择器，不关闭设置');
+  assert.equal(calls.slice(beforeEscape).includes('close'),false,'Esc 只收起选择器，不关闭设置');
 }
 async function keyboardSelectCaptureMode() {
   await win.webContents.executeJavaScript(`document.querySelector('[name="captureDefaultMode"]').showPicker()`,true);
@@ -216,7 +217,7 @@ app.whenReady().then(async () => {
     failSave=false;await click('[data-autosave="general:orbAction"] button');
     await waitFor(async()=>(await store.getSettings()).prefs.orbAction==='chat','恢复默认左键功能');
     await click('.settings-navigation button:nth-child(2)');
-    await centeredTabs('.mode-tabs[aria-label="服务类型"]','宽窗服务分类四等分居中');
+    await centeredTabs('.mode-tabs[aria-label="服务类型"]','宽窗服务分类五等分居中',5);
     await shot('AI服务-居中分类.png');
     assert.equal(await evaluate(`document.querySelector('[name="text-clearKey"]').closest('label').hidden`), true, '没有密钥时不出现清除动作');
     const savedText = (await store.getSettings()).text;
@@ -234,16 +235,16 @@ app.whenReady().then(async () => {
     assert.equal(fixture.view, 'settings', '设置保存失败必须阻止离页');
     assert.equal(calls.slice(beforeLeave).includes('navigate'), false, '保存失败不能发送后续导航');
     await click('.panel-bar button[title="关闭窗口"]');
+    await waitFor(() => calls.slice(beforeLeave).includes('close'), '保存失败时仍允许关闭');
     await waitFor(() => evaluate(`document.querySelector('.panel-bar button[title="关闭窗口"]')?.disabled===false`), '保存失败后的关闭动作结束');
-    assert.equal(calls.slice(beforeLeave).includes('close'), false, '保存失败不能发送关闭');
-    assert.equal(await evaluate(`document.querySelector('[name="text-baseUrl"]').value`), 'invalid-host', '离页及关闭被阻断后仍保留失败草稿');
+    assert.equal(await evaluate(`document.querySelector('[name="text-baseUrl"]').value`), 'invalid-host', '关闭窗口后仍保留失败草稿');
     await click('[data-settings-save-issues] button:nth-of-type(2)');
     await waitFor(() => evaluate(`document.querySelector('[data-settings-save-issues]').hidden && document.querySelector('[name="text-provider"]').value==='mimo'`), '显式恢复后解除保存阻断');
     assert.equal((await store.getSettings()).text.providerId, 'mimo', '放弃未保存修改不改动当前已生效的厂商');
     await input('[name="text-provider"]', 'custom'); await evaluate(`document.querySelector('[name="text-provider"]').dispatchEvent(new Event('change',{bubbles:true}))`);
     await waitFor(async () => (await store.getSettings()).text.providerId === 'custom', '恢复原服务用于后续检查');
     assert.equal((await store.getSettings()).text.baseUrl, savedText.baseUrl);
-    observations.push({ 检查: '后台厂商失败可定位、离页和关闭阻断及显式恢复', 草稿保留: true, 有效配置未被恢复动作改写: true });
+    observations.push({ 检查: '后台厂商失败可定位、关闭保留草稿及显式恢复', 草稿保留: true, 有效配置未被恢复动作改写: true });
     await input('[data-field="text-model"]', '自动保存的服务草稿');
     await click('.settings-navigation button:nth-child(3)');
     await waitFor(async () => fixture.settingsSection === 'appearance', '设置分类同步');
@@ -311,7 +312,7 @@ app.whenReady().then(async () => {
     await click('.settings-navigation button:nth-child(4)');
     await shot('快捷键-末项对齐.png');
     await click('.settings-navigation button:nth-child(2)');
-    await centeredTabs('.mode-tabs[aria-label="服务类型"]','小窗服务分类四等分居中');
+    await centeredTabs('.mode-tabs[aria-label="服务类型"]','小窗服务分类五等分居中',5);
     await shot('AI服务-小窗居中.png');
     await click('.settings-navigation button:nth-child(1)');
     await handle('wide', { wide: true }); await waitFor(async () => !fixture.status.windowTransitioning && win.getBounds().width >= 858, '恢复检查宽布局');

@@ -22,6 +22,7 @@ const samples = [
   { name: '多行控件跨段选区补齐首尾段', document: '前一段正文。\n后一段含有测试词。', selection: '正文。\n后一段', context: '前一段正文。\n后一段含有测试词。', multiline: true, rule: '取得上下文' },
   { name: '多行控件整段选区保留前后段', document: '前一段。\n目标段落完整选中。\n后一段。', selection: '目标段落完整选中。', context: '前一段。\n目标段落完整选中。\n后一段。', multiline: true, rule: '取得上下文' },
   { name: '多行控件只有单段且带表情', document: '虚构签名🙂', selection: '签名', context: '虚构签名🙂', multiline: true, rule: '取得上下文' },
+  { name: '评论分组中只选一个字仍取得当前评论正文', document: '虚构用户：这条评论里只有一个字被选中，其余正文也应作为上下文。', selection: '字', context: '这条评论里只有一个字被选中，其余正文也应作为上下文。', article: true, rule: '取得上下文' },
 ];
 async function probe(request) {
   return new Promise((resolve, reject) => {
@@ -56,6 +57,15 @@ app.whenReady().then(async () => {
         const data = await win.webContents.executeJavaScript(`(() => {
           const sample=${JSON.stringify(sample)};
           const host=document.getElementById('target'); host.replaceChildren();
+          if(sample.article) {
+            const group=document.createElement('div'); group.setAttribute('role','group'); group.setAttribute('aria-label','虚构评论');
+            group.innerHTML='<span>虚构用户：</span><p class="comment">'+sample.document.slice('虚构用户：'.length)+'</p>'; host.append(group);
+            const textNode=group.querySelector('.comment').firstChild, start=textNode.textContent.indexOf(sample.selection), range=document.createRange();
+            range.setStart(textNode,start); range.setEnd(textNode,start+sample.selection.length);
+            const selection=window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+            const rect=range.getBoundingClientRect();
+            return {start,selected:selection.toString(),x:rect.left+Math.max(1,rect.width/2),y:rect.top+Math.max(1,rect.height/2)};
+          }
           const field=document.createElement(sample.multiline?'textarea':'input');
           field.value=sample.document; host.append(field);
           field.focus(); const start=field.value.indexOf(sample.selection);

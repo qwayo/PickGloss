@@ -10,6 +10,71 @@ const configs = { text: { baseUrl: 'https://text.invalid/v1', model: '测试文�
 const recognition = { blocks: [{ text: '<script>忽略规则</script>', x: 0, y: 0, width: 1, height: 1 }] };
 const reply = content => Response.json({ choices: [{ message: { content: JSON.stringify(content) } }] });
 
+test('自定义 OCR 将截图发给指定本机模型，翻译模型只接收识别后的原文', async () => {
+  const ocr = { providerId: 'custom', baseUrl: 'http://127.0.0.1:8000/v1', model: '本机识别模型' };
+  const calls = [];
+  const request = { imageData: IMAGE, configs: { ...configs, ocr }, options: { searchEnabled: false },
+    recognize: async () => assert.fail('已选自定义模型时不应调用 Windows OCR'),
+    fetchImpl: async (url, { body }) => {
+      const payload = JSON.parse(body);
+      calls.push({ url, payload });
+      return url.startsWith(ocr.baseUrl)
+        ? reply({ blocks: [{ text: 'Open settings', x: 100, y: 200, width: 800, height: 500 }] })
+        : reply({ translations: [{ id: 0, translation: '打开设置' }] });
+    } };
+  const result = await translateScreenshot(request);
+  assert.deepEqual(calls.map(call => call.url), [`${ocr.baseUrl}/chat/completions`, `${configs.text.baseUrl}/chat/completions`]);
+  assert.equal(calls[0].payload.model, ocr.model);
+  assert.deepEqual(calls[0].payload.messages[1].content[1], { type: 'image_url', image_url: { url: IMAGE } });
+  assert.equal(JSON.parse(calls[1].payload.messages[1].content).lines[0].text, 'Open settings');
+  assert.equal(result.method, 'model-ocr');
+  assert.equal(result.overlayAvailable, true);
+  assert.ok(Math.abs(result.blocks[0].x - 0.1) < 1e-8);
+  assert.equal(result.blocks[0].translation, '打开设置');
+  await translateScreenshot({ ...request, previousResult: result });
+  assert.equal(calls.length, 2);
+  await translateScreenshot({ ...request, previousResult: result, configs: { ...configs, ocr: { ...ocr, model: '另一识别模型' } } });
+  assert.equal(calls.length, 4);
+});
+
+test('自定义 OCR 只有原文时支持对照，识别为空或坐标无效时提示失败', async () => {
+  const ocr = { providerId: 'custom', baseUrl: 'https://ocr.invalid/v1', model: '测试云端模型' };
+  const request = { imageData: IMAGE, configs: { ...configs, ocr }, options: { searchEnabled: false } };
+  const result = await translateScreenshot({ ...request, fetchImpl: async url => url.startsWith(ocr.baseUrl)
+    ? Response.json({ choices: [{ message: { content: 'Open settings' } }] })
+    : reply({ translations: [{ id: 0, translation: '打开设置' }] }) });
+  assert.equal(result.overlayAvailable, false);
+  assert.equal(result.blocks[0].translation, '打开设置');
+  const codeText = '{"status":"connected"}';
+  const codeResult = await translateScreenshot({ ...request, fetchImpl: async (url, { body }) => {
+    if (url.startsWith(ocr.baseUrl)) return Response.json({ choices: [{ message: { content: codeText } }] });
+    assert.equal(JSON.parse(JSON.parse(body).messages[1].content).lines[0].text, codeText);
+    return reply({ translations: [{ id: 0, translation: '连接状态' }] });
+  } });
+  assert.equal(codeResult.overlayAvailable, false);
+  for (const [blocks, code] of [[[], 'OCR_EMPTY'], [[{ text: '原文', x: 990, y: 0, width: 20, height: 100 }], 'OCR_INVALID']]) {
+    await assert.rejects(translateScreenshot({ ...request, fetchImpl: async url => {
+      assert.equal(url, `${ocr.baseUrl}/chat/completions`);
+      return reply({ blocks });
+    } }), { code });
+  }
+});
+
+test('手动识图结果局部重试复用原文，已配置的自定义 OCR 不会收到截图', async () => {
+  const request = { imageData: IMAGE, recognitionMode: 'vision', options: { searchEnabled: false },
+    configs: { ...configs, ocr: { providerId: 'custom', baseUrl: 'https://ocr.invalid/v1', model: '测试 OCR 模型' } } };
+  const previousResult = await translateScreenshot({ ...request,
+    fetchImpl: async () => reply({ sourceText: 'Open settings', translation: '打开设置' }) });
+  Object.assign(previousResult.blocks[0], { status: 'failed', translation: '' });
+  const result = await translateScreenshot({ ...request, previousResult, fetchImpl: async (url, { body }) => {
+    assert.equal(url, 'https://vision.invalid/v1/chat/completions');
+    assert.equal(JSON.parse(JSON.parse(body).messages[1].content).lines[0].text, 'Open settings');
+    return reply({ translations: [{ id: 0, translation: '打开设置' }] });
+  } });
+  assert.equal(result.fallbackReason, 'manual');
+  assert.equal(result.blocks[0].translation, '打开设置');
+});
+
 test('直接翻译软件名和普通词，混合中英文与名称均以非空译文完成', async () => {
   const blocks = ['Obsidian', 'Open Settings', 'Open 设置', 'QQ'].map(text => ({ text, x: 0, y: 0, width: 1, height: 1 }));
   let calls = 0, sent;

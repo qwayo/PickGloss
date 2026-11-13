@@ -144,7 +144,7 @@ app.whenReady().then(async () => {
       icon:node.querySelector(':scope > .icon')?.getBoundingClientRect().width||0,
       indicator:node.parentElement.querySelector('.mode-indicator')?.getBoundingClientRect().height||0,
     }))`);
-    assert.equal(tabButtons.length, 4, 'AI 服务分类包含四个标签');
+    assert.equal(tabButtons.length, 5, 'AI 服务分类包含五个标签');
     assert.ok(tabButtons.every(tab=>tab.display==='flex' && tab.radius==='8px'), 'AI 服务标签使用紧凑的圆角排列');
     assert.ok(tabButtons.every(tab=>Math.abs(tab.indicator-2)<.1), 'AI 服务当前选中态保留 2 像素下划线');
     for (let index = 0; index < tabButtons.length; index++) {

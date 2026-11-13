@@ -8,6 +8,8 @@ const contextReaders = new Map();
 const post = data => process.parentPort.postMessage(data);
 const binary = process.argv[2];
 const excludePids = process.argv[3] || '';
+const READ_TIMEOUT_MS = 2200;
+const GESTURE_TIMEOUT_MS = 8000;
 
 const validPoint = point => point && Number.isFinite(point.x) && Number.isFinite(point.y) && point.x !== SelectionHook.INVALID_COORDINATE && point.y !== SelectionHook.INVALID_COORDINATE;
 
@@ -33,6 +35,8 @@ function publishFrame(reader, frame, metadata, canPublish) {
     if (reader.published || stopped || !canPublish()) return;
     reader.published = true;
     contextReaders.set(reader.seq, reader);
+    // 已复核文字可以立即展示，段落读取从这一帧开始单独计时。
+    reader.deadline(READ_TIMEOUT_MS);
     post({
       type: 'selection', requestId: reader.seq, text: frame.text, context: '', contextPending: true,
       point: metadata.point, method: metadata.method, app: frame.app || '', title: frame.title || '',
@@ -73,12 +77,12 @@ function readProbe(input, seq, onFrame, ready) {
     }, ms); },
     begin(value, sequence, frameCallback, preparedCallback) {
       reader.active = true; reader.seq = sequence; onFrame = frameCallback; ready = preparedCallback; probe = reader;
-      reader.deadline(ready ? 8000 : 2200);
+      reader.deadline(ready ? GESTURE_TIMEOUT_MS : READ_TIMEOUT_MS);
       if (value.mode === 'gesture') child.stdin.write(JSON.stringify(value) + '\n');
       else child.stdin.end(JSON.stringify(value) + '\n');
     },
   };
-  reader.deadline(active ? (ready ? 8000 : 2200) : 8000);
+  reader.deadline(!active || ready ? GESTURE_TIMEOUT_MS : READ_TIMEOUT_MS);
   if (active) probe = reader;
 
   function consumeLine(line) {
@@ -186,9 +190,9 @@ hook.on('mouse-up', point => {
   const current = gesture;
   if (point.button !== 0) return;
   if (!current || current.released) { prepareStandby(); return; }
-  if (!validPoint(point) || !current.ready || Date.now() - current.at > 8000 || Math.hypot(point.x - current.start.x, point.y - current.start.y) < 8) { cancelPending(); prepareStandby(); return; }
+  if (!validPoint(point) || !current.ready || Date.now() - current.at > GESTURE_TIMEOUT_MS || Math.hypot(point.x - current.start.x, point.y - current.start.y) < 8) { cancelPending(); prepareStandby(); return; }
   current.released = true; current.end = { x: point.x, y: point.y };
-  current.reader.deadline(2200);
+  current.reader.deadline(READ_TIMEOUT_MS);
   current.reader.child.stdin.end(JSON.stringify({ mode: 'gesture-end', x: point.x, y: point.y }) + '\n');
   prepareStandby();
 });

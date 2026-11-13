@@ -20,6 +20,26 @@ async function setup(options = {}) {
   return { directory, store, injections };
 }
 
+test('旧设置沿用内置 OCR，自定义 OCR 的地址、模型和密钥切回后可恢复', async () => {
+  const { directory, injections } = await setup();
+  const file = path.join(directory, 'settings.json');
+  const legacy = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete legacy.ocr;
+  delete legacy.serviceProfiles.ocr;
+  await fs.writeFile(file, JSON.stringify(legacy));
+  const store = createStore(injections); await store.init();
+  assert.equal((await store.getSettings()).ocr.providerId, 'windows');
+  const baseUrl = 'http://127.0.0.1:8000/v1';
+  await store.saveSettings({ ocr: { providerId: 'custom', baseUrl, model: '本机测试模型', apiKey: '虚构识别密钥' } });
+  await store.saveSettings({ ocr: { providerId: 'windows' } });
+  assert.equal((await store.getSettings({ includeSecrets: true })).ocr.apiKey, '');
+  const restarted = createStore(injections); await restarted.init();
+  const saved = await restarted.saveSettings({ ocr: { providerId: 'custom' } });
+  assert.deepEqual(saved.ocr, { providerId: 'custom', baseUrl, model: '本机测试模型', hasKey: true });
+  assert.equal((await restarted.getSettings({ includeSecrets: true })).ocr.apiKey, '虚构识别密钥');
+  assert.doesNotMatch(await fs.readFile(file, 'utf8'), /虚构识别密钥/);
+});
+
 test('并发保存截图语言和显示方式分别合并，重启后保留最新选择', async () => {
   const { store, injections } = await setup();
   await store.saveSettings({ prefs: { screenshotTranslation: { sourceLanguage: 'en', targetLanguage: 'zh-Hans' } } });

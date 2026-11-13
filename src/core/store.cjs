@@ -8,17 +8,36 @@ const { normalizeConfig } = require('./provider.cjs');
 const { historyEntry } = require('./history.cjs');
 const { defaultAppearance, appearanceShape, defaultWindowGeometry, windowGeometryShape } = require('./appearance.cjs');
 const { DEFAULT_SHORTCUTS, shortcutsShape } = require('./shortcuts.cjs');
-const { MODEL_PROVIDERS, SEARCH_PROVIDERS } = require('./services.cjs');
+const { MODEL_PROVIDERS, SEARCH_PROVIDERS, OCR_PROVIDERS } = require('./services.cjs');
 const { translationOptions } = require('./translation.cjs');
 
 const MODEL_PROVIDER_IDS = new Set(MODEL_PROVIDERS.map(provider => provider.id));
 const SEARCH_PROVIDER_IDS = new Set(SEARCH_PROVIDERS.map(provider => provider.id));
+const OCR_PROVIDER_IDS = new Set(OCR_PROVIDERS.map(provider => provider.id));
+const MODEL_KINDS = ['text', 'vision', 'translation', 'ocr'];
+const SERVICE_KINDS = [...MODEL_KINDS, 'search'];
+const providerIds = name => name === 'search' ? SEARCH_PROVIDER_IDS : name === 'ocr' ? OCR_PROVIDER_IDS : MODEL_PROVIDER_IDS;
 const SEARCH_PROTOCOL_IDS = new Set(['exa', 'brave', 'deepseek']);
 const SEARCH_STATUSES = new Set(['preparing', 'searching', 'complete', 'failed']);
 const MAX_SEARCH_SOURCES = 10;
+const isModelProfileId = (name, id) => MODEL_KINDS.includes(name) &&
+  typeof id === 'string' && /^model-[0-9a-f]{32}$/.test(id);
+const activeProfileId = config => config.profileId ?? config.providerId;
+
+function modelProfileMetadata(name, profileId, config) {
+  if (!isModelProfileId(name, profileId) || !providerIds(name).has(config.providerId) || config.providerId === 'windows') {
+    throw failure('INVALID_INPUT', '模型配置无效。');
+  }
+  return { providerId: config.providerId, label: string(config.label ?? '', '配置名称', 80).trim() };
+}
+
+function activeServiceConfig(id, profile) {
+  const { providerId, label, ...config } = profile;
+  return { ...config, providerId: providerId ?? id, ...(providerId ? { profileId: id } : {}) };
+}
 
 function providerConfigDefaults(name) {
-  const providers = name === 'search' ? SEARCH_PROVIDERS : MODEL_PROVIDERS;
+  const providers = name === 'search' ? SEARCH_PROVIDERS : name === 'ocr' ? OCR_PROVIDERS : MODEL_PROVIDERS;
   return Object.fromEntries(providers.map(provider => [provider.id, {
     baseUrl: provider.baseUrl,
     ...(name === 'search' ? { protocol: provider.protocol ?? provider.id } : {}),
@@ -164,8 +183,9 @@ function defaults() {
     text: { providerId: 'custom', baseUrl: '', model: '' },
     vision: { providerId: 'custom', baseUrl: '', model: '' },
     translation: { providerId: 'custom', baseUrl: '', model: '' },
+    ocr: { providerId: 'windows', baseUrl: '', model: '' },
     search: { providerId: 'exa', baseUrl: SEARCH_PROVIDERS.find(provider => provider.id === 'exa').baseUrl },
-    serviceProfiles: { text: providerConfigDefaults('text'), vision: providerConfigDefaults('vision'), translation: providerConfigDefaults('translation'), search: providerConfigDefaults('search') },
+    serviceProfiles: Object.fromEntries(SERVICE_KINDS.map(name => [name, providerConfigDefaults(name)])),
     prefs: {
       showOrb: true, selectionEnabled: true, orbAction: 'chat', orbQuietFade: true, orbEdgeCollapse: true, autoExplainCapture: false, launchAtLogin: false,
       screenshotTranslation: translationOptions(), captureDefaultMode: 'explain', captureExplainMode: 'immediate',
@@ -187,11 +207,16 @@ function settingsShape(input) {
   object(input, '设置');
   if (input.version !== 1) throw failure('INVALID_INPUT', '设置版本不受支持。');
   const result = { version: 1, prefs: {}, serviceProfiles: {} };
-  for (const name of ['text', 'vision', 'translation']) {
-    const config = object(name === 'translation' && input[name] === undefined ? { baseUrl: '', model: '' } : input[name], '接口设置');
-    const providerId = config.providerId === undefined ? 'custom' : string(config.providerId, '模型服务', 80);
-    if (!MODEL_PROVIDER_IDS.has(providerId)) throw failure('INVALID_INPUT', '模型服务无效。');
+  for (const name of MODEL_KINDS) {
+    const canBeMissing = name === 'translation' || name === 'ocr';
+    const config = object(canBeMissing && input[name] === undefined ? { baseUrl: '', model: '' } : input[name], '接口设置');
+    const providerId = config.providerId === undefined ? (name === 'ocr' ? 'windows' : 'custom') : string(config.providerId, '模型服务', 80);
+    if (!providerIds(name).has(providerId)) throw failure('INVALID_INPUT', '模型服务无效。');
     result[name] = { providerId, baseUrl: string(config.baseUrl, '接口地址', 2048), model: string(config.model, '模型名称', 300) };
+    if (config.profileId !== undefined) {
+      if (!isModelProfileId(name, config.profileId)) throw failure('INVALID_INPUT', '模型配置标识无效。');
+      result[name].profileId = config.profileId;
+    }
     if (config.keyCiphertext !== undefined) {
       result[name].keyCiphertext = validCiphertext(config.keyCiphertext);
     }
@@ -214,27 +239,29 @@ function settingsShape(input) {
   if (oldSearch.keyCiphertext !== undefined) result.search.keyCiphertext = validCiphertext(oldSearch.keyCiphertext);
   if ('apiKey' in oldSearch) throw failure('INVALID_INPUT', '检测到不受支持的明文搜索密钥设置。');
 
-  for (const name of ['text', 'vision', 'translation', 'search']) {
-    const providers = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
+  for (const name of SERVICE_KINDS) {
+    const providers = providerIds(name);
     const profiles = providerConfigDefaults(name);
     if (suppliedProfiles[name] !== undefined) {
       const source = object(suppliedProfiles[name], '服务配置草稿');
-      for (const [providerId, value] of Object.entries(source)) {
-        if (!providers.has(providerId)) throw failure('INVALID_INPUT', '服务配置草稿中的厂商无效。');
+      for (const [profileId, value] of Object.entries(source)) {
         const config = object(value, '厂商配置');
-        if (config.providerId !== undefined && config.providerId !== providerId) throw failure('INVALID_INPUT', '厂商配置标识不匹配。');
-        profiles[providerId].baseUrl = string(config.baseUrl ?? profiles[providerId].baseUrl, '接口地址', 2048);
-        if (name === 'search') profiles[providerId].protocol = normalizedSearchProtocol(providerId, config.protocol, profiles[providerId].protocol);
-        else profiles[providerId].model = string(config.model ?? profiles[providerId].model, '模型名称', 300);
-        if (config.keyCiphertext !== undefined) profiles[providerId].keyCiphertext = validCiphertext(config.keyCiphertext);
+        if (providers.has(profileId)) {
+          if (config.providerId !== undefined && config.providerId !== profileId) throw failure('INVALID_INPUT', '厂商配置标识不匹配。');
+        } else profiles[profileId] = { ...modelProfileMetadata(name, profileId, config), baseUrl: '', model: '' };
+        const profile = profiles[profileId];
+        profile.baseUrl = string(config.baseUrl ?? profile.baseUrl, '接口地址', 2048);
+        if (name === 'search') profile.protocol = normalizedSearchProtocol(profileId, config.protocol, profile.protocol);
+        else profile.model = string(config.model ?? profile.model, '模型名称', 300);
+        if (config.keyCiphertext !== undefined) profile.keyCiphertext = validCiphertext(config.keyCiphertext);
         if ('apiKey' in config) throw failure('INVALID_INPUT', '检测到不受支持的明文密钥设置。');
       }
     }
     result.serviceProfiles[name] = profiles;
-    // 平面配置是当前选中配置的兼容视图。旧 version 1 数据没有 profiles 时，
-    // 把原地址、模型和密钥放入 custom 草稿，之后切换厂商不会借用旧密钥。
+    // 平面配置保留当前模型的运行参数，旧设置按当前厂商迁移到对应配置。
     const active = result[name];
-    const profile = profiles[active.providerId];
+    const profile = profiles[activeProfileId(active)];
+    if (!profile || (active.profileId && profile.providerId !== active.providerId)) throw failure('INVALID_INPUT', '所选模型配置无效。');
     profile.baseUrl = active.baseUrl;
     if (name === 'search') profile.protocol = active.protocol;
     else profile.model = active.model;
@@ -302,7 +329,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
     }
   }
 
-  async function publicSettings(settings, includeSecrets) {
+  async function publicSettings(settings, includeSecrets = false, serviceSecrets = {}) {
     const result = { prefs: { ...settings.prefs }, serviceProfiles: {} };
     const decryptKey = async (ciphertext) => {
       if (!ciphertext) return '';
@@ -310,24 +337,30 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
       try { return string(await decrypt(Buffer.from(ciphertext, 'base64')), '接口密钥', 8192); }
       catch { throw failure('DECRYPTION_FAILED', '无法解密已保存的接口密钥，请重新填写接口密钥。'); }
     };
-    for (const name of ['text', 'vision', 'translation', 'search']) {
+    for (const name of SERVICE_KINDS) {
       const config = settings[name];
+      const selectedId = activeProfileId(config);
+      const requestedId = serviceSecrets[name];
       result[name] = { providerId: config.providerId, baseUrl: config.baseUrl, hasKey: Boolean(config.keyCiphertext) };
+      if (config.profileId) result[name].profileId = config.profileId;
       if (name === 'search') result[name].protocol = config.protocol;
       if (name !== 'search') result[name].model = config.model;
-      if (includeSecrets) {
+      if (includeSecrets || requestedId === true || requestedId === selectedId) {
         result[name].apiKey = await decryptKey(config.keyCiphertext);
       }
       result.serviceProfiles[name] = {};
-      for (const [providerId, profile] of Object.entries(settings.serviceProfiles[name])) {
+      for (const [profileId, profile] of Object.entries(settings.serviceProfiles[name])) {
         const visible = {
           baseUrl: profile.baseUrl,
           ...(name === 'search' ? { protocol: profile.protocol } : {}),
           ...(name === 'search' ? {} : { model: profile.model }),
           hasKey: Boolean(profile.keyCiphertext),
         };
-        if (includeSecrets) visible.apiKey = await decryptKey(profile.keyCiphertext);
-        result.serviceProfiles[name][providerId] = visible;
+        if (profile.providerId) Object.assign(visible, { providerId: profile.providerId, label: profile.label });
+        if (includeSecrets || requestedId === profileId) {
+          visible.apiKey = profileId === selectedId ? result[name].apiKey : await decryptKey(profile.keyCiphertext);
+        }
+        result.serviceProfiles[name][profileId] = visible;
       }
     }
     return result;
@@ -401,44 +434,50 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
   async function applyProfileChanges(settings, changes) {
     if (changes === undefined) return;
     const profileChanges = object(changes, '服务配置草稿');
-    for (const name of ['text', 'vision', 'translation', 'search']) {
+    for (const name of SERVICE_KINDS) {
       if (profileChanges[name] === undefined) continue;
       const profiles = object(profileChanges[name], '服务配置草稿');
-      const known = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
-      for (const [providerId, rawChange] of Object.entries(profiles)) {
-        if (!known.has(providerId)) throw failure('INVALID_INPUT', '服务配置草稿中的厂商无效。');
+      const known = providerIds(name);
+      for (const [profileId, rawChange] of Object.entries(profiles)) {
         const change = object(rawChange, '厂商配置');
-        if (change.providerId !== undefined && change.providerId !== providerId) throw failure('INVALID_INPUT', '厂商配置标识不匹配。');
-        await applyServiceChange(settings.serviceProfiles[name][providerId], change, name, providerId);
+        const saved = settings.serviceProfiles[name];
+        if (known.has(profileId)) {
+          if (change.providerId !== undefined && change.providerId !== profileId) throw failure('INVALID_INPUT', '厂商配置标识不匹配。');
+        } else {
+          const metadata = modelProfileMetadata(name, profileId, {
+            providerId: change.providerId ?? saved[profileId]?.providerId,
+            label: change.label ?? saved[profileId]?.label,
+          });
+          if (saved[profileId] && saved[profileId].providerId !== metadata.providerId) throw failure('INVALID_INPUT', '模型配置的厂商不能更改。');
+          saved[profileId] = { baseUrl: '', model: '', ...saved[profileId], ...metadata };
+        }
+        await applyServiceChange(saved[profileId], change, name, saved[profileId].providerId ?? profileId);
       }
     }
   }
 
   async function applyActiveConfigChanges(settings, changes) {
-    for (const name of ['text', 'vision', 'translation', 'search']) {
+    for (const name of SERVICE_KINDS) {
       if (changes[name] === undefined) continue;
       const change = object(changes[name], name === 'search' ? '联网搜索设置' : '接口设置');
-      const ids = name === 'search' ? SEARCH_PROVIDER_IDS : MODEL_PROVIDER_IDS;
+      const ids = providerIds(name);
       const providerId = change.providerId === undefined ? settings[name].providerId : string(change.providerId, '服务提供商', 80);
       if (!ids.has(providerId)) throw failure('INVALID_INPUT', '服务提供商无效。');
-      if (providerId !== settings[name].providerId) {
-        const profile = settings.serviceProfiles[name][providerId];
-        settings[name] = { providerId, ...structuredClone(profile) };
-      }
+      const profileId = change.profileId ?? (change.providerId === undefined ? activeProfileId(settings[name]) : providerId);
+      if (!ids.has(profileId) && !isModelProfileId(name, profileId)) throw failure('INVALID_INPUT', '模型配置标识无效。');
+      const profile = settings.serviceProfiles[name][profileId];
+      if (!profile || (profile.providerId ?? profileId) !== providerId) throw failure('INVALID_INPUT', '所选模型配置无效。');
+      settings[name] = activeServiceConfig(profileId, profile);
       await applyServiceChange(settings[name], change, name, providerId);
-      settings[name].providerId = providerId;
-      settings.serviceProfiles[name][providerId] = structuredClone(Object.fromEntries(
-        Object.entries(settings[name]).filter(([key]) => key !== 'providerId'),
-      ));
     }
   }
 
   function synchronizeActiveProfiles(settings) {
-    for (const name of ['text', 'vision', 'translation', 'search']) {
-      const providerId = settings[name].providerId;
-      settings.serviceProfiles[name][providerId] = structuredClone(Object.fromEntries(
-        Object.entries(settings[name]).filter(([key]) => key !== 'providerId'),
-      ));
+    for (const name of SERVICE_KINDS) {
+      const { profileId, providerId, ...config } = settings[name];
+      const id = profileId ?? providerId;
+      Object.assign(settings.serviceProfiles[name][id], config);
+      if (!config.keyCiphertext) delete settings.serviceProfiles[name][id].keyCiphertext;
     }
   }
 
@@ -543,13 +582,22 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
         return { id: uuid(id), deleted: true };
       });
     },
-    getSettings({ includeSecrets = false } = {}) { return run(async () => publicSettings(await diskSettings(), includeSecrets)); },
+    getSettings({ includeSecrets = false, serviceSecrets } = {}) {
+      return run(async () => {
+        const settings = await diskSettings();
+        const secrets = typeof serviceSecrets === 'function' ? serviceSecrets(settings) : serviceSecrets;
+        return publicSettings(settings, includeSecrets, secrets);
+      });
+    },
     saveSettings(changes) {
       return run(async () => {
         object(changes, '设置');
         const settings = await diskSettings();
         await applyProfileChanges(settings, changes.serviceProfiles);
-        for (const name of ['text', 'vision', 'translation', 'search']) settings[name] = { providerId: settings[name].providerId, ...structuredClone(settings.serviceProfiles[name][settings[name].providerId]) };
+        for (const name of SERVICE_KINDS) {
+          const id = activeProfileId(settings[name]);
+          settings[name] = activeServiceConfig(id, settings.serviceProfiles[name][id]);
+        }
         await applyActiveConfigChanges(settings, changes);
         synchronizeActiveProfiles(settings);
         if (changes.prefs !== undefined) {

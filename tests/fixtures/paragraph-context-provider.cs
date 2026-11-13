@@ -34,7 +34,7 @@ internal static class ContextParagraphTests {
             if (paragraphs.Count == 0) paragraphs.Add(new Paragraph(0, text.Length));
         }
 
-        public FakeRange Range(int start, int end) { return new FakeRange(this, start, end); }
+        public FakeRange Range(int start, int end, object identity = null) { return new FakeRange(this, start, end, identity); }
 
         internal string Text { get { return text; } }
         internal object Owner { get { return owner; } }
@@ -65,24 +65,25 @@ internal static class ContextParagraphTests {
         public FakeTextPatternSource(FakeProvider value, object childIdentity = null, int start = -1, int end = -1) {
             provider = value; child = childIdentity; childStart = start; childEnd = end;
         }
-        public IContextTextRange GetDocumentRange() {
+        public IContextTextRange GetDocumentRange(object rangeIdentity) {
             DocumentRangeCalls++;
-            return provider.Range(0, provider.Text.Length);
+            return provider.Range(0, provider.Text.Length, rangeIdentity);
         }
-        public IContextTextRange RangeFromChild(object selectedChild) {
+        public IContextTextRange RangeFromChild(object selectedChild, object rangeIdentity) {
             RangeFromChildCalls++;
             // UIA RangeFromChild 只接受后代；自身或其他控件必须拒绝。
             if (Object.Equals(selectedChild, provider.Owner)) throw new ArgumentException("RangeFromChild 不接受 TextPattern 自身。");
             if (child == null || !Object.Equals(child, selectedChild)) throw new ArgumentException("目标不是此 TextPattern 的后代。");
-            return provider.Range(childStart, childEnd);
+            return provider.Range(childStart, childEnd, rangeIdentity);
         }
     }
 
     sealed class FakeRange : IContextTextRange {
         readonly FakeProvider provider;
+        readonly object rangeIdentity;
         int start, end;
-        public FakeRange(FakeProvider value, int first, int last) { provider = value; start = first; end = last; }
-        public IContextTextRange Clone() { return new FakeRange(provider, start, end); }
+        public FakeRange(FakeProvider value, int first, int last, object identity = null) { provider = value; start = first; end = last; rangeIdentity = identity ?? value.Owner; }
+        public IContextTextRange Clone() { return new FakeRange(provider, start, end, rangeIdentity); }
         public void ExpandToParagraph() {
             if (provider.ThrowOnExpand) throw new InvalidOperationException("虚构提供方拒绝段落扩展。");
             if (provider.ExpandToDocument) { start = 0; end = provider.Text.Length; return; }
@@ -153,7 +154,7 @@ internal static class ContextParagraphTests {
             string value = provider.Text.Substring(start, Math.Max(0, end - start));
             return maxLength >= 0 && value.Length > maxLength ? value.Substring(0, maxLength) : value;
         }
-        public object GetOwnerIdentity() { return provider.Owner; }
+        public object GetOwnerIdentity() { return rangeIdentity; }
     }
 
     static int failures;
@@ -318,6 +319,47 @@ internal static class ContextParagraphTests {
             documentPatternForForeign.DocumentRangeCalls == 0 && documentPatternForForeign.RangeFromChildCalls == 1 &&
             foreignEntryRead.Context.Length == 0 && foreignEntryRead.Reason.Length > 0);
 
+        string previousComment = "另一条评论，不得泄漏。\n", author = "虚构用户：\n";
+        string comment = "这条评论里只有一个字被选中，其余正文也应作为上下文。";
+        string reply = "回复入口。\n", followingComment = "后续评论不能混入。";
+        string commentText = previousComment + author + comment + "\n" + reply + followingComment;
+        int commentStart = previousComment.Length, commentEnd = commentText.Length - followingComment.Length;
+        var commentOwner = new object();
+        var commentGroup = new object();
+        var commentProvider = new FakeProvider(commentText, Ends(commentText, previousComment, author, comment + "\n", reply, followingComment), commentOwner);
+        var commentPattern = new FakeTextPatternSource(commentProvider, commentGroup, commentStart, commentEnd);
+        int oneCharacter = commentText.IndexOf("字", commentStart + author.Length, StringComparison.Ordinal);
+        var oneCharacterSelection = commentProvider.Range(oneCharacter, oneCharacter + 1);
+        bool commentScopeReturned;
+        var commentScope = ContextScopeResolver.GetRange(commentPattern, commentOwner, commentGroup, false,
+            out commentScopeReturned, commentOwner);
+        var commentRead = commentScope == null ? new ContextReadResult("", "无可靠边界") :
+            ParagraphContextReader.Read(oneCharacterSelection, commentScope, false, false);
+        Check("评论结构范围只读取选中评论当前段，不扩展到相邻评论", commentScopeReturned &&
+            commentPattern.RangeFromChildCalls == 1 && commentRead.Context == comment && commentRead.Reason.Length == 0 &&
+            !commentRead.Context.Contains("另一条评论") && !commentRead.Context.Contains("后续评论"));
+        var brokenCommentPattern = new FakeTextPatternSource(commentProvider, commentGroup, 0, commentText.Length);
+        var brokenCommentScope = ContextScopeResolver.GetRange(brokenCommentPattern, commentOwner, commentGroup, false,
+            out commentScopeReturned, commentOwner);
+        Check("结构子范围错误退回全文时可检测并拒绝", commentScopeReturned &&
+            ContextScopeResolver.SameRange(brokenCommentScope, commentProvider.Range(0, commentText.Length)));
+
+        string prefix = "这条思路不错，", suffix = "省去不少配置。";
+        string linked = prefix + "\n\uFFFC\n统一目录" + suffix;
+        var linkedProvider = new FakeProvider(linked + "\n" + followingComment,
+            new[] { prefix.Length, linked.Length + 1 });
+        var linkedSelection = linkedProvider.Range(0, 2);
+        var linkedScope = linkedProvider.Range(0, linked.Length);
+        var linkedRead = ParagraphContextReader.Read(linkedSelection, linkedScope, false, false);
+        Check("单行评论被内联链接拆成多个 UIA 段时仍补齐评论正文", linkedRead.Context == prefix + "统一目录" + suffix);
+        string emojiReply = "\uFFFC\n虚构短回复";
+        var replyProvider = new FakeProvider(emojiReply + "\n下一条评论", new[] { emojiReply.Length + 1 });
+        var replyScope = replyProvider.Range(0, emojiReply.Length);
+        Check("反向划词带入段尾换行时仍可读取表情回复", ParagraphContextReader.ReadInlineScope(
+            replyScope, replyProvider.Range(2, emojiReply.Length + 1)) == "虚构短回复");
+        Check("选区包含下一条评论的文字时拒绝读取单条回复", ParagraphContextReader.ReadInlineScope(
+            replyScope, replyProvider.Range(2, emojiReply.Length + 2)) == "");
+
         string supplementaryText = "甲🙂";
         var supplementaryProvider = new FakeProvider(supplementaryText, Ends(supplementaryText, supplementaryText));
         var supplementaryRange = supplementaryProvider.Range(0, supplementaryText.Length);
@@ -329,7 +371,7 @@ internal static class ContextParagraphTests {
         Check("Character 回退按文本元素计数且不切开代理对或组合字符", supplementaryMoved == -1 && supplementaryRange.GetText(20) == "甲" &&
             combiningMoved == -1 && combiningRange.GetText(20) == "甲");
 
-        Console.WriteLine("原生范围提供方场景：22；失败：" + failures);
+        Console.WriteLine("原生范围提供方场景：27；失败：" + failures);
         Environment.ExitCode = failures == 0 ? 0 : 1;
     }
 }

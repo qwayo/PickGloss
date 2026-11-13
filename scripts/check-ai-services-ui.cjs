@@ -341,7 +341,7 @@ app.whenReady().then(async () => {
     assert.equal(settingsInitial.visibleKeyNotes, 1, '当前服务选项卡应只显示一条密钥说明');
     if (viewportWidth <= 350) assert.ok(settingsInitial.keyNoteLines > 1, '小窗中的配置路径应自然换行');
     assert.equal(settingsInitial.captureExplainMode, 'immediate', '识图模式默认立即识别');
-    assert.deepEqual(settingsInitial.providers, ['text', 'vision', 'translation', 'search']);
+    assert.deepEqual(settingsInitial.providers, ['text', 'vision', 'translation', 'ocr', 'search']);
     await win.webContents.executeJavaScript(`document.querySelector('.settings-navigation button').click()`);
     await waitFor(`document.querySelector('[data-settings-section="general"]')?.hidden===false`, '常规设置');
     assert.deepEqual(await win.webContents.executeJavaScript(`[...document.querySelectorAll('.settings-navigation button')].map(node=>node.textContent)`), ['常规','AI','外观','快捷键']);
@@ -508,6 +508,40 @@ app.whenReady().then(async () => {
     assert.equal(savedSearch.payload.serviceProfiles.search.custom.protocol,'deepseek');
     assert.equal(saved.payload.prefs, undefined, 'AI 服务保存不覆盖常规偏好');
 
+    await driver.click('文字模型', { scope: '.mode-tabs[aria-label="服务类型"]', stage: '打开文字模型' });
+    await waitFor(`document.querySelector('[data-provider="text"]')?.checkVisibility({checkOpacity:true})`, '文字模型分区可见');
+    await driver.click('新增配置', { scope: '[data-provider="text"]', stage: '新增备用账号' });
+    const profileId = await win.webContents.executeJavaScript(`document.querySelector('[name="text-provider"]').value`);
+    assert.match(profileId, /^model-[0-9a-f]{32}$/);
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="text-apiKey"]').placeholder`),
+      '未配置，按服务要求填写', '新配置不继承同厂商的密钥');
+    await win.webContents.executeJavaScript(`(() => {
+      for (const [name,value] of Object.entries({profileLabel:'备用账号',model:'备用模型',apiKey:'虚构备用密钥'})) {
+        const input = document.querySelector('[name="text-'+name+'"]');
+        input.value = value;
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+      }
+    })()`);
+    const namedSaved = await waitForCall('save-settings', item => item.payload.serviceProfiles?.text?.[profileId]?.apiKey === '虚构备用密钥');
+    assert.deepEqual(namedSaved.payload.text, { providerId: 'deepseek', profileId });
+    await waitFor(`document.querySelector('[name="text-apiKey"]').value==='' && document.querySelector('[name="text-provider"]').selectedOptions[0].textContent.includes('备用账号')`, '备用配置已保存');
+    await win.webContents.executeJavaScript(`(() => {
+      const select = document.querySelector('[name="text-provider"]');
+      select.value = 'deepseek';
+      select.dispatchEvent(new Event('change', {bubbles:true}));
+    })()`);
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="text-model"]').value`), 'deepseek-flash');
+    await win.webContents.executeJavaScript(`(() => {
+      const select = document.querySelector('[name="text-provider"]');
+      select.value = ${quoteJavaScriptString(profileId)};
+      select.dispatchEvent(new Event('change', {bubbles:true}));
+    })()`);
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="text-model"]').value`), '备用模型');
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[name="text-apiKey"]').value`), '');
+    await waitFor(`document.querySelector('[data-settings-save-summary]').textContent==='已自动保存'`, '切换配置已保存');
+    await win.loadFile(path.join(sourceRoot, 'src/renderer/index.html'));
+    await waitFor(`document.querySelector('[name="text-provider"]')?.value===${quoteJavaScriptString(profileId)}`, '重新加载恢复已选配置');
+
     current.view = 'preview';
     current.session = { id: '虚构截图会话', kind: 'image', imageData, note: '', activeMode: 'visual', webSearchEnabled: false,
       threads: { visual: { status: 'idle', draft: '', messages: [] } } };
@@ -521,6 +555,16 @@ app.whenReady().then(async () => {
     await waitForCall('start-explanation');
     assert.deepEqual(calls.find(item => item.action === 'set-web-search' && item.payload.id === '虚构截图会话')?.payload, { id: '虚构截图会话', mode: 'visual', enabled: true });
     assert.ok(calls.some(item => item.action === 'start-explanation' && item.payload.id === '虚构截图会话' && item.payload.mode === 'visual'));
+
+    current.view = 'explain';
+    current.session = { id: '虚构待补充会话', kind: 'text', text: 'selected text', context: '', activeMode: 'context',
+      threads: { context: { status: 'idle', draft: '', messages: [] } } };
+    await pushState();
+    await driver.click('补充上下文', { scope: '.mode-content .notice' });
+    const selection = await waitForCall('select-context');
+    assert.deepEqual(selection.payload, { id: '虚构待补充会话' });
+    assert.ok(!calls.some(item => item.action === 'start-explanation' && item.payload.id === selection.payload.id), '点击后先等待实际划选');
+
     assert.deepEqual(remoteRequests, [], '隔离交互全程没有发出网络请求');
     assert.deepEqual(consoleErrors, [], '界面无渲染器脚本或样式加载错误');
     console.log(`AI 服务 renderer 隔离交互通过（请求视口 ${viewportWidth}×${viewportHeight}）；截图证据：${outputRoot}`);
