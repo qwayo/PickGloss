@@ -6,6 +6,7 @@ import { createTranslationUI, languageSelect } from './translation.js';
 import { createSettingsAutosave } from './settings-autosave.js';
 import { mountOrb } from './orb.js';
 import { mountPanelResize } from './panel-resize.js';
+import { createLayoutContentTransition } from './layout-motion.js';
 
 const root = document.getElementById('app');
 let orbUI = null;
@@ -89,7 +90,12 @@ const seenPinFeedback = new Set();
 let layoutToken = null;
 let layoutFreeze = null;
 const frozenLayoutStyles = new Map();
-let layoutContentAnimation;
+let layoutMotionFrame;
+let contentMotion = null;
+function stopLayoutFrames() {
+  cancelAnimationFrame(layoutMotionFrame);
+  layoutMotionFrame = null;
+}
 function freezeLayoutContent() {
   const panel = root.querySelector('.panel');
   if (!panel) return;
@@ -117,37 +123,54 @@ function releaseLayoutContent() {
   }
   frozenLayoutStyles.clear(); layoutFreeze = null;
 }
-window.pickgloss.onLayout?.((message, ready) => {
+window.pickgloss.onLayout?.((message, ready, nextFrame) => {
   if (surface !== 'panel') return;
   if (message.phase === 'prepare') {
     transitionAnchor ||= resizeReadingAnchor || captureReadingAnchor();
     clearTimeout(resizeReadingTimer); resizeReadingTimer = null; resizeReadingAnchor = null;
     layoutToken = message.id;
-    layoutContentAnimation?.cancel();
+    stopLayoutFrames();
     freezeLayoutContent();
-    document.documentElement.classList.add('layout-preparing');
-    requestAnimationFrame(() => requestAnimationFrame(() => { if (layoutToken === message.id) ready(); }));
-  } else if (message.phase === 'commit' && layoutToken === message.id) {
-    requestAnimationFrame(() => {
+    contentMotion = createLayoutContentTransition(root, { previous: contentMotion,
+      delay: message.width > window.innerWidth ? 90 : 0,
+      reduced: document.documentElement.classList.contains('reduced-motion') });
+    document.documentElement.classList.add('layout-preparing', 'layout-settling');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
       if (layoutToken !== message.id) return;
-      const previousReading = readingLayout;
+      ready();
+      // 用同一条刷新时钟协调页面与原生窗口，避免独立定时器隔帧更新尺寸。
+      const frame = () => {
+        if (layoutToken !== message.id) return;
+        nextFrame();
+        layoutMotionFrame = requestAnimationFrame(frame);
+      };
+      layoutMotionFrame = requestAnimationFrame(frame);
+    }));
+  } else if (message.phase === 'commit' && layoutToken === message.id) {
+    stopLayoutFrames();
+    const motion = contentMotion;
+    // 即使宿主提前到位，也必须先完成退隐，再改变字号、换行和组件位置。
+    void motion.hidden.then(() => requestAnimationFrame(() => {
+      if (layoutToken !== message.id || contentMotion !== motion) return;
       releaseLayoutContent();
       syncWindowLayout();
+      for (const input of root.querySelectorAll('[data-field="question"]')) updateField(input);
       restoreReadingAnchor(transitionAnchor || readingAnchor);
-      // 淡入新排版，避免正文跨栏移动时遮挡另一栏或改变滚动范围。
-      if (previousReading !== readingLayout && !document.documentElement.classList.contains('reduced-motion')) {
-        layoutContentAnimation = root.querySelector('.explain-body')?.animate(
-          [{ opacity: .55 }, { opacity: 1 }], { duration: 130, easing: 'ease-out' });
-      }
-      transitionAnchor = null;
-      readingAnchor = captureReadingAnchor();
-      document.documentElement.classList.remove('layout-preparing');
-      layoutToken = null;
-    });
+      void motion.reveal(document.documentElement.classList.contains('reduced-motion')).then(() => {
+        if (layoutToken !== message.id || contentMotion !== motion) return;
+        contentMotion = null;
+        transitionAnchor = null;
+        readingAnchor = captureReadingAnchor();
+        document.documentElement.classList.remove('layout-preparing', 'layout-settling');
+        layoutToken = null;
+      });
+    }));
   } else if (message.phase === 'cancel' && layoutToken === message.id) {
+    stopLayoutFrames();
+    contentMotion?.cancel(); contentMotion = null;
     layoutToken = null;
     releaseLayoutContent();
-    document.documentElement.classList.remove('layout-preparing');
+    document.documentElement.classList.remove('layout-preparing', 'layout-settling');
     syncWindowLayout();
     restoreReadingAnchor(transitionAnchor || readingAnchor);
     transitionAnchor = null;
@@ -291,6 +314,7 @@ document.addEventListener('scroll', event => {
 let layoutFrame;
 window.addEventListener('resize', () => {
   if (surface !== 'panel') return;
+  if (!layoutToken && !state?.status?.windowTransitioning) contentMotion?.finish();
   cancelAnimationFrame(layoutFrame);
   const previousReading = readingLayout;
   if (!layoutToken && !state?.status?.windowTransitioning && state?.view === 'explain') {
@@ -409,6 +433,7 @@ const appearanceUI = createAppearanceUI({
   // 外观组件已读回保存结果并同步控件；不要整页重建，保留拖动、焦点和选择状态。
   onReducedMotion: () => {
     stopTabMotion();
+    contentMotion?.finish();
     if (!state?.status?.windowTransitioning) { transitionAnchor = null; readingAnchor = captureReadingAnchor(); }
   },
 });
@@ -802,6 +827,8 @@ function restore(saved) {
 function render() {
   if (composing) { deferredRender = true; return; }
   if (!state) return;
+  if (layoutToken && layoutFreeze) contentMotion?.hideImmediately();
+  else contentMotion?.finish();
   root.setAttribute('aria-busy', 'false');
   if (surface === 'orb') { renderOrb(); return; }
   if (surface === 'menu') { renderMenu(); return; }

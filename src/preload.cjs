@@ -15,7 +15,9 @@ for (const action of ['check-update','open-update-release','use-current-startup'
 for (const action of ['rename-session', 'search-history', 'refresh-history', 'orb-drag', 'open-appearance', 'toggle-selection', 'open-shortcuts', 'shortcut-command', 'shortcut-recording', 'menu-close', 'menu-ready', 'capture-ready']) allowed.add(action);
 contextBridge.exposeInMainWorld('pickgloss', Object.freeze({
   onLayout(callback) {
-    const listener = (_event, message) => callback(message, () => ipcRenderer.send('pickgloss:layout-ready', message.id));
+    const listener = (_event, message) => callback(message,
+      () => ipcRenderer.send('pickgloss:layout-ready', message.id, true),
+      () => ipcRenderer.send('pickgloss:layout-frame', message.id));
     ipcRenderer.on('pickgloss:layout', listener);
     return () => ipcRenderer.removeListener('pickgloss:layout', listener);
   },

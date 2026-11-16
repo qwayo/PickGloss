@@ -1,23 +1,6 @@
 'use strict';
 const { quoteJavaScriptString } = require('./javascript-string.cjs');
-
-// 同一固定虚构标题的笔画按空白列分簇，避免把左侧来源标签接到回答标题上。
-// 颜色、透明度、取样带和80像素连续性阈值保持不变。
-function selectAnswerTitleInk(columnCounts) {
-  const clusters = [], splitEmptyColumns = 12;
-  let lastInkColumn = -Infinity;
-  for (let x = 0; x < columnCounts.length; x++) {
-    const count = columnCounts[x];
-    if (!count) continue;
-    if (!clusters.length || x - lastInkColumn - 1 >= splitEmptyColumns) clusters.push({ minX: x, maxX: x, count: 0 });
-    const cluster = clusters.at(-1);
-    cluster.maxX = x; cluster.count += count; lastInkColumn = x;
-  }
-  const selected = clusters.reduce((best, value) => !best || value.count > best.count ? value : best, null);
-  return { minX: selected?.minX ?? null, maxX: selected?.maxX ?? null, count: selected?.count ?? 0,
-    clusters, splitEmptyColumns, method: '固定虚构回答标题的最大墨迹簇',
-    wholeBand: { minX: clusters[0]?.minX ?? null, maxX: clusters.at(-1)?.maxX ?? null, count: clusters.reduce((sum, value) => sum + value.count, 0) } };
-}
+const { findLayoutCommitPaint, selectAnswerTitleInk } = require('./resize-presentation-analysis.cjs');
 
 // 纯Node离线入口：stdin为已有PNG按同一取样规则提取的逐列墨迹数，不创建Electron窗口。
 if (process.argv.includes('--scan-ink-columns')) {
@@ -72,6 +55,12 @@ if (!arg('snapshot')) {
     const destination = path.join(snapshotRoot, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(path.join(sourceRoot, relative), destination);
+  }
+  // 磨砂与圆角需要正式原生助手；缺少它时只能验证实色回退。
+  const helper = 'build/native/WindowAppearance.exe';
+  if (fs.existsSync(path.join(sourceRoot, helper))) {
+    fs.mkdirSync(path.dirname(path.join(snapshotRoot, helper)), { recursive: true });
+    fs.copyFileSync(path.join(sourceRoot, helper), path.join(snapshotRoot, helper));
   }
 }
 const snapshotDependencies = ['src/renderer/index.html', 'src/renderer/app.js', 'src/preload.cjs',
@@ -155,6 +144,9 @@ const hashFiles = [...snapshotDependencies.filter(relative => relative.startsWit
   ...fs.readdirSync(path.join(snapshotRoot, 'src/core')).filter(name => /\.cjs$/.test(name)).map(name => 'src/core/' + name),
   'node_modules/markdown-it/dist/browser/markdown-it.umd.min.js'];
 for (const relative of [...new Set(hashFiles)].sort()) hashes[relative] = sha256(fs.readFileSync(path.join(snapshotRoot, relative)));
+if (fs.existsSync(path.join(snapshotRoot, 'build/native/WindowAppearance.exe'))) {
+  hashes['build/native/WindowAppearance.exe'] = sha256(fs.readFileSync(path.join(snapshotRoot, 'build/native/WindowAppearance.exe')));
+}
 for (const method of ['show', 'showInactive']) BrowserWindow.prototype[method] = function () { throw new Error('隐藏诊断禁止展示窗口。'); };
 const createdWindows = [];
 const nativeWindowCalls=[];
@@ -202,10 +194,11 @@ const probeCode = `(() => {
     const paragraphRect=rect(paragraph); let paragraphLines=null;
     if(paragraph?.tagName==='P'){const range=document.createRange();range.selectNodeContents(paragraph);paragraphLines=new Set([...range.getClientRects()].map(value=>Math.round(value.top))).size;}
     const overflowX=scroller?getComputedStyle(scroller).overflowX:null;
-    const contentBoxes=[...(panel?.children||[])].filter(node=>!node.classList.contains('native-pin-frame')).map(node=>({className:String(node.className),rect:rect(node),inlineWidth:node.style.width,inlineHeight:node.style.height}));
+    const contentBoxes=[...(panel?.children||[])].filter(node=>!node.classList.contains('native-pin-frame')).map(node=>({className:String(node.className),rect:rect(node),opacity:Number(getComputedStyle(node).opacity),inlineWidth:node.style.width,inlineHeight:node.style.height}));
     const paragraphText=paragraph?{rect:paragraphRect,lines:paragraphLines}:null;
     probe.samples.push({ at, phase:probe.phase, width:innerWidth, height:innerHeight, reading:panel?.classList.contains('reading-layout'),
-      layoutFrozen:contentBoxes.length>0&&contentBoxes.every(value=>value.inlineWidth!==''&&value.inlineHeight!==''),contentBoxes,paragraphText,
+      layoutFrozen:contentBoxes.length>0&&contentBoxes.every(value=>value.inlineWidth!==''&&value.inlineHeight!==''),
+      contentMoving:document.documentElement.classList.contains('layout-settling'),contentBoxes,paragraphText,
       bodyOpacity:body?Number.parseFloat(getComputedStyle(body).opacity):null,
       contentOpacity:content?Number.parseFloat(getComputedStyle(content).opacity):null,
       scroller:scroller?.className, scrollTop:scroller?.scrollTop, scrollLeft:scroller?.scrollLeft,scrollWidth:scroller?.scrollWidth,clientWidth:scroller?.clientWidth,overflowX,horizontalScrollbar:scroller && scroller.scrollWidth>scroller.clientWidth+1 && !['hidden','clip'].includes(overflowX),scrollHeight:scroller?.scrollHeight, clientHeight:scroller?.clientHeight, anchor:anchorRect, anchorOffset:anchorRect && scrollRect ? anchorRect.y-scrollRect.y : null, paragraph:paragraphRect,paragraphLines,answer:rect(document.querySelector('.answer-pane')), source:rect(document.querySelector('.source-pane')), tabs:rect(tabs), selected:rect(selected), indicator:rect(tabs?.querySelector('.mode-indicator')), composer:rect(document.querySelector('.composer-wrap')), fontSize:getComputedStyle(document.querySelector('.message')).fontSize });
@@ -225,7 +218,13 @@ const probeCode = `(() => {
     // 正式应用先登记布局rAF，探针后登记；避免把布局修正前的DOM中间态当作已绘制内容。
     cancelAnimationFrame(probeFrame); probeFrame=requestAnimationFrame(frame);
   });
-  new MutationObserver(() => { if (probe.active) probe.observerEvents.push({type:'layout-class',at:performance.now(),className:document.querySelector('.panel')?.className}); }).observe(document.querySelector('.panel'),{attributes:true,attributeFilter:['class']});
+  let previousReading = document.querySelector('.panel').classList.contains('reading-layout');
+  new MutationObserver(() => {
+    const panel = document.querySelector('.panel'), reading = panel.classList.contains('reading-layout');
+    if (probe.active && reading !== previousReading) probe.observerEvents.push({ type:'layout-commit', at:performance.now(), phase:probe.phase, reading,
+      opacities:[...panel.children].filter(node=>!node.classList.contains('native-pin-frame')).map(node=>Number(getComputedStyle(node).opacity)) });
+    previousReading = reading;
+  }).observe(document.querySelector('.panel'),{attributes:true,attributeFilter:['class']});
   return {visibility:document.visibilityState,devicePixelRatio,accent:getComputedStyle(document.documentElement).getPropertyValue('--accent-ink').trim()};
 })()`;
 const timeout = setTimeout(() => { console.error('隐藏布局呈现诊断超时。'); app.exit(1); }, 45000);
@@ -300,6 +299,14 @@ app.whenReady().then(async () => {
       const startBounds = { ...win.getBounds() };
       desktop.setWide(wide);
       await sleep(wait);
+      if (sequence === 'roundtrip' || round === actions.length - 1) {
+        for (let attempt = 0; attempt < 100; attempt++) {
+          if (await win.webContents.executeJavaScript('!document.documentElement.classList.contains("layout-preparing")')) break;
+          if (attempt === 99) throw new Error('窗口内容过渡未完成。');
+          await sleep(16);
+        }
+        await win.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+      }
       const rendererEnd = await win.webContents.executeJavaScript('performance.now()');
       rounds.push({ phase, wide, wait, interrupted: wait < 200, start, end:performance.now(), rendererStart, rendererEnd,
         startBounds, targetBounds: { ...win.getBounds() } });
@@ -309,7 +316,7 @@ app.whenReady().then(async () => {
     const renderer = await win.webContents.executeJavaScript('resizePresentation.active=false; resizePresentation.stopped=true; ({samples:resizePresentation.samples,observerEvents:resizePresentation.observerEvents,visibility:document.visibilityState})');
     // 在真实离屏像素中定位窗口顶端正文的深色笔画；分析安排在动画结束后。
     // 固定虚构锚点标题位于58至95行；玻璃材质下左栏标签也可能命中颜色阈值。
-    // 按较大空白列分簇后取标题的最大墨迹簇，不跨对象使用整个取样带的minX。
+    // 按较大空白列分簇后优先跟踪回答栏笔画，不把收窄后露出的左栏标签当作正文。
     for (const frame of paints) {
       const bytes=frame.image.toBitmap(), {width,height}=frame.size;
       const columnCounts = new Uint16Array(width);
@@ -343,14 +350,15 @@ app.whenReady().then(async () => {
         scrollTop:value.scrollTop, scrollLeft:value.scrollLeft, scrollWidth:value.scrollWidth,
         clientWidth:value.clientWidth, scrollHeight:value.scrollHeight, clientHeight:value.clientHeight,
         contentBoxes:value.contentBoxes?.filter(box=>box.className.includes('panel-body'))
-          .map(box=>({rect:box.rect,inlineWidth:box.inlineWidth,inlineHeight:box.inlineHeight})),
-        paragraphText:value.paragraphText });
+          .map(box=>({width:Math.round(box.rect.width*64)/64,height:Math.round(box.rect.height*64)/64,inlineWidth:box.inlineWidth,inlineHeight:box.inlineHeight})),
+        paragraphText:value.paragraphText && { width:Math.round(value.paragraphText.rect.width*64)/64, height:Math.round(value.paragraphText.rect.height*64)/64, lines:value.paragraphText.lines } });
       const contentKeys = inMotionSamples.map(contentKey);
       round.contentFreezeSampleCount = inMotionSamples.length;
       round.contentFreezePass = inMotionSamples.length >= (round.interrupted?2:3) && inMotionSamples.every(value=>value.layoutFrozen) &&
         contentKeys.every(value=>value===contentKeys[0]);
       round.opacitySamples = samples.map(value=>({ at:value.at, bodyOpacity:value.bodyOpacity, contentOpacity:value.contentOpacity }));
-      round.opacityPass = samples.length >= 3 && samples.every(value=>value.bodyOpacity === 1 && value.contentOpacity === 1);
+      round.opacityPass = samples.length >= 3 && samples.every(value=>value.contentOpacity === 1 &&
+        value.contentBoxes.every(box=>box.opacity>=0 && box.opacity<=1 && (value.contentMoving || box.opacity===1)));
       round.contentInkPaintCount = frames.filter(value=>value.contentInk.count>=8).length;
       round.frozenFontSizes = [...new Set(inMotionSamples.map(value=>value.fontSize))];
       round.frozenReadingLayout = [...new Set(inMotionSamples.map(value=>value.reading))];
@@ -376,12 +384,8 @@ app.whenReady().then(async () => {
       const commitIndex = samples.findIndex((value,index)=>index>0&&value.reading!==samples[index-1].reading);
       if (commitIndex > 0 && frames.length > 1) {
         const commitAt = toMainTime(samples[commitIndex].at);
-        let nearest = null;
-        for (let index=1; index<frames.length; index++) {
-          const previous=frames[index-1],current=frames[index];
-          const distance = commitAt < previous.at ? previous.at-commitAt : commitAt > current.at ? commitAt-current.at : 0;
-          if (!nearest || distance < nearest.distance) nearest = { index, distance, previous, current };
-        }
+        const nearest = findLayoutCommitPaint(frames, { commitAt, motionEnd, targetWidth: round.targetBounds.width,
+          fromReading: samples[commitIndex - 1].reading, toReading: samples[commitIndex].reading });
         if (nearest && nearest.distance <= 50) {
           round.layoutCommitAt = commitAt;
           round.layoutCommitPaintTransition = { index:nearest.index, distanceMs:nearest.distance,
@@ -395,7 +399,8 @@ app.whenReady().then(async () => {
         const previous=frames[index-1],current=frames[index];
         if(previous.contentInk.count<8 || current.contentInk.count<8)continue;
         const deltaX=current.contentInk.minX-previous.contentInk.minX;
-        if(scrollPosition==='middle' && Math.abs(deltaX)>80)paintedContentJumps.push({phase:round.phase,index,frameGap:current.at-previous.at,fromWidth:previous.size.width,toWidth:current.size.width,fromX:previous.contentInk.minX,toX:current.contentInk.minX,deltaX});
+        const frameGap = current.at-previous.at;
+        if(scrollPosition==='middle' && Math.abs(deltaX)>80)paintedContentJumps.push({phase:round.phase,index,frameGap,fromWidth:previous.size.width,toWidth:current.size.width,fromX:previous.contentInk.minX,toX:current.contentInk.minX,deltaX});
       }
       round.nativeCadence=distribution(gaps(calls.map(value=>value.at)));
       round.paintCadence=distribution(gaps(frames.map(value=>value.at)));
@@ -413,6 +418,22 @@ app.whenReady().then(async () => {
       round.extraNativeCalls=nativeWindowCalls.filter(value=>value.phase===round.phase && value.kind==='pin-glow').length;
       round.extraNativeCost=distribution(nativeWindowCalls.filter(value=>value.phase===round.phase && value.kind==='pin-glow').map(value=>value.cost));
       round.anchorCommitPass=!round.readingLayoutCommit || Math.abs(round.readingLayoutCommit.deltaOffset)<=2;
+      const movingSamples = samples.filter(value => value.contentMoving && value.anchor);
+      const layoutCommits = renderer.observerEvents.filter(value=>value.phase===round.phase && value.type==='layout-commit');
+      round.contentMotion = { samples: movingSamples.length,
+        opacities: [...new Set(movingSamples.map(value => Math.round(value.bodyOpacity*100)/100))],
+        cadence: distribution(gaps(movingSamples.map(value => value.at))),
+        settled: samples.at(-1)?.contentMoving === false,
+        finalOpacity: samples.at(-1)?.bodyOpacity,
+        opacitySynchronized: movingSamples.every(value=>value.contentBoxes.every(box=>Math.abs(box.opacity-value.bodyOpacity)<.001)),
+        layoutCommits,
+        layoutChangeHidden: layoutCommits.length > 0 && layoutCommits.every(value=>value.opacities.every(opacity=>opacity===0)),
+        controlsVisibleAtTarget: samples.filter(value => value.width === round.targetBounds.width).every(value =>
+          value.contentBoxes.filter(box => box.opacity>0 && /panel-bar|composer-wrap|panel-footer/.test(box.className)).every(({rect}) =>
+            rect.x >= -1 && rect.y >= -1 && rect.x+rect.width <= value.width+1 && rect.y+rect.height <= value.height+1)) };
+      round.contentMotion.passed = movingSamples.length >= 3 && round.contentMotion.opacities.filter(value=>value>0&&value<1).length >= 3 &&
+        round.contentMotion.opacities.includes(0) && round.contentMotion.finalOpacity === 1 && round.contentMotion.layoutChangeHidden && round.contentMotion.opacitySynchronized &&
+        round.contentMotion.cadence.p95 < 25 && round.contentMotion.settled && round.contentMotion.controlsVisibleAtTarget;
     }
     // 动画结束后才编码图像，避免PNG编码阻塞干扰动效测量。
     const framesDirectory=path.join(outputRoot,'frames'); fs.mkdirSync(framesDirectory,{recursive:true});
@@ -446,13 +467,22 @@ app.whenReady().then(async () => {
     const measurementAvailable=rounds.every(round=>round.paintCount>=(round.interrupted?1:3)&&round.sampleCount>=3&&
       round.intermediateNativeFrames>=(round.interrupted?2:3)&&round.contentFreezeSampleCount>=(round.interrupted?2:3)&&
       (round.interrupted||round.nativeTargetReached));
-    const report={description:'真实正式界面与原生尺寸路径的隐藏离屏绘制诊断。逐帧核对窗口边界、冻结内容尺寸、字号、段落行数、阅读锚点与正文不透明度。虚构材料；不代表Windows前台DWM呈现或真人验收。',variant,pinned,glow,sequence,createdWindows:createdWindows.map(value=>({kind:value._probeKind,visible:value.isDestroyed()?false:value.isVisible()})),experimentChanges,experimentRendererSha256:sha256(fs.readFileSync(path.join(runtimeRoot,'src/renderer/app.js'))),scrollPosition,cycles,outputRoot,snapshotRoot,runtimeRoot,isolated,hashes,environment,electron:process.versions.electron,platform:process.platform,release:os.release(),hidden,errors,measurementAvailable,continuityPass,anchorReversal,readingLayoutCommits,pixelProbeAvailable:scrollPosition==='middle',criterion:'动画帧期间正式内容容器必须保持冻结，字号、正文段落行数、内容矩形与滚动位置不变，panel-body及message-content的计算opacity始终为1；原生窗口必须至少出现3个中间尺寸并准确抵达目标。两栏切换的终端排版提交允许锚点横向位置变化，但相对阅读视口的锚点偏移误差不得超过2 CSS像素。动画期间同一排版下锚点相邻帧横移超过80 CSS像素或纵移超过30 CSS像素记为不连续；固定虚构正文在离屏paint中的横移超过80像素另行记录。每动作至少3次绘制。anchor-reversal还要求两次阅读视图终点同位，并最终回到原小窗坐标。',rounds,structuralJumps,paintedContentJumps,statusChanges,raw:{nativeCalls,nativeWindowCalls,paints:paints.map(({image,...value})=>value),renderer},limits:['离屏绘制包括真实布局和Chromium像素生成，但不包括可见桌面的DWM、显示刷新和用户主观抖动判断。','rAF几何与paint只按同一动作关联；不声称每个DOM样本均已一一呈现。','像素笔画定位仅适用于此固定虚构材料，不能直接套用任意用户会话。','只验证中间帧及内容边界；真实前台呈现仍需独立可见验收。']};
+    const report={description:'真实正式界面与原生尺寸路径的隐藏离屏绘制诊断。逐帧核对窗口边界、冻结内容尺寸、字号、段落行数、阅读锚点与正文不透明度。虚构材料；不代表Windows前台DWM呈现或真人验收。',variant,pinned,glow,sequence,createdWindows:createdWindows.map(value=>({kind:value._probeKind,visible:value.isDestroyed()?false:value.isVisible()})),experimentChanges,experimentRendererSha256:sha256(fs.readFileSync(path.join(runtimeRoot,'src/renderer/app.js'))),scrollPosition,cycles,outputRoot,snapshotRoot,runtimeRoot,isolated,hashes,environment,electron:process.versions.electron,platform:process.platform,release:os.release(),hidden,errors,measurementAvailable,continuityPass,anchorReversal,readingLayoutCommits,pixelProbeAvailable:scrollPosition==='middle',criterion:'原生尺寸动画期间固定内容尺寸、字号、换行和滚动位置；原生窗口至少经过3个中间尺寸并抵达目标。终态排版提交允许锚点横移，但相对阅读视口的偏移误差不得超过2 CSS像素。同一排版下相邻帧横移超过80或纵移超过30 CSS像素记为不连续；有笔画的相邻离屏paint横移上限80像素。只有声明的过渡期间允许内容退隐，结束后各组件恢复完全不透明。assert-content-motion还要求三个以上中间透明度、全部组件同步退隐、重排瞬间所有组件opacity为0，淡入后控件位于窗口内。',rounds,structuralJumps,paintedContentJumps,statusChanges,raw:{nativeCalls,nativeWindowCalls,paints:paints.map(({image,...value})=>value),renderer},limits:['离屏绘制包括真实布局和Chromium像素生成，但不包括可见桌面的DWM、显示刷新和用户主观抖动判断。','rAF几何与paint只按同一动作关联；不声称每个DOM样本均已一一呈现。','像素笔画定位仅适用于此固定虚构材料，不能直接套用任意用户会话。','只验证中间帧及内容边界；真实前台呈现仍需独立可见验收。']};
     report.material = material;
     report.effectiveMaterial = state.status.appearanceMaterial ?? null;
-    report.pixelProbeMethod = '固定虚构标题取样带按12列连续空白分簇，选择最大墨迹簇；保留全带minX及各簇用于排除来源标签。颜色、透明度、80像素横移阈值均未修改。';
+    const nativeIntervals = rounds.flatMap(round => gaps(nativeCalls.filter(value => value.phase === round.phase).map(value => value.at)));
+    const rendererIntervals = rounds.flatMap(round => gaps(renderer.samples.filter(value => value.phase === round.phase).map(value => value.at)));
+    report.cadence = { native: distribution(nativeIntervals), renderer: distribution(rendererIntervals),
+      criterion: '本入口固定 60Hz；页面刷新与原生尺寸更新的 P95 间隔均须小于 25 毫秒。只衡量调度，不证明 Windows 前台最终呈现。' };
+    report.cadence.passed = report.cadence.native.count > 0 && report.cadence.renderer.count > 0 &&
+      report.cadence.native.p95 < 25 && report.cadence.renderer.p95 < 25;
+    report.pixelProbeMethod = '固定虚构标题取样带按12列连续空白分簇，优先跟踪回答栏x>=240的笔画；保留全带minX及各簇。有笔画的相邻帧检查80像素横移上限；退隐期间没有可跟踪笔画时由组件透明度及重排瞬间的MutationObserver独立验证。';
     fs.writeFileSync(path.join(outputRoot,'report.json'),JSON.stringify(report,null,2));
     console.log(JSON.stringify({report:path.join(outputRoot,'report.json'),variant,material,effectiveMaterial:report.effectiveMaterial,hidden,measurementAvailable,continuityPass,anchorReversal,structuralJumps:structuralJumps.map(({from,to,...value})=>value),paintedContentJumps,rounds:rounds.map(({paintedSizes,...value})=>value)},null,2));
     desktop.dispose();clearTimeout(timeout);
-    app.exit(hidden && measurementAvailable && errors.length===0 && (!process.argv.includes('--assert-continuity') || continuityPass)?0:1);
+    app.exit(hidden && measurementAvailable && errors.length===0 &&
+      (!process.argv.includes('--assert-continuity') || continuityPass) &&
+      (!process.argv.includes('--assert-content-motion') || rounds.every(round => round.contentMotion.passed)) &&
+      (!process.argv.includes('--assert-cadence') || report.cadence.passed) ? 0 : 1);
   }catch(error){console.error(error.stack);desktop?.dispose();clearTimeout(timeout);app.exit(1);}
 });

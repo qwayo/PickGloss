@@ -17,6 +17,8 @@ const outputIndex = process.argv.indexOf('--output-dir');
 const output = outputIndex < 0 ? path.resolve(__dirname, '../output/verification/floating-20261021') : path.resolve(process.argv[outputIndex + 1]);
 const before = process.argv.includes('--before');
 const preview = process.argv.includes('--preview');
+const previewSaveRace = process.argv.includes('--preview-save-race') ? { armed: false, entered: false, returned: false } : null;
+assert.ok(!previewSaveRace || !process.argv.includes('--preview-layout-only'), '保存回执竞争检查需要保留完整的外观设置操作顺序');
 // 隐藏离屏证据使用软件输出设备，避免 CI GPU 合成表面的复制与初始化差异。
 if (!preview) app.disableHardwareAcceleration();
 app.setPath('userData', path.join(os.tmpdir(), `pickgloss-floating-${process.pid}`));
@@ -85,7 +87,8 @@ async function shot(name, win = panel) {
 }
 function emit() { desktop.broadcast(state); }
 async function checkPreviewLayouts() {
-  const originalSession = state.session, originalVision = state.settings.vision;
+  if (previewSaveRace) await until(() => previewSaveRace.entered, '恢复默认配色的保存已发起，回执暂缓到两张预览图之间');
+  const originalSession = state.session;
   const rounds = Number(process.argv.find(arg => arg.startsWith('--preview-rounds='))?.split('=')[1] || 1);
   assert.ok(Number.isInteger(rounds) && rounds >= 1 && rounds <= 500, '采样轮数必须在 1 至 500 之间');
   const samples = [];
@@ -99,25 +102,35 @@ async function checkPreviewLayouts() {
   if (viewportHeight) await panel.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width: 300, height: viewportHeight, deviceScaleFactor: 1, mobile: false });
   if (imageDelay) await evaluate(`(()=>{const original=Element.prototype.setAttribute;Element.prototype.setAttribute=function(key,value){if(this instanceof HTMLImageElement&&key==='src'){setTimeout(()=>original.call(this,key,value),${imageDelay});return;}return original.call(this,key,value)}})()`);
   if (process.argv.includes('--preview-inject-overflow')) await panel.webContents.insertCSS('.recognition-preview .form-actions{margin-top:500px!important}');
-  state.settings.vision = { baseUrl: 'http://127.0.0.1/v1', model: '隔离识图模型' };
   try {
     for (let round = 0; round < rounds; round++) for (const [width, height] of [[640,180],[180,640]]) {
       const imageData = await evaluate(`(()=>{const c=document.createElement('canvas');c.width=${width};c.height=${height};const x=c.getContext('2d');x.fillStyle='#e9edf2';x.fillRect(0,0,c.width,c.height);x.fillStyle='#252525';x.font='20px sans-serif';x.fillText('截图验证材料',16,40);return c.toDataURL('image/png')})()`);
       state.session = { ...originalSession, kind: 'image', imageData }; state.view = 'preview'; emit();
       await until(() => evaluate('Boolean(document.querySelector(".recognition-preview .preview-image"))'), '截图确认页');
       const snapshot = await evaluate(`(${previewSnapshot.toString()})()`);
-      samples.push({ round, width, height, window: panel.getBounds(), expectedImage: snapshot.image?.width === width && snapshot.image?.height === height, ...snapshot });
+      samples.push({ round, width, height, window: panel.getBounds(), expectedImage: snapshot.image?.width === width && snapshot.image?.height === height,
+        visionConfigured: Boolean(state.settings.vision?.baseUrl && state.settings.vision?.model), ...snapshot });
       await fs.writeFile(path.join(output, '截图预览布局采样.json'), JSON.stringify({ conditions: { cpuRate, imageDelay, viewportHeight }, samples, failures: samples.filter(s => !s.fits).length }, null, 2));
       if (!process.argv.includes('--preview-probe')) assert.equal(snapshot.fits, true, `截图 ${width}×${height} 默认小窗完整显示`);
+      if (previewSaveRace && round === 0 && height === 180) {
+        previewSaveRace.release();
+        await until(() => previewSaveRace.returned, '外观保存回执返回后继续竖图预览');
+      }
     }
     assert.equal(samples.filter(s => !s.fits).length, 0, '截图预览采样存在溢出，详见结构化报告');
-  } finally { state.session = originalSession; state.settings.vision = originalVision; }
+  } finally { state.session = originalSession; }
 }
 async function handle(action, payload = {}) {
   if (action === 'bootstrap') return state;
   if (action === 'save-settings') {
     if (failSave) throw Error('隔离验证写盘失败');
-    state.settings = await store.saveSettings(payload); desktop.setAppearance(state.settings.prefs.appearance);
+    const saved = await store.saveSettings(payload);
+    if (previewSaveRace?.armed) {
+      previewSaveRace.armed = false; previewSaveRace.entered = true;
+      await previewSaveRace.wait;
+      previewSaveRace.returned = true;
+    }
+    state.settings = saved; desktop.setAppearance(state.settings.prefs.appearance);
   } else if (action === 'pin') { state.pinned = payload.pinned; desktop.setPinned(payload.pinned); }
   else if (action === 'wide') { state.wide = payload.wide; desktop.setWide(payload.wide); }
   else if (action === 'navigate') state.view = payload.view;
@@ -141,6 +154,8 @@ app.whenReady().then(async () => {
     await fs.mkdir(output, { recursive: true });
     const { createStore } = require(path.join(root, 'src/core/store.cjs'));
     store = createStore({ directory: path.join(app.getPath('userData'), '隔离数据') }); await store.init();
+    // 在任何外观保存开始前建立持久的隔离识图配置，迟到回执也必须包含它。
+    await store.saveSettings({ vision: { baseUrl: 'http://127.0.0.1/v1', model: '隔离识图模型' } });
     const session = await store.createSession({ text: 'compound', context: 'Small changes compound over time.', threads: { independent: { status: 'idle', draft: '', messages: [] }, visual: { status: 'idle', draft: '', messages: [] }, context: { status: 'done', draft: '', messages: [{ id: '回答', role: 'assistant', content: '## 逐渐累积\n\n微小的改变不断叠加，最终形成可见的进步。\n\n' + Array.from({ length: 10 }, (_, i) => `### 阅读段落 ${i + 1}\n\n坚持练习，把新知识与已有经验联系起来。`).join('\n\n'), status: 'complete' }] } } });
     state = { view: 'explain', session, settings: await store.getSettings(), history: [], pinned: false, wide: false, status: {} };
     const target = path.join(root, 'src/windows/desktop.cjs'), loaded = new Module(target, module);
@@ -291,6 +306,10 @@ app.whenReady().then(async () => {
     await evaluate('document.querySelector(".panel-body").scrollTop=0'); await shot('外观设置-阅读尺寸');
     await handle('wide', { wide: false }); await until(() => !state.status.windowTransitioning, '恢复小窗');
     checks.push({ 检查: '真实鼠标点击色板及光标显示', 通过: true });
+    if (previewSaveRace) {
+      previewSaveRace.armed = true;
+      previewSaveRace.wait = new Promise(resolve => { previewSaveRace.release = resolve; });
+    }
     await click('.appearance-preset[data-preset="default"]');
     await handle('navigate', { view: 'paste' });
     await until(() => evaluate('Boolean(document.querySelector("[data-field=paste-text]"))'), '识别页面');
@@ -302,15 +321,16 @@ app.whenReady().then(async () => {
     checks.push({ 检查: '默认小窗截图确认页横图与竖图均完整显示', 通过: true });
     await handle('navigate', { view: 'explain' });
     await until(() => evaluate('Boolean(document.querySelector(".message"))'), '解释返回');
-    await evaluate('window.__paneFrames=[];window.__sampling=true;function sample(){if(!window.__sampling)return;const s=document.querySelector(".source-pane"),a=document.querySelector(".answer-pane");if(s&&a){const x=s.getBoundingClientRect(),y=a.getBoundingClientRect();__paneFrames.push({overlap:Math.max(0,Math.min(x.right,y.right)-Math.max(x.left,y.left))*Math.max(0,Math.min(x.bottom,y.bottom)-Math.max(x.top,y.top)),transform:getComputedStyle(a).transform})}requestAnimationFrame(sample)}sample()');
+    await evaluate('window.__paneFrames=[];window.__sampling=true;function sample(){if(!window.__sampling)return;const s=document.querySelector(".source-pane"),a=document.querySelector(".answer-pane");if(s&&a){const x=s.getBoundingClientRect(),y=a.getBoundingClientRect(),style=getComputedStyle(a),m=new DOMMatrix(style.transform),clip=getComputedStyle(s).clipPath.match(/inset\\(([^)]+)\\)/)?.[1].split(/\\s+/).map(parseFloat),right=x.right-(clip?.[1]??clip?.[0]??0);__paneFrames.push({overlap:Math.max(0,Math.min(right,y.right)-Math.max(x.left,y.left))*Math.max(0,Math.min(x.bottom,y.bottom)-Math.max(x.top,y.top)),unscaled:m.a===1&&m.b===0&&m.c===0&&m.d===1})}requestAnimationFrame(sample)}sample()');
     for (let i = 0; i < 3; i++) {
-      await handle('wide', { wide: true }); await until(() => !state.status.windowTransitioning, '展开');
-      await handle('wide', { wide: false }); await until(() => !state.status.windowTransitioning, '收窄');
+      await handle('wide', { wide: true }); await until(async () => !state.status.windowTransitioning && await evaluate('!document.documentElement.classList.contains("layout-preparing")'), '展开及内容到位');
+      await handle('wide', { wide: false }); await until(async () => !state.status.windowTransitioning && await evaluate('!document.documentElement.classList.contains("layout-preparing")'), '收窄及内容到位');
     }
     const frames = await evaluate('window.__sampling=false;window.__paneFrames');
     assert.ok(panel.resizeCalls.every(b => b.width >= 300 && b.width <= 860), '原生尺寸过渡必须保持在两种目标宽度之间');
     assert.ok(panel.resizeCalls.some(b => b.width > 300 && b.width < 860), '正常动效必须实际经过中间宽度，正文排版保持冻结');
-    assert.ok(frames.length > 5); assert.equal(frames.some(f => f.overlap > 1 || f.transform !== 'none'), false, '原文与回答不能在展开中重叠或对文字叠加变换');
+    assert.ok(frames.length > 5); assert.ok(frames.every(f => f.unscaled), '正文只平移，不得缩放或拉伸文字');
+    assert.ok(frames.every(f => f.overlap <= 1), '材料只在回答已让出的区域显露，两栏文字不能透叠');
     await handle('wide', { wide: true }); await delay(60); await handle('wide', { wide: false }); await until(() => !state.status.windowTransitioning, '即时反向');
     assert.equal(panel.getBounds().width, 300);
     await until(() => evaluate('!document.documentElement.classList.contains("layout-preparing")'), '目标内容恢复显示');
