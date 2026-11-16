@@ -71,4 +71,5 @@ jobs:
           path: |
             output/verification/
             dist/**/便携失败诊断.json
+            dist/**/单 EXE 宿主启动退出结果.json
           if-no-files-found: ignore

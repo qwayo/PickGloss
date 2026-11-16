@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
 const { app, ipcMain, globalShortcut, session: electronSession, safeStorage, shell, dialog, net, clipboard, nativeImage } = require('electron');
 const { createStore, generalSettingsDefaults } = require('./core/store.cjs');
 const { defaultWindowGeometry } = require('./core/appearance.cjs');
@@ -26,6 +27,8 @@ const { createDesktop } = require('./windows/desktop.cjs');
 const { COMMANDS, createShortcutController } = require('./core/shortcuts.cjs');
 
 const smoke = process.argv.includes('--smoke-test');
+const smokeBridge = smoke ? Promise.withResolvers() : null;
+let smokeBootstrapRejected = false;
 const verificationArgs = process.argv.filter(value => value.startsWith('--verification-data-dir='));
 if (verificationArgs.length > 1) throw new Error('只能指定一个隔离验证目录。');
 const verificationDirectory = verificationArgs.length ? path.resolve(verificationArgs[0].slice('--verification-data-dir='.length)) : '';
@@ -67,7 +70,7 @@ let sourceIcons, sourceIconFetch;
 let settingsSection = 'service';
 let shortcuts, pinFeedback = null;
 let orbActivationWork = Promise.resolve();
-let pinned = false, wide = false, quitting = false, readyToExit = false, emitTimer, bridgeReady = 0;
+let pinned = false, wide = false, quitting = false, readyToExit = false, emitTimer;
 let historyCache = [], historyDirty = true;
 let historyRevision = 0, historyLoad = null, historyQuery = '', historySavedOnly = false, historyOpenId = 0;
 const cache = new Map(), jobs = new Map();
@@ -819,11 +822,16 @@ async function start() {
     if (settings.prefs.launchAtLogin) void syncLoginItem().then(scheduleEmit, () => {});
   }
   ipcMain.handle('pickgloss:action',async(event,action,payload)=>{
-    if(!desktop.authorize(event,action))return{ok:false,error:'此窗口不能执行该操作。'};
-    if(action==='bootstrap')bridgeReady++;
+    if(!desktop.authorize(event,action)){
+      if(smoke && action==='bootstrap')smokeBootstrapRejected=true;
+      return{ok:false,error:'此窗口不能执行该操作。'};
+    }
     try{
       let value=await handle(action,payload);
-      if(action==='bootstrap'&&desktop.stateFor)value=await desktop.stateFor(event,value);
+      if(action==='bootstrap') {
+        if(desktop.stateFor)value=await desktop.stateFor(event,value);
+        smokeBridge?.resolve(true);
+      }
       return{ok:true,value};
     }catch(error){if(!['orb-drag','orb-hover','panel-resize'].includes(action))await emit();return{ok:false,error:error.message||'操作未完成，请重试。'};}
   });
@@ -841,11 +849,18 @@ async function start() {
   app.on('window-all-closed',()=>{});
   app.on('before-quit',event=>{if(!readyToExit){event.preventDefault();void quit();}});
   if(smoke){
-    await new Promise(resolve=>setTimeout(resolve,1200));
-    const info={...await desktop.smoke(),rendererBridge:bridgeReady>0,encryptionAvailable:safeStorage.isEncryptionAvailable(),shortcutErrors:status.shortcutErrors,selection:status.selection,
+    await delay(1200);
+    const desktopState=await desktop.smoke();
+    // HTML 加载完成后预加载桥接仍可能在处理首次请求，等待实际读回而非固定延时。
+    const rendererBridge=await Promise.race([smokeBridge.promise,delay(12_000,false,{ref:false})]);
+    const info={...desktopState,rendererBridge,bootstrapRejected:smokeBootstrapRejected,encryptionAvailable:safeStorage.isEncryptionAvailable(),shortcutErrors:status.shortcutErrors,selection:status.selection,
       distribution:distribution?.kind??null,startupExecutable:distribution?.execPath??null};
     // 宿主检查结果写在隔离用户目录，运行候选包不会改变包内容指纹。
-    const target=path.join(app.getPath('userData'),'smoke.json');await fs.writeFile(target,JSON.stringify(info,null,2),'utf8');await quit();
+    const target=path.join(app.getPath('userData'),'smoke.json');await fs.writeFile(target,JSON.stringify(info,null,2),'utf8');
+    if (!rendererBridge) {
+      await shortcuts?.dispose();desktop.dispose();app.exit(1);return;
+    }
+    await quit();
   }
 }
 
