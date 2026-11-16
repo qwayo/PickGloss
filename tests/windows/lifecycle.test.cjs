@@ -361,7 +361,7 @@ test('恢复离屏位置和工作区变化时窗口可见，不覆盖较大屏�
   assert.equal(made[0].getBounds().width, 1200); assert.equal(made[0].getBounds().height, 780);
 });
 
-test('展开先等旧文字退出绘制，再逐帧改变窗口尺寸；反向不保存过渡尺寸', async () => {
+test('展开先冻结正文排版，再逐帧改变窗口尺寸；反向不保存过渡尺寸', async () => {
   const writes = [];
   const { desktop, made, time, ipcMain, statuses } = desktopHarness({ animate: true, onWindowState: async value => writes.push(JSON.parse(JSON.stringify(value))) });
   desktop.openPanel(); const win = made[0]; win.setBounds({ x: 1010, y: 150, width: 335, height: 510 });
@@ -482,7 +482,67 @@ test('普通打开与带新选区的打开继续完成现有动画，不受保�
   assert.deepEqual({ ...win.getBounds() }, { x: 62, y: 74, width: 300, height: 483 });
 });
 
-test('粗计时、原生调用耗时与提前唤醒仍保持平滑尺寸过渡', () => {
+test('页面刷新帧驱动窗口尺寸，粗计时器不能造成隔帧跳动', () => {
+  const { desktop, made, time, ipcMain } = desktopHarness({ animate: true, timerQuantum: 15.625, nativeCost: 2 });
+  desktop.openPanel(); const win = made[0];
+  win.frames.length = 0; win.frameTimes.length = 0;
+  desktop.setWide(true);
+  const prepare = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+  const event = { sender: win.webContents, senderFrame: win.webContents.mainFrame };
+  ipcMain.emit('pickgloss:layout-ready', event, prepare.id, true);
+  const startedAt = time.now();
+  for (let frame = 1; frame <= 16; frame++) {
+    time.advance(Math.max(0, startedAt + frame * 1000 / 60 - time.now()));
+    ipcMain.emit('pickgloss:layout-frame', event, prepare.id);
+    assert.ok(Math.abs(win.frameTimes.at(-1) - (startedAt + frame * 1000 / 60)) < .01,
+      '每次页面刷新应推进对应的窗口尺寸，不能由独立定时器先后错开');
+  }
+  const intervals = win.frameTimes.slice(1).map((value, index) => value - win.frameTimes[index]);
+  assert.ok(intervals.length >= 14, '260 毫秒切换必须保留连续的尺寸中间帧');
+  assert.ok(intervals.every(value => value > 15 && value < 18), `尺寸更新应跟随 60Hz 刷新，不能隔帧或集中补帧：${intervals}`);
+  assert.equal(win.getBounds().width, 860);
+  const count = win.frames.length;
+  time.advance(500);
+  ipcMain.emit('pickgloss:layout-frame', event, prepare.id);
+  assert.equal(win.frames.length, count, '完成后不能继续调度或接受旧帧');
+  desktop.dispose();
+  assert.equal(ipcMain.listenerCount('pickgloss:layout-frame'), 0);
+});
+
+test('刷新帧中断时仍落到目标，恢复和反向只接受当前窗口的当前帧', () => {
+  const { desktop, made, time, ipcMain } = desktopHarness({ animate: true });
+  desktop.openPanel(); const win = made[0];
+  const event = { sender: win.webContents, senderFrame: win.webContents.mainFrame };
+  const prepare = wide => {
+    desktop.setWide(wide);
+    const message = win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1];
+    ipcMain.emit('pickgloss:layout-ready', event, message.id, true);
+    return message.id;
+  };
+  const old = prepare(true);
+  for (let frame = 0; frame < 4; frame++) {
+    time.advance(16);
+    ipcMain.emit('pickgloss:layout-frame', event, old);
+  }
+  assert.ok(win.getBounds().width > 300 && win.getBounds().width < 860);
+  const current = prepare(false), before = { ...win.getBounds() };
+  time.advance(20);
+  ipcMain.emit('pickgloss:layout-frame', event, old);
+  ipcMain.emit('pickgloss:layout-frame', { ...event, sender: {} }, current);
+  ipcMain.emit('pickgloss:layout-frame', { ...event, senderFrame: {} }, current);
+  assert.deepEqual({ ...win.getBounds() }, before, '过期帧、其他窗口和子框架不能推进当前过渡');
+  ipcMain.emit('pickgloss:layout-frame', event, current);
+  time.advance(100);
+  const resumed = win.frames.length;
+  ipcMain.emit('pickgloss:layout-frame', event, current);
+  assert.equal(win.frames.length, resumed + 1, '暂停后恢复的页面帧能继续推进');
+  time.advance(500);
+  assert.equal(win.getBounds().width, 300, '页面停止刷新也必须完成切换并释放内容');
+  assert.equal(win.messages.filter(([channel]) => channel === 'pickgloss:layout').at(-1)[1].phase, 'commit');
+  desktop.dispose();
+});
+
+test('页面未提供刷新帧时，粗计时与原生调用耗时仍能完成备用过渡', () => {
   for (const options of [{}, { timerQuantum: 15.625, nativeCost: 2 }, { timerQuantum: 15.625, timerDelays: [15.625, 8, 20.5], nativeCost: 2 }]) {
     const { desktop, made, time } = desktopHarness({ animate: true, ...options }); desktop.openPanel(); const win = made[0];
     win.frames.length = 0; desktop.setWide(true); time.advance(400);

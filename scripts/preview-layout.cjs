@@ -16,6 +16,7 @@ function previewSnapshot() {
     reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
     preparing: document.documentElement.classList.contains('layout-preparing'),
     body: body ? { rect: rect(body), height: body.clientHeight, scrollHeight: body.scrollHeight, scrollTop: body.scrollTop } : null,
+    children: body ? [...body.children].map(node => ({ tag: node.tagName, className: node.className, rect: rect(node) })) : [],
     actions: rect(actions),
     fits: Boolean(body && actions && body.scrollHeight <= body.clientHeight + 1 && actions.getBoundingClientRect().bottom <= body.getBoundingClientRect().bottom),
   };

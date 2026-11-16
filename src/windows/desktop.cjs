@@ -23,6 +23,7 @@ const { panelResizeBounds, validResizePayload } = require('./panel-resize.cjs');
 
 const PANEL_MOTION_DURATION = 260;
 const PANEL_MOTION_FRAME = 16;
+const PANEL_FRAME_TIMEOUT = 80;
 
 function createDesktop({ onAction, onSelection, onSelectionContext, onContextSelection, onStatus, onWindowState, captureFactory = createScreenCapture, sourceFactory }) {
   const windows = new Map();
@@ -174,6 +175,14 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
   }
 
   function schedulePanelAnimationFrame(current) {
+    if (current.frameDriven) {
+      // 正常显示由 renderer 的刷新帧推进；隐藏或渲染进程停顿时才启用定时器兜底。
+      animationTimer = setTimeout(() => {
+        current.frameDriven = false;
+        animatePanelFrame(current);
+      }, PANEL_FRAME_TIMEOUT);
+      return;
+    }
     const now = performance.now(), elapsed = Math.max(0, now - current.startedAt);
     if (elapsed >= PANEL_MOTION_DURATION) { finishAnimation(); return; }
     let deadline = current.startedAt + current.frameIndex * PANEL_MOTION_FRAME;
@@ -196,11 +205,12 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
     schedulePanelAnimationFrame(current);
   }
 
-  function startPanelAnimation(current) {
+  function startPanelAnimation(current, frameDriven = false) {
     if (animation !== current || current.phase !== 'preparing') return;
     clearTimeout(animationTimer); animationTimer = null;
     if (current.win.isDestroyed()) { stopAnimation(); return; }
     current.phase = 'animating';
+    current.frameDriven = frameDriven;
     current.start = { ...current.win.getBounds() };
     current.startedAt = performance.now();
     current.frameIndex = 1;
@@ -213,16 +223,25 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
     if (reducedMotion) { setWindowBounds(win, target); rememberWindow('panel', win, false); onStatus({ wide, windowTransitioning: false }); return; }
     const current = animation = { win, target, id: ++layoutSerial, phase: 'preparing' };
     // 收到固定排版的 ACK 后再改变原生窗口边界，最后提交新排版。
-    win.webContents.send('pickgloss:layout', { phase: 'prepare', id: current.id });
+    win.webContents.send('pickgloss:layout', { phase: 'prepare', id: current.id, width: target.width, height: target.height });
     // renderer 尚未载入或退出时仍能完成切换；超时开始原生过渡，迟到 ACK 不得提前提交。
     animationTimer = setTimeout(() => startPanelAnimation(current), 100);
   }
 
-  function layoutReady(event, id) {
+  function layoutReady(event, id, frameDriven = false) {
     if (!animation || animation.id !== id || event.sender !== animation.win.webContents || event.senderFrame !== event.sender.mainFrame) return;
-    startPanelAnimation(animation);
+    startPanelAnimation(animation, frameDriven === true);
+  }
+  function layoutFrame(event, id) {
+    if (!animation || animation.id !== id || animation.phase !== 'animating' ||
+      event.sender !== animation.win.webContents || event.senderFrame !== event.sender.mainFrame) return;
+    // 只接受当前解释窗口的当前过渡帧；快速反向后的迟到帧不能推进新动画。
+    animation.frameDriven = true;
+    clearTimeout(animationTimer); animationTimer = null;
+    animatePanelFrame(animation);
   }
   ipcMain.on('pickgloss:layout-ready', layoutReady);
+  ipcMain.on('pickgloss:layout-frame', layoutFrame);
 
   function restoreWindowState(geometry) {
     stopAnimation(); panelTransition = null;
@@ -1086,7 +1105,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
       });
     },
     async smoke() {const win=panel();await new Promise(resolve=>{if(win.webContents.isLoading())win.webContents.once('did-finish-load',resolve);else resolve();});return {windows:windows.size,displayCount:screen.getAllDisplays().length,rendererLoaded:!win.webContents.isLoading(),selectionWorker:!!worker};},
-    dispose() {closing=true;selectionGeneration++;capture=null;contextSelectionTarget=null;clearTimeout(contextPromptTimer);clearTimeout(contextSelectionTimeout);sourceWatcher?.dispose();if(captureReader)releaseCaptureReader(captureReader);clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);for(const win of windows.values())win.destroy();}
+    dispose() {closing=true;selectionGeneration++;capture=null;contextSelectionTarget=null;clearTimeout(contextPromptTimer);clearTimeout(contextSelectionTimeout);sourceWatcher?.dispose();if(captureReader)releaseCaptureReader(captureReader);clearInterval(heartbeatTimer);clearTimeout(geometryTimer);clearTimeout(menuHideTimer);clearTimeout(captureReadyTimer);stopAnimation();nativeTheme?.removeListener('updated',refreshAppearance);screen.removeListener?.('display-removed',recoverVisibleWindows);screen.removeListener?.('display-metrics-changed',recoverVisibleWindows);worker?.postMessage({type:'stop'});worker?.kill();tray?.destroy();ipcMain.removeListener('pickgloss:layout-ready',layoutReady);ipcMain.removeListener('pickgloss:layout-frame',layoutFrame);for(const win of windows.values())win.destroy();}
   };
 }
 module.exports={createDesktop};
