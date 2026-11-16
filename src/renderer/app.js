@@ -676,6 +676,11 @@ function receive(next) {
       content.session = { kind: value.session?.kind }; content.history = null;
       // 本窗口自动保存的回声只更新元数据，不重建正在操作的控件。
       if (settingsSaveDepth > 0) content.settings = null;
+      else if (settingsSection === 'appearance' && content.settings?.prefs) {
+        // 外观组件已在上面原位读回这些字段，迟到的广播也不需要重建滑块。
+        const { appearance: _appearance, ...prefs } = content.settings.prefs;
+        content.settings = { ...content.settings, prefs };
+      }
     }
     if (content.view !== 'settings' || settingsSection !== 'general') {
       delete content.updateCheck;

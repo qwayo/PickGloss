@@ -17,8 +17,8 @@ const output = path.resolve(outputIndex >= 0 ? process.argv[outputIndex + 1] : '
 const visible = process.argv.includes('--visible');
 const appearance = defaultAppearance(); appearance.current.material = 'glass';
 const current = { view: 'settings', settingsSection: 'appearance', history: [], session: null,
-  status: { appearanceMaterial: 'glass' }, settings: { text: {}, vision: {}, translation: {}, search: {},
-    serviceProfiles: {}, prefs: { appearance, showOrb: true } } };
+  status: { appearanceMaterial: 'glass' }, settings: applySettingsFixture({ text: {}, vision: {}, translation: {}, search: {},
+    serviceProfiles: {}, prefs: { appearance, showOrb: true } }, {}) };
 let win, phase = '初始化', closed = 0;
 const writes = [], consoleErrors = [], network = [];
 const report = { 通过: false, 要求可见焦点: visible, 证据范围: `正式预加载和${visible ? '实际获得焦点的可见' : '隐藏'} Electron 界面；虚构 IPC，不修改日常设置、登录项、全局快捷键或原生材质` };
@@ -26,9 +26,13 @@ ipcMain.handle('pickgloss:action', async (_, action, payload = {}) => {
   if (action === 'bootstrap') return { ok: true, value: current };
   if (action === 'save-settings') {
     writes.push(structuredClone(payload)); await delay(60);
-    current.settings = applySettingsFixture(current.settings, payload);
-    win.webContents.send('pickgloss:state', current);
-    return { ok: true, value: current.settings };
+    const settings = applySettingsFixture(current.settings, payload);
+    current.settings = settings;
+    // 保存响应和状态广播可能先后到达，覆盖广播较晚时的滑块回读。
+    setTimeout(() => {
+      if (!win.isDestroyed()) win.webContents.send('pickgloss:state', { ...current, settings });
+    }, 60);
+    return { ok: true, value: settings };
   }
   if (action === 'open-settings') current.settingsSection = payload.section === 'general' ? 'general' : 'service';
   if (action === 'open-appearance') current.settingsSection = 'appearance';
