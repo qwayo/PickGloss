@@ -6,6 +6,7 @@ const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { includePackagePath } = require('./package-files.cjs');
 const { runSteps } = require('./checked-runner.cjs');
+const { buildDistributions } = require('./build-distributions.cjs');
 
 async function hashFile(file) {
   const hash = createHash('sha256');
@@ -101,10 +102,17 @@ function fingerprint(entries) {
   if (zipped.status !== 0) throw new Error(`压缩包生成失败：${zipped.stderr || zipped.stdout}`);
   const archiveSha256 = await hashFile(archive);
   const checksum = { candidateId, archive: path.basename(archive), sha256: archiveSha256, algorithm: 'SHA-256' };
+  if (process.argv.includes('--distributions')) {
+    checksum.distributions = await buildDistributions({ root, packageDirectory, output, version, hashFile });
+  }
   await fs.writeFile(path.join(output, 'release-checksum.json'), JSON.stringify(checksum, null, 2), 'utf8');
   const verified = spawnSync(process.execPath, [path.join(__dirname, 'verify-package.cjs'), output, `--expected-zip-sha256=${archiveSha256}`], { encoding: 'utf8', windowsHide: true });
   if (verified.status !== 0) throw new Error(`包核对失败：${verified.stderr || verified.stdout}`);
   console.log(verified.stdout.trim());
   console.log(`便携目录：${packageDirectory}\n压缩产物：${archive}\n外部摘要：${path.join(output, 'release-checksum.json')}`);
   await runSteps([{ name: '冻结便携包验证', command: process.execPath, args: [path.join(__dirname, 'check-portable-suite.cjs'), output], timeoutMs: 240000 }], { cwd: root });
+  if (checksum.distributions) {
+    await runSteps([{ name: '便携单 EXE 启动退出检查', command: process.execPath,
+      args: [path.join(__dirname, 'check-package-smoke.cjs'), output, '--portable'], timeoutMs: 105000 }], { cwd: root });
+  }
 })().catch(error => { console.error(error.message); process.exitCode = 1; });

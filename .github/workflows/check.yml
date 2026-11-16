@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       verify_package:
-        description: '另外执行打包与真实 EXE 本机服务贯通（不发布）'
+        description: '另外构建安装版、便携版和验证 ZIP，执行打包验证（不发布）'
         type: boolean
         default: false
       verify_ocr:
@@ -71,4 +71,5 @@ jobs:
           path: |
             output/verification/
             dist/**/便携失败诊断.json
+            dist/**/单 EXE 宿主启动退出结果.json
           if-no-files-found: ignore

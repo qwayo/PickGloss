@@ -190,6 +190,7 @@ function defaults() {
       showOrb: true, selectionEnabled: true, orbAction: 'chat', orbQuietFade: true, orbEdgeCollapse: true, autoExplainCapture: false, launchAtLogin: false,
       screenshotTranslation: translationOptions(), captureDefaultMode: 'explain', captureExplainMode: 'immediate',
       webSearchEnabled: false, appearance: defaultAppearance(), windowGeometry: defaultWindowGeometry(), shortcuts: { ...DEFAULT_SHORTCUTS }, pinSound: true,
+      updateCheckEnabled: true,
     },
   };
 }
@@ -198,7 +199,7 @@ function defaults() {
 function generalSettingsDefaults() {
   const prefs = defaults().prefs;
   const keys = ['showOrb', 'selectionEnabled', 'orbAction', 'orbQuietFade', 'orbEdgeCollapse',
-    'captureDefaultMode', 'captureExplainMode', 'launchAtLogin', 'pinSound'];
+    'captureDefaultMode', 'captureExplainMode', 'launchAtLogin', 'pinSound', 'updateCheckEnabled'];
   return { ...Object.fromEntries(keys.map(key => [key, prefs[key]])),
     screenshotTranslation: { translationMode: prefs.screenshotTranslation.translationMode } };
 }
@@ -285,6 +286,7 @@ function settingsShape(input) {
   result.prefs.windowGeometry = prefs.windowGeometry === undefined ? defaultWindowGeometry() : windowGeometryShape(prefs.windowGeometry);
   result.prefs.shortcuts = prefs.shortcuts === undefined ? { ...DEFAULT_SHORTCUTS } : shortcutsShape(prefs.shortcuts);
   result.prefs.pinSound = prefs.pinSound === undefined ? true : bool(prefs.pinSound, '置顶提示音状态');
+  result.prefs.updateCheckEnabled = prefs.updateCheckEnabled === undefined ? true : bool(prefs.updateCheckEnabled, '自动检查更新状态');
   return result;
 }
 
@@ -623,6 +625,7 @@ function createStore({ directory, encrypt, decrypt, trash } = {}) {
           if (prefs.windowGeometry !== undefined) settings.prefs.windowGeometry = windowGeometryShape(prefs.windowGeometry);
           if (prefs.shortcuts !== undefined) settings.prefs.shortcuts = shortcutsShape(prefs.shortcuts);
           if (prefs.pinSound !== undefined) settings.prefs.pinSound = bool(prefs.pinSound, '置顶提示音状态');
+          if (prefs.updateCheckEnabled !== undefined) settings.prefs.updateCheckEnabled = bool(prefs.updateCheckEnabled, '自动检查更新状态');
         }
         await atomic(settingsPath, JSON.stringify(settingsShape(settings), null, 2));
         return publicSettings(settings, false);

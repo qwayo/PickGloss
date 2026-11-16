@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { pathToFileURL } = require('node:url');
 
 function clock(quantum = 0, timerDelays = []) {
   let next = 0, now = 0, timerIndex = 0;
@@ -26,7 +27,7 @@ function clock(quantum = 0, timerDelays = []) {
 }
 
 // 使用真实桌面模块和假窗口，不创建 Electron 或访问用户桌面。
-function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, onContextSelection, windowsBuild = 26100, materialError = false, frameHelperMissing = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, nativeCapture = null, dipScale = 1, sourceFactory } = {}) {
+function desktopHarness({ loading = false, animate = false, blurOnHide = false, onWindowState, onSelection, onSelectionContext, onContextSelection, windowsBuild = 26100, materialError = false, frameHelperMissing = false, timerQuantum = 0, timerDelays = [], nativeCost = 0, getSources, nativeCapture = null, dipScale = 1, sourceFactory, canonicalRendererPath } = {}) {
   const made = [], messages = [], statuses = [], selections = [], selectionUpdates = [], contextSelections = [], commands = [], actions = [], trays = [], menus = [], ipcMain = new EventEmitter(), time = clock(timerQuantum, timerDelays);
   const nativeTheme = Object.assign(new EventEmitter(), { shouldUseDarkColors: false, shouldUseDarkColorsForSystemIntegratedUI: false, themeSource: 'system' });
   const animationSettings = { prefersReducedMotion: !animate, shouldRenderRichAnimation: true };
@@ -45,7 +46,7 @@ function desktopHarness({ loading = false, animate = false, blurOnHide = false, 
       this.messages = [];
       made.push(this);
     }
-    loadFile(file, options) { this.loads++; this.kind = options.query.window; this.webContents.mainFrame.url = require('node:url').pathToFileURL(file).href + '?window=' + this.kind; return Promise.resolve(); }
+    loadURL(url) { this.loads++; this.kind = new URL(url).searchParams.get('window'); this.webContents.mainFrame.url = url; return Promise.resolve(); }
     isDestroyed() { return this.destroyed; }
     setBounds(bounds) { const before = this.bounds; this.bounds = { ...bounds }; this.frames.push({ ...bounds }); this.frameTimes.push(time.now()); if (bounds.x !== before.x || bounds.y !== before.y) this.emit('move'); if (bounds.width !== before.width || bounds.height !== before.height) this.emit('resize'); time.elapse(nativeCost); }
     getBounds() { return this.bounds; }
@@ -78,9 +79,10 @@ function desktopHarness({ loading = false, animate = false, blurOnHide = false, 
     dipToScreenRect: (_window, rect) => ({ x: rect.x * 2, y: rect.y * 2, width: rect.width * 2, height: rect.height * 2 }),
   }) };
   const target = path.join(__dirname, '../../src/windows/desktop.cjs'), mod = { exports: {} };
+  const fixtureFs = { ...fs, existsSync: () => true, realpathSync: { native: file => canonicalRendererPath ?? fs.realpathSync.native(file) } };
   vm.runInNewContext(fs.readFileSync(target, 'utf8'), {
     module: mod, exports: mod.exports, __dirname: path.dirname(target),
-    require: name => name === 'electron' ? electron : name === 'node:perf_hooks' ? { performance: { now: time.now } } : name === 'node:os' ? { release: () => '10.0.' + windowsBuild } : name === 'node:fs' ? { ...fs, existsSync: () => true } : name === './window-appearance.cjs' ? {
+    require: name => name === 'electron' ? electron : name === 'node:perf_hooks' ? { performance: { now: time.now } } : name === 'node:os' ? { release: () => '10.0.' + windowsBuild } : name === 'node:fs' ? fixtureFs : name === './window-appearance.cjs' ? {
       createWindowAppearance(win, options) {
         win.clipRadius = options.clipRadius;
         let ready = !(frameHelperMissing || materialError && options.clipRadius);
@@ -149,6 +151,19 @@ test('悬浮球只获得最新会话入口权限，不接受任意会话、设�
   assert.equal(desktop.authorize(event, 'open-latest-session'), true);
   assert.equal(desktop.authorize(event, 'orb-activate'), true);
   for (const action of ['open-session','save-settings','wide','set-draft']) assert.equal(desktop.authorize(event, action), false);
+});
+
+test('解包路径经规范化后，窗口使用同一个入口加载与授权', () => {
+  const canonicalRendererPath = path.resolve('便携版 解包目录', 'renderer', 'index.html');
+  const { desktop, made } = desktopHarness({ canonicalRendererPath });
+  desktop.openPanel();
+  const sender = made[0].webContents;
+  const event = { sender, senderFrame: sender.mainFrame };
+  assert.equal(sender.mainFrame.url, `${pathToFileURL(canonicalRendererPath).href}?window=panel`);
+  assert.equal(desktop.authorize(event, 'bootstrap'), true);
+  assert.equal(desktop.authorize({ ...event, senderFrame: { ...sender.mainFrame } }, 'bootstrap'), false);
+  sender.mainFrame.url = `${pathToFileURL(path.join(path.dirname(canonicalRendererPath), '另一入口.html')).href}?window=panel`;
+  assert.equal(desktop.authorize(event, 'bootstrap'), false);
 });
 
 test('重复唤回相同位置尺寸的窗口不再写入原生边界',()=>{
@@ -1475,6 +1490,7 @@ function mainHarness() {
   const target = path.join(__dirname, '../../src/main.cjs');
   const context = {
     require: name => name === 'electron' ? electron : name === './core/store.cjs' ? { createStore: () => store } :
+      name === './core/distribution.cjs' ? require('../../src/core/distribution.cjs') :
       name === './windows/desktop.cjs' ? { createDesktop: () => desktop } : name === './core/shortcuts.cjs' ? require('../../src/core/shortcuts.cjs') : name === './core/history.cjs' ? require('../../src/core/history.cjs') : name.startsWith('./') ? {} : require(name),
     process: { argv: [], env: {}, pid: 1, platform: 'win32' }, ...time, structuredClone,
     auditStore: store, auditDesktop: desktop, auditSettings: persistedSettings,

@@ -33,7 +33,8 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
   let orbPreferences = { quietFadeEnabled: true, edgeCollapseEnabled: true };
   const sourceWatcher = sourceFactory || typeof BrowserWindow.prototype.getNativeWindowHandle === 'function'
     ? (sourceFactory || createTranslationTracker)({ onChange: sourceChanged }) : null;
-  const html = path.join(__dirname, '..', 'renderer', 'index.html');
+  // 便携版可能从 Windows 短目录解包。导航与 IPC 校验使用同一个规范文件 URL。
+  const html = fs.realpathSync.native(path.join(__dirname, '..', 'renderer', 'index.html'));
   const htmlUrl = pathToFileURL(html).href;
   const preload = path.join(__dirname, '..', 'preload.cjs');
   const assets = path.join(__dirname, '..', 'renderer', 'assets');
@@ -385,7 +386,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
       if(!win.isDestroyed())win.destroy();
       onStatus({ error: '界面进程已退出，已保存的会话仍在。请从托盘重新打开 PickGloss。' });
     });
-    void win.loadFile(html, { query: { window: kind } });
+    void win.loadURL(`${htmlUrl}?window=${encodeURIComponent(kind)}`);
     return win;
   }
 
@@ -574,6 +575,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
 
   function nativeMenu() {
     const captureShortcut = lastState?.settings?.prefs?.shortcuts?.capture;
+    const update = lastState?.updateCheck?.available;
     const menu = Menu.buildFromTemplate([
       { label: '粘贴文字', click: () => onAction('navigate', {view:'paste'}) },
       { label: `截图框选${typeof captureShortcut === 'string' && captureShortcut ? `    ${captureShortcut}` : ''}`, click: () => onAction('start-capture') },
@@ -582,6 +584,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
       { label: 'AI 服务设置', click: () => onAction('open-settings') },
       { label: '外观与主题', click: () => onAction('open-appearance') },
       { label: '快捷键设置', click: () => onAction('open-shortcuts') },
+      ...(update ? [{ label: `查看新版 v${update.version}`, click: () => onAction('open-update-release') }] : []),
       { type: 'separator' },
       { label: showOrb ? '隐藏悬浮球' : '显示悬浮球', click: () => onAction('show-orb', {visible:!showOrb}) },
       { label: pausedSelection ? '开启划词入口' : '关闭划词入口', click: () => onAction('toggle-selection') },

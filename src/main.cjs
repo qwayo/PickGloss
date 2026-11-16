@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
 const { app, ipcMain, globalShortcut, session: electronSession, safeStorage, shell, dialog, net, clipboard, nativeImage } = require('electron');
 const { createStore, generalSettingsDefaults } = require('./core/store.cjs');
 const { defaultWindowGeometry } = require('./core/appearance.cjs');
@@ -16,7 +17,9 @@ const { createSourceIconProxy } = require('./core/source-icon-proxy.cjs');
 const { MODEL_PROVIDERS, SEARCH_PROVIDERS, OCR_PROVIDERS } = require('./core/services.cjs');
 const { listModels } = require('./core/models.cjs');
 const { uuid } = require('./core/validation.cjs');
-const { applyLoginSetting } = require('./windows/startup.cjs');
+const { APP_ID, readDistribution } = require('./core/distribution.cjs');
+const { createUpdateCheck } = require('./core/update-check.cjs');
+const { applyLoginSetting, readLoginItem, sameLoginPath } = require('./windows/startup.cjs');
 const { translationOptions, translationUsesSearch, translateScreenshot, ocrModelFingerprint, TRANSLATION_LANGUAGES } = require('./core/translation.cjs');
 const { testOcrModel } = require('./core/translation-ocr.cjs');
 const { recognizeWindows } = require('./windows/ocr.cjs');
@@ -24,6 +27,8 @@ const { createDesktop } = require('./windows/desktop.cjs');
 const { COMMANDS, createShortcutController } = require('./core/shortcuts.cjs');
 
 const smoke = process.argv.includes('--smoke-test');
+const smokeBridge = smoke ? Promise.withResolvers() : null;
+let smokeBootstrapRejected = false;
 const verificationArgs = process.argv.filter(value => value.startsWith('--verification-data-dir='));
 if (verificationArgs.length > 1) throw new Error('只能指定一个隔离验证目录。');
 const verificationDirectory = verificationArgs.length ? path.resolve(verificationArgs[0].slice('--verification-data-dir='.length)) : '';
@@ -49,7 +54,7 @@ if (verificationDirectory) {
 } else if (smoke) app.setPath('userData', path.join(os.tmpdir(), 'pickgloss-smoke-' + process.pid));
 else app.setPath('userData', path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'PickGloss'));
 app.setName('PickGloss');
-app.setAppUserModelId('local.pickgloss.desktop');
+app.setAppUserModelId(APP_ID);
 if (!app.requestSingleInstanceLock()) { app.quit(); } else {
   app.on('second-instance', (_event, commandLine = []) => { if (!commandLine.includes('--autostart')) desktop?.openPanel(); });
   app.whenReady().then(start).catch(() => {
@@ -58,12 +63,14 @@ if (!app.requestSingleInstanceLock()) { app.quit(); } else {
 }
 
 let store, desktop, settings, activeId = null, view = 'paste', settingsReturn = 'paste';
+let distribution, updateCheck, startupSwitchAvailable = false;
+let startupOperation = Promise.resolve();
 let searchPreferenceWrite = Promise.resolve();
 let sourceIcons, sourceIconFetch;
 let settingsSection = 'service';
 let shortcuts, pinFeedback = null;
 let orbActivationWork = Promise.resolve();
-let pinned = false, wide = false, quitting = false, readyToExit = false, emitTimer, bridgeReady = 0;
+let pinned = false, wide = false, quitting = false, readyToExit = false, emitTimer;
 let historyCache = [], historyDirty = true;
 let historyRevision = 0, historyLoad = null, historyQuery = '', historySavedOnly = false, historyOpenId = 0;
 const cache = new Map(), jobs = new Map();
@@ -154,10 +161,30 @@ async function state() {
   await loadHistory();
   return { view, session: active() || null, history: queryHistory(historyCache, { query: historyQuery, savedOnly: historySavedOnly }),
     historyQuery, historySavedOnly, historyOpenId, settings, settingsSection,
+    updateCheck: updateCheck?.snapshot() ?? null, startupSwitchAvailable,
     serviceCatalog: { models: MODEL_PROVIDERS, search: SEARCH_PROVIDERS, ocr: OCR_PROVIDERS },
     translation, translationLanguages: TRANSLATION_LANGUAGES, captureMode,
     settingsFilePath: path.join(app.getPath('userData'), 'data', 'settings.json'),
     pinned, wide, pinFeedback, status, capture: desktop.captureState() };
+}
+
+function syncLoginItem({ enabled, switching = false } = {}) {
+  const task = startupOperation.then(async () => {
+    const isolated = Boolean(verificationDirectory || smoke);
+    if (!distribution || isolated) {
+      if (enabled !== undefined && !switching) applyLoginSetting({ app, isolated }, enabled);
+      return;
+    }
+    const execPath = distribution.execPath;
+    const previousItem = await readLoginItem({ app, execPath });
+    startupSwitchAvailable = Boolean(execPath && previousItem && !sameLoginPath(previousItem.path, execPath));
+    if (enabled === undefined || (switching && !startupSwitchAvailable)) return;
+    if (enabled && (!execPath || !fsSync.existsSync(execPath))) throw new Error('当前发行版的启动文件已无法访问，请重新打开后再设置开机启动。');
+    applyLoginSetting({ app, execPath: execPath ?? previousItem?.path ?? process.execPath, previousItem }, enabled);
+    startupSwitchAvailable = false;
+  });
+  startupOperation = task.catch(() => {});
+  return task;
 }
 async function emit() {
   if (!desktop || !store || quitting) return;
@@ -496,6 +523,19 @@ async function handle(action,payload={}) {
     case 'open-settings': if(view!=='settings')settingsReturn=view;settingsSection=payload.section==='general'?'general':'service';view='settings';desktop.openPanel();break;
     case 'open-appearance': if(view!=='settings')settingsReturn=view;settingsSection='appearance';view='settings';desktop.openPanel();break;
     case 'open-shortcuts': if(view!=='settings')settingsReturn=view;settingsSection='shortcuts';view='settings';desktop.openPanel();break;
+    case 'check-update':
+      if (!updateCheck) throw new Error('当前运行模式不提供更新检查。');
+      return updateCheck.check();
+    case 'open-update-release': {
+      const release = updateCheck?.snapshot().available;
+      if (!release) throw new Error('未发现当前发行版可下载的新版。');
+      await shell.openExternal(release.url);
+      return null;
+    }
+    case 'use-current-startup':
+      if (!startupSwitchAvailable || settings.prefs.launchAtLogin !== true) throw new Error('当前没有需要切换的开机启动入口。');
+      await syncLoginItem({ enabled: true, switching: true });
+      break;
     case 'save-settings': {
       if (payload.autosave !== undefined && typeof payload.autosave !== 'boolean') throw new Error('自动保存状态无效。');
       await searchPreferenceWrite;
@@ -509,13 +549,14 @@ async function handle(action,payload={}) {
       else if (shortcuts) await shortcuts.save(persistSettings);
       else await persistSettings();
       if (previous.prefs.launchAtLogin !== settings.prefs.launchAtLogin) {
-        try { applyLoginSetting({ app, isolated: !!verificationDirectory || smoke }, settings.prefs.launchAtLogin); }
+        try { await syncLoginItem({ enabled: settings.prefs.launchAtLogin }); }
         catch (error) {
           const rollback = Object.fromEntries(Object.keys(payload.prefs || {}).map(key => [key, previous.prefs[key]]));
           settings = await store.saveSettings({ prefs: rollback });
           throw error;
         }
       }
+      updateCheck?.setAutomatic(settings.prefs.updateCheckEnabled);
       if (previous.prefs.showOrb !== settings.prefs.showOrb) desktop.setOrb(!verificationDirectory && settings.prefs.showOrb!==false);
       desktop.setOrbPreferences(settings.prefs);
       if (previous.prefs.selectionEnabled !== settings.prefs.selectionEnabled) desktop.startSelection(!verificationDirectory && settings.prefs.selectionEnabled!==false);
@@ -760,6 +801,8 @@ async function applyContextSelection(data) {
 
 async function start() {
   if(process.platform!=='win32')throw new Error('此版本仅面向 Windows。');
+  distribution = readDistribution({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
+    execPath: process.execPath, portablePath: process.env.PORTABLE_EXECUTABLE_FILE });
   electronSession.defaultSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
   electronSession.defaultSession.setPermissionCheckHandler(()=>false);
   store=createStore({directory:path.join(app.getPath('userData'),'data'),
@@ -772,12 +815,23 @@ async function start() {
     // 存储队列按最新磁盘设置合并，窗口移动不能覆盖随后保存的服务或外观设置。
     settings=await store.saveSettings({prefs:{windowGeometry:geometry}});
   },onSelection:acceptCapturedSelection,onSelectionContext:applySelectionContext,onContextSelection:applyContextSelection});
+  if (distribution && !verificationDirectory && !smoke) {
+    updateCheck = createUpdateCheck({ kind: distribution.kind, version: app.getVersion(),
+      fetchImpl: (...args) => net.fetch(...args), onChange: scheduleEmit });
+    updateCheck.setAutomatic(settings.prefs.updateCheckEnabled);
+    if (settings.prefs.launchAtLogin) void syncLoginItem().then(scheduleEmit, () => {});
+  }
   ipcMain.handle('pickgloss:action',async(event,action,payload)=>{
-    if(!desktop.authorize(event,action))return{ok:false,error:'此窗口不能执行该操作。'};
-    if(action==='bootstrap')bridgeReady++;
+    if(!desktop.authorize(event,action)){
+      if(smoke && action==='bootstrap')smokeBootstrapRejected=true;
+      return{ok:false,error:'此窗口不能执行该操作。'};
+    }
     try{
       let value=await handle(action,payload);
-      if(action==='bootstrap'&&desktop.stateFor)value=await desktop.stateFor(event,value);
+      if(action==='bootstrap') {
+        if(desktop.stateFor)value=await desktop.stateFor(event,value);
+        smokeBridge?.resolve(true);
+      }
       return{ok:true,value};
     }catch(error){if(!['orb-drag','orb-hover','panel-resize'].includes(action))await emit();return{ok:false,error:error.message||'操作未完成，请重试。'};}
   });
@@ -795,10 +849,18 @@ async function start() {
   app.on('window-all-closed',()=>{});
   app.on('before-quit',event=>{if(!readyToExit){event.preventDefault();void quit();}});
   if(smoke){
-    await new Promise(resolve=>setTimeout(resolve,1200));
-    const info={...await desktop.smoke(),rendererBridge:bridgeReady>0,encryptionAvailable:safeStorage.isEncryptionAvailable(),shortcutErrors:status.shortcutErrors,selection:status.selection};
+    await delay(1200);
+    const desktopState=await desktop.smoke();
+    // HTML 加载完成后预加载桥接仍可能在处理首次请求，等待实际读回而非固定延时。
+    const rendererBridge=await Promise.race([smokeBridge.promise,delay(12_000,false,{ref:false})]);
+    const info={...desktopState,rendererBridge,bootstrapRejected:smokeBootstrapRejected,encryptionAvailable:safeStorage.isEncryptionAvailable(),shortcutErrors:status.shortcutErrors,selection:status.selection,
+      distribution:distribution?.kind??null,startupExecutable:distribution?.execPath??null};
     // 宿主检查结果写在隔离用户目录，运行候选包不会改变包内容指纹。
-    const target=path.join(app.getPath('userData'),'smoke.json');await fs.writeFile(target,JSON.stringify(info,null,2),'utf8');await quit();
+    const target=path.join(app.getPath('userData'),'smoke.json');await fs.writeFile(target,JSON.stringify(info,null,2),'utf8');
+    if (!rendererBridge) {
+      await shortcuts?.dispose();desktop.dispose();app.exit(1);return;
+    }
+    await quit();
   }
 }
 
@@ -836,5 +898,5 @@ async function quit() {
   if(saved.some(result=>result.status==='rejected')) {
     quitting=false;status.error='部分会话未能写入磁盘，已取消退出。请检查磁盘空间或权限后重试。';desktop.openPanel();await emit();return;
   }
-  await shortcuts?.dispose();desktop?.dispose();readyToExit=true;app.quit();
+  await shortcuts?.dispose();updateCheck?.dispose();desktop?.dispose();readyToExit=true;app.quit();
 }

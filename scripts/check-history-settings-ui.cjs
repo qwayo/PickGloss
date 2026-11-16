@@ -82,6 +82,12 @@ ipcMain.handle('test:invoke', async (_, action, payload) => {
     await pushState();
   } else if (action === 'navigate') {
     current.view = payload.view; await pushState();
+  } else if (action === 'use-current-startup') {
+    current.startupSwitchAvailable = false;
+    await pushState();
+  } else if (action === 'check-update') {
+    current.updateCheck = { ...current.updateCheck, phase: 'available', available: { version: '1.0.1' } };
+    await pushState();
   } else if (action === 'save-settings') {
     if (failAppearanceSave && payload.prefs?.appearance) return { ok: false, error: '虚构配色保存失败' };
     current.settings = applySettingsFixture(current.settings, payload); await pushState();
@@ -253,6 +259,21 @@ app.whenReady().then(async () => {
     await waitFor(`document.querySelector('[data-settings-save-summary]').textContent==='已自动保存'`, '常规设置无需按钮即完成保存');
     assert.equal(current.settings.prefs.launchAtLogin, true); assert.equal(current.settings.prefs.captureDefaultMode, 'translate');
     assert.equal(current.settings.prefs.screenshotTranslation.translationMode, 'deep'); assert.equal(current.settings.prefs.captureExplainMode, 'prompt');
+    current.startupSwitchAvailable = true;
+    current.updateCheck = { kind: 'portable', version: '1.0.0', phase: 'idle', available: null };
+    await pushState();
+    const findButton = label => `[...document.querySelectorAll('.settings-group button')].find(item=>item.textContent.trim()===${quoteJavaScriptString(label)})`;
+    await waitFor(`Boolean(${findButton('使用当前版本开机启动')})`, '提示用户确认启动入口切换');
+    assert.equal(calls.filter(item => item.action === 'use-current-startup').length, 0);
+    await click(findButton('使用当前版本开机启动'), '确认切换开机启动入口');
+    await waitForCall('use-current-startup', item => Object.keys(item.payload).length === 0);
+    await waitFor(`!(${findButton('使用当前版本开机启动')})`, '切换后收起入口');
+    await click(`document.querySelector('[name="updateCheckEnabled"]')`, '关闭自动检查更新');
+    await waitForCall('save-settings', item => item.payload.prefs?.updateCheckEnabled === false);
+    await click(findButton('检查更新'), '手动检查更新');
+    await waitFor(`Boolean(${findButton('查看新版 v1.0.1')})`, '显示同发行版的新版入口');
+    await click(findButton('查看新版 v1.0.1'), '打开新版发布页');
+    await waitForCall('open-update-release', item => Object.keys(item.payload).length === 0);
     await click(`document.querySelectorAll('.settings-navigation button')[1]`, '打开 AI 服务');
     await waitFor(`document.querySelector('[data-settings-section="service"]')?.hidden===false`, 'AI 服务显示');
 

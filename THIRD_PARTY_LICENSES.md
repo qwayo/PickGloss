@@ -11,13 +11,15 @@
 | 组件 | 版本 | 许可证 | 便携包内许可文件 |
 | --- | --- | --- | --- |
 | markdown-it | 15.0.3 | MIT | `node_modules/markdown-it/LICENSE` |
-| selection-hook | 2.1.1 | MIT | `node_modules/selection-hook/LICENSE` |
+| selection-hook | 2.1.2 | MIT | `node_modules/selection-hook/LICENSE` |
 | node-gyp-build | 4.8.4 | MIT | `node_modules/node-gyp-build/LICENSE` |
 | punycode.js | 2.3.1 | MIT | `node_modules/punycode.js/LICENSE-MIT.txt` |
 | uc.micro | 3.0.0 | MIT | `node_modules/uc.micro/LICENSE.txt` |
-| Electron / Chromium | 44.7.2 | MIT 及 Chromium 第三方许可 | `LICENSE`、`LICENSES.chromium.html` |
+| Electron / Chromium | 45.2.1 | MIT 及 Chromium 第三方许可 | `LICENSE`、`LICENSES.chromium.html` |
 
 `selection-hook` 的预编译二进制位于 `prebuilds/win32-x64/selection-hook.node`，随同其 MIT 许可证分发。Electron 的许可证与 Chromium credits 由打包器保留在便携包根目录，项目打包校验会要求这些文件存在。
+
+安装版和单 EXE 便携版由 electron-builder 26.18.1 的 NSIS 目标封装。封装目录保留 electron-builder 的 `LICENSE-electron-builder.txt`。NSIS 及其压缩模块的许可见 [NSIS License](https://nsis.sourceforge.io/Docs/AppendixI.html)。
 
 ## 开发与构建依赖
 

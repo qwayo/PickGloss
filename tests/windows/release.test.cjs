@@ -21,6 +21,7 @@ const {
 
 const version = '1.2.3';
 const commit = 'a'.repeat(40);
+const editions = ['PickGloss-Setup-1.2.3.exe', 'PickGloss-Portable-1.2.3.exe'];
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pickgloss-release-'));
@@ -45,12 +46,18 @@ async function addCandidate(root, name = '候选') {
     dependencyLockSha256: hash(await fs.readFile(path.join(root, 'package-lock.json'))),
   };
   await fs.writeFile(path.join(directory, archive), content, 'utf8');
+  const distributions = {};
+  for (const name of editions) {
+    const body = `MZ ${name}\n`;
+    await fs.writeFile(path.join(directory, name), body, 'utf8');
+    distributions[name] = hash(body);
+  }
   await fs.writeFile(path.join(directory, 'candidate-manifest.json'), JSON.stringify(manifest), 'utf8');
   await fs.writeFile(path.join(directory, 'release-checksum.json'), JSON.stringify({
-    candidateId, archive, sha256: archiveSha256, algorithm: 'SHA-256',
+    candidateId, archive, sha256: archiveSha256, algorithm: 'SHA-256', distributions,
   }), 'utf8');
   await fs.writeFile(path.join(directory, 'README.txt'), '隔离候选包\n', 'utf8');
-  return { directory, archive, archiveSha256 };
+  return { directory, archive, archiveSha256, distributions };
 }
 
 test('发布元数据要求正式版本、锁文件一致及唯一非空更新日志', async () => {
@@ -95,17 +102,34 @@ test('create-release CLI 将从 GITHUB_REPOSITORY 得到的仓库传给 createRe
   assert.equal(received.options.repository, 'qwayo/PickGloss');
 });
 
-test('候选资产冻结后保留同一 ZIP、标准摘要和固定发布说明', async () => {
+test('候选资产冻结后保留同一 ZIP、两个 EXE、标准摘要和固定发布说明', async () => {
   const root = await fixture();
   const candidate = await addCandidate(root);
   const output = path.join(root, 'output', 'release');
   const staged = await stageCandidate(root, { version, commit, dist: 'dist', output });
-  assert.deepEqual(staged, { version, tag: 'v1.2.3', commit, archive: candidate.archive, archiveSha256: candidate.archiveSha256 });
+  assert.deepEqual(staged, { version, tag: 'v1.2.3', commit, archive: candidate.archive, archiveSha256: candidate.archiveSha256,
+    assets: [candidate.archive, ...editions, 'release-checksum.json', 'SHA256SUMS.txt'] });
   const sums = await fs.readFile(path.join(output, 'SHA256SUMS.txt'), 'utf8');
-  assert.equal(parseSha256Sums(sums, candidate.archive), candidate.archiveSha256);
+  assert.deepEqual(Object.fromEntries(parseSha256Sums(sums, [candidate.archive, ...editions])),
+    { [candidate.archive]: candidate.archiveSha256, ...candidate.distributions });
   await verifyStaged(root, output, version, commit);
   assert.equal(await fs.readFile(path.join(output, candidate.archive), 'utf8'), '受控 ZIP 内容\n');
   await assert.rejects(stageCandidate(root, { version, commit, dist: 'dist', output }), /EEXIST|已存在/);
+});
+
+test('候选缺少便携版摘要或安装版字节变化时拒绝冻结', async () => {
+  const root = await fixture();
+  const candidate = await addCandidate(root);
+  const options = { version, commit, dist: 'dist', output: path.join(root, 'output', 'release') };
+  const checksumPath = path.join(candidate.directory, 'release-checksum.json');
+  const original = await fs.readFile(checksumPath, 'utf8');
+  const incomplete = JSON.parse(original);
+  delete incomplete.distributions[editions[1]];
+  await fs.writeFile(checksumPath, JSON.stringify(incomplete));
+  await assert.rejects(stageCandidate(root, options), /必须包含当前版本的安装版和便携版/);
+  await fs.writeFile(checksumPath, original);
+  await fs.appendFile(path.join(candidate.directory, editions[0]), '已变更');
+  await assert.rejects(stageCandidate(root, options), /发行文件与候选摘要不一致.*Setup/);
 });
 
 test('候选数量不唯一或 ZIP 摘要不匹配时拒绝冻结', async () => {
@@ -130,17 +154,17 @@ test('公开资产必须逐字节匹配候选且 Release 元数据准确', async
   const published = path.join(root, 'output', 'published');
   const staged = await stageCandidate(root, { version, commit, dist: 'dist', output: directory });
   await fs.mkdir(published, { recursive: true });
-  for (const name of [staged.archive, 'release-checksum.json', 'SHA256SUMS.txt']) {
+  for (const name of staged.assets) {
     await fs.copyFile(path.join(directory, name), path.join(published, name));
   }
   const metadata = path.join(root, 'output', 'metadata.json');
   const release = {
     tagName: 'v1.2.3', name: 'PickGloss 1.2.3', isDraft: false, isPrerelease: false,
-    assets: [staged.archive, 'release-checksum.json', 'SHA256SUMS.txt'].map(name => ({ name })),
+    assets: staged.assets.map(name => ({ name })),
   };
   await fs.writeFile(metadata, JSON.stringify(release), 'utf8');
   await verifyPublished(root, { directory, published, metadata, version, commit });
-  await fs.appendFile(path.join(published, staged.archive), '公开文件已变化');
+  await fs.appendFile(path.join(published, editions[1]), '公开文件已变化');
   await assert.rejects(verifyPublished(root, { directory, published, metadata, version, commit }), /公开资产与候选文件不同/);
 });
 
@@ -226,6 +250,7 @@ test('标签与 Release 使用原子创建，失败后只清理本次未公开�
   assert.ok(successfulCalls.some(args => args[0] === 'api' && args.includes('POST')));
   const publishCall = successfulCalls.find(args => args[0] === 'release');
   assert.ok(publishCall.includes('--verify-tag') && !publishCall.includes('--target'));
+  assert.deepEqual(publishCall.filter(value => value.endsWith('.exe')), editions.map(name => path.join(directory, name)));
   assert.ok(publishCall.filter(value => String(value).endsWith('.zip') || String(value).endsWith('.md') || String(value).endsWith('.json')).every(path.isAbsolute));
 
   await assert.rejects(createRelease(root, options, (command, args) => {

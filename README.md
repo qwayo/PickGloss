@@ -91,15 +91,19 @@ PickGloss 是一款 Windows 划词与截图解释助手。它把“查一下这�
 
 ## 快速开始
 
-### 使用便携版
+### 下载 Windows x64 发行版
 
-便携版本由 `npm run package` 生成到：
+从 [GitHub Releases](https://github.com/qwayo/PickGloss/releases) 选择发行文件。
 
-```text
-dist/<构建时间戳>/PickGloss-win32-x64/
-```
+- **安装版** `PickGloss-Setup-*.exe` 双击后按当前 Windows 用户安装。
+- **便携版** `PickGloss-Portable-*.exe` 双击即可启动。
+- **ZIP** 解压后运行 `PickGloss-win32-x64/PickGloss.exe`。早期版本通过 ZIP 提供，请保留完整解压目录。
 
-解压后运行 `PickGloss-win32-x64/PickGloss.exe`。请保留整个目录，尤其是 `resources/`、`locales/` 和 `resources/native/ContextProbe.exe`；只拿走可执行文件无法运行。
+安装版和便携版共用本机设置与会话，并可在「常规设置 → 启动与提示」检查更新。后台默认在启动约 20 秒后检查，托盘驻留时每 6 小时检查。发现新版后，可从设置或托盘打开发布页下载。更换版本前请先从托盘退出 PickGloss。如果原来开启了开机自启动，可在设置里确认切换到当前入口。
+
+### 构建验证 ZIP
+
+`npm run package` 生成的运行目录位于 `dist/<构建时间戳>/PickGloss-win32-x64/`。
 
 每个包旁边会生成 `candidate-manifest.json`、`README.txt` 和 `release-checksum.json`。拿到 ZIP 时，先通过独立渠道核对 SHA-256，再执行：
 
@@ -288,6 +292,7 @@ npm run test:interaction
 npm run test:markdown
 npm run smoke          # 隔离数据目录下的启动检查
 npm run package        # 构建、打包、校验并生成 ZIP
+npm run dist:win       # 从同一运行目录构建双 EXE 和验证 ZIP
 npm run check:publication
 ```
 
@@ -312,7 +317,7 @@ npm run package
 
 `npm run package` 会使用白名单裁剪运行文件，并核对源码、原生助手和包内文件摘要。不要手工修改打包目录中的 `candidate-manifest.json`；如果包内容变化，应重新打包并生成新的清单和校验和。
 
-正式发布使用 Actions 中的 **发布** 工作流：手动选定 `main` 提交并构建候选包，完成真机验收和 `release` 环境审批后，公开已验证的同一个 ZIP。版本与发布说明先在普通 PR 中更新，禁止覆盖已有 Release。完整配置、验收和失败处理见 `docs/releasing.md`；当前流程不包含应用内自动更新或正式代码签名。
+正式发布使用 Actions 中的 **发布** 工作流。手动选定 `main` 提交后，运行 `npm run dist:win` 构建两个 EXE 和验证 ZIP。真机验收与 `release` 环境审批通过后，公开并逐件复核冻结资产。版本与发布说明先在普通 PR 中更新，已有 Release 保留原样。完整配置、验收和失败处理见 [发布手册](docs/releasing.md)。
 
 ### 目录约定
 
@@ -328,7 +333,7 @@ npm run package
 当前验证版面向 Windows 11 x64、单屏环境，重点覆盖桌面划词、截图解释、本地会话与便携包。以下项目尚未作为本版本的公开承诺：
 
 - macOS、Linux、Windows 10、ARM64 与多显示器兼容性
-- 安装器、自动更新、系统商店分发和正式代码签名（当前发行版未签名，Windows 可能显示未知发布者）
+- 应用内下载安装更新、系统商店分发和正式代码签名
 - 对所有浏览器、WPS、PDF 阅读器、办公软件或显示缩放组合的兼容性
 - 跨资料检索问答、全文文件导入、长期原文记号、图片圈画与箭头标注
 - 真实模型质量、费用与可用性的普遍保证
@@ -351,7 +356,8 @@ npm run package
 - [x] 便携包白名单、候选清单与校验和
 - [x] 在 GitHub Releases 发布带校验和的便携包
 - [ ] 补充目标 Windows 环境下的真实设备验收记录
-- [ ] 评估安装器、自动更新与正式代码签名
+- [x] 构建安装版、单 EXE 便携版与更新检查
+- [ ] 评估应用内更新与正式代码签名
 
 路线图只说明维护方向，不代表尚未完成的项目已经通过验证。
 

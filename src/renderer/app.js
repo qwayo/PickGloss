@@ -676,6 +676,15 @@ function receive(next) {
       content.session = { kind: value.session?.kind }; content.history = null;
       // 本窗口自动保存的回声只更新元数据，不重建正在操作的控件。
       if (settingsSaveDepth > 0) content.settings = null;
+      else if (settingsSection === 'appearance' && content.settings?.prefs) {
+        // 外观组件已在上面原位读回这些字段，迟到的广播也不需要重建滑块。
+        const { appearance: _appearance, ...prefs } = content.settings.prefs;
+        content.settings = { ...content.settings, prefs };
+      }
+    }
+    if (content.view !== 'settings' || settingsSection !== 'general') {
+      delete content.updateCheck;
+      delete content.startupSwitchAvailable;
     }
     return JSON.stringify({ ...content, status: visibleStatus });
   };
@@ -1886,8 +1895,30 @@ function generalSettingsView(body) {
   select(capture, 'captureExplainMode', '识图模式', '框选后直接识别，或先补充图片说明', prefs.captureExplainMode || 'immediate', [['immediate', '立即识别'], ['prompt', '先补充提示词']]);
   select(capture, 'translationMode', '截图翻译方式', '快速关闭思考，深度开启思考', prefs.screenshotTranslation?.translationMode || 'standard', [['standard', '快速'], ['deep', '深度']]);
   const system = group('启动与提示');
-  toggle(system, 'launchAtLogin', '开机自启动', '登录后在托盘运行，不弹出窗口', prefs.launchAtLogin === true);
+  const startup = toggle(system, 'launchAtLogin', '开机自启动', '登录后在托盘运行，不弹出窗口', prefs.launchAtLogin === true);
+  if (prefs.launchAtLogin === true && state.startupSwitchAvailable) {
+    startup.append(el('div', { class: 'window-settings-row' },
+      el('p', { class: 'setting-description' }, '开机启动目前指向另一份 PickGloss EXE。'),
+      button('使用当前版本开机启动', () => call('use-current-startup', {}, { scope: 'startup-switch' }), { busy: 'use-current-startup' })),
+    errorNode('startup-switch'));
+  }
   toggle(system, 'pinSound', '置顶提示音', '', prefs.pinSound !== false);
+  const update = state.updateCheck;
+  if (update) {
+    toggle(system, 'updateCheckEnabled', '自动检查更新', '启动后检查，运行期间每 6 小时再查', prefs.updateCheckEnabled !== false);
+    const statusText = {
+      idle: '等待检查更新。', checking: '正在检查更新…', current: '当前已是最新版本。',
+      available: `发现新版 v${update.available?.version}。`, unavailable: '暂无适用于当前发行版的新版。', error: update.error,
+    }[update.phase];
+    system.append(el('div', { class: 'setting-item' },
+      el('div', { class: 'window-settings-row' },
+        el('div', { class: 'setting-copy' },
+          el('span', { class: 'setting-title' }, `${update.kind === 'setup' ? '安装版' : '便携版'} v${update.version}`),
+          el('span', { class: 'setting-description', role: 'status' }, statusText)),
+        button('检查更新', () => call('check-update', {}, { scope: 'update-check' }), { busy: 'check-update', disabled: update.phase === 'checking' })),
+      update.available ? button(`查看新版 v${update.available.version}`, () => call('open-update-release', {}, { scope: 'update-check' })) : null,
+      errorNode('update-check')));
+  }
   windowSettingsView(body);
   body.append(el('section', { class: 'window-settings general-reset', 'aria-label': '恢复常规设置' },
     el('div', { class: 'window-settings-row' },

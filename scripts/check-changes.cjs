@@ -42,7 +42,7 @@ function buildSteps(selected, { interactive, ocr, output }) {
     if (ocr) steps.push(step('translation-ocr', '截图翻译 Windows 中英文 OCR 与覆盖像素', 'check-screenshot-translation.cjs', ['--native-ocr'], 180000));
     else uncovered.push({ 能力: 'Windows OCR 与中英文识别语言', 原因: '普通隐藏 CI 仅运行固定 OCR 材料的 UI 合同', 入口: 'npm run check:changes -- --ocr；需要 Windows OCR、英文和简体中文识别语言' });
   }
-  if (has('package')) steps.push({ id: 'package', name: '构建并验证冻结便携包、真实 EXE 失败阻断及本机服务贯通', command: process.execPath, args: [path.join(__dirname, 'package.cjs')], timeoutMs: 900000 });
+  if (has('package')) steps.push({ id: 'package', name: '构建安装版和便携版，验证便携 EXE 与冻结 ZIP', command: process.execPath, args: [path.join(__dirname, 'package.cjs'), '--distributions'], timeoutMs: 900000 });
   return { steps, uncovered };
 }
 async function main() {
