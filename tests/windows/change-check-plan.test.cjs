@@ -17,7 +17,9 @@ test('改动选择：专项、共享依赖与版本打包边界', () => {
   for (const file of ['src/renderer/app.js', 'src/renderer/styles.css', 'src/preload.cjs', 'src/core/store.cjs', 'scripts/check-changes.cjs']) {
     assert.deepEqual(ids([file]), ['ui', 'settings', 'history', 'translation'], file);
   }
-  for (const file of ['package.json', 'package-lock.json', 'scripts/verify-package.cjs', 'scripts/build-native.cjs', 'src/windows/ScreenCapture.cs']) {
+  for (const file of ['package.json', 'package-lock.json', 'scripts/verify-package.cjs', 'scripts/build-native.cjs',
+    'src/windows/ScreenCapture.cs', '.github/workflows/release.yml', 'scripts/build-distributions.cjs',
+    'scripts/release.cjs', 'src/core/distribution.cjs']) {
     assert.ok(ids([file]).includes('package'), file);
   }
   assert.deepEqual(ids(['src\\windows\\ocr.ps1']), ['ui', 'translation']);
@@ -64,5 +66,5 @@ test('能力边界：隐藏检查不会声称获焦或 OCR 已通过，交互入
   assert.ok(local.steps.filter(step => !step.args.includes('--visible')).every(step => step.windowsHide !== false));
   assert.ok(local.steps.some(step => step.args.includes('--native-ocr')));
   const release = buildSteps(selectChecks(['package.json']), { output: '隔离报告' });
-  assert.ok(release.steps.some(step => step.args[0].endsWith('package.cjs')));
+  assert.ok(release.steps.some(step => step.id === 'package' && step.args[0].endsWith('package.cjs') && step.args.includes('--distributions')));
 });

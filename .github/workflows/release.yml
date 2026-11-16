@@ -72,8 +72,8 @@ jobs:
         run: npm test -- --test-concurrency=1
       - name: 执行全部隐藏界面与功能专项
         run: npm run check:changes -- --ui-all --output-dir output/verification/release
-      - name: 构建并验证冻结便携包
-        run: npm run package
+      - name: 构建双发行版及验证 ZIP
+        run: npm run dist:win
       - name: 冻结候选发布资产
         env:
           RELEASE_COMMIT: ${{ steps.source.outputs.commit }}
@@ -140,8 +140,7 @@ jobs:
         shell: pwsh
         run: |
           $release = Get-Content -LiteralPath 'output/release/release.json' -Raw | ConvertFrom-Json
-          & gh release download $release.tag --repo $env:GITHUB_REPOSITORY --dir 'output/published' `
-            --pattern $release.archive --pattern 'release-checksum.json' --pattern 'SHA256SUMS.txt'
+          & gh release download $release.tag --repo $env:GITHUB_REPOSITORY --dir 'output/published'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: 核验公开资产与候选包一致
         run: node scripts/release.cjs verify-published --version="$env:RELEASE_VERSION" --commit="$env:RELEASE_COMMIT" --directory=output/release --published=output/published --metadata=output/release-metadata.json

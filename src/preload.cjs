@@ -11,6 +11,7 @@ allowed.add('delete-sessions');
 allowed.add('fetch-models');
 for (const action of ['close-translation','retry-translation','set-translation-options','set-translation-preferences','copy-translation','preview-translation-original','translation-content-height','pin-translation-controls']) allowed.add(action);
 for (const action of ['set-web-search','retry-search','retry-without-search','test-search-provider','get-source-icon']) allowed.add(action);
+for (const action of ['check-update','open-update-release','use-current-startup']) allowed.add(action);
 for (const action of ['rename-session', 'search-history', 'refresh-history', 'orb-drag', 'open-appearance', 'toggle-selection', 'open-shortcuts', 'shortcut-command', 'shortcut-recording', 'menu-close', 'menu-ready', 'capture-ready']) allowed.add(action);
 contextBridge.exposeInMainWorld('pickgloss', Object.freeze({
   onLayout(callback) {

@@ -5,8 +5,8 @@ const { createReadStream } = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
+const { DISTRIBUTION_NAMES, compareStableVersions, distributionFileName, isStableVersion } = require('../src/core/distribution.cjs');
 
-const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/i;
 const RELEASE_TAGS_JQ = '.[] | select(.draft == false and .prerelease == false) | .tag_name';
 
@@ -21,7 +21,7 @@ async function readJson(file) {
 }
 
 function assertVersion(version) {
-  if (!VERSION_PATTERN.test(version || '')) {
+  if (!isStableVersion(version)) {
     throw new Error(`发布版本必须是正式语义化版本（不含 v 或预发布后缀）：${version || '未提供'}`);
   }
   return version;
@@ -51,7 +51,7 @@ function extractChangelog(markdown, version) {
 }
 
 function composeReleaseNotes(body) {
-  return `${body}\n\n---\n\n下载下方的 **Windows x64 ZIP**，解压后从 \`PickGloss-win32-x64\` 文件夹运行 \`PickGloss.exe\`。请保留完整目录，不能只复制 EXE；更新前可保留旧版本目录。\n\n当前发行版尚未进行正式代码签名，Windows 可能显示“未知发布者”或 SmartScreen 提示。请核对下载来源，并使用 \`SHA256SUMS.txt\` 或 \`release-checksum.json\` 核对压缩包。\n\n自动化检查、隔离便携包及本机模拟服务验证不能替代目标 Windows 环境的人工验收，也不保证所有 OCR、第三方模型服务或多显示器环境均已验证。\n`;
+  return `${body}\n\n---\n\nWindows x64 下载\n\n- **安装版**（\`PickGloss-Setup-*.exe\`）双击后按当前用户安装。\n- **便携版**（\`PickGloss-Portable-*.exe\`）双击即可启动。\n- **ZIP** 解压后从 \`PickGloss-win32-x64\` 文件夹运行 \`PickGloss.exe\`，需要保留完整目录。\n\n安装版和便携版在设置及托盘提示新版。更换版本前请从托盘退出 PickGloss，再从本页下载并运行对应的新文件。两版沿用本机设置和会话。\n\n当前发行版尚未进行正式代码签名，Windows 可能显示“未知发布者”或 SmartScreen 提示。请核对下载来源，并使用 \`SHA256SUMS.txt\` 核对下载文件。\n\n自动化检查、隔离便携包及本机模拟服务验证不能替代目标 Windows 环境的人工验收，也不保证所有 OCR、第三方模型服务或多显示器环境均已验证。\n`;
 }
 
 async function releaseContext(root, version) {
@@ -102,14 +102,7 @@ function runTagLines(command, args, onLine) {
 }
 
 function compareVersions(left, right) {
-  const a = assertVersion(left).split('.');
-  const b = assertVersion(right).split('.');
-  for (let index = 0; index < 3; index += 1) {
-    if (a[index].length !== b[index].length) return a[index].length > b[index].length ? 1 : -1;
-    if (a[index] > b[index]) return 1;
-    if (a[index] < b[index]) return -1;
-  }
-  return 0;
+  return compareStableVersions(assertVersion(left), assertVersion(right));
 }
 
 async function assertUnpublished(version, repository, execute) {
@@ -187,7 +180,7 @@ async function createRelease(root, options, execute = run) {
   if (tagCommit(execute, repository, release.tag) !== commit.toLowerCase()) {
     removeUnpublishedTag(execute, repository, release.tag, commit, '标签创建后的即时回读目标不一致');
   }
-  const assetPaths = [release.archive, 'release-checksum.json', 'SHA256SUMS.txt'].map(name => path.join(directory, name));
+  const assetPaths = release.assets.map(name => path.join(directory, name));
   const published = execute('gh', ['release', 'create', release.tag, ...assetPaths, '--verify-tag',
     '--repo', repository, '--title', `PickGloss ${version}`,
     '--notes-file', path.join(directory, 'release-notes.md'), '--latest']);
@@ -221,6 +214,19 @@ async function findCandidate(dist, version) {
   return candidates[0];
 }
 
+async function verifyDistributionHashes(directory, version, checksums) {
+  const names = Object.keys(DISTRIBUTION_NAMES).map(kind => distributionFileName(kind, version));
+  if (!checksums || Object.keys(checksums).length !== names.length || names.some(name => !/^[a-f0-9]{64}$/.test(checksums[name] || ''))) {
+    throw new Error('候选摘要必须包含当前版本的安装版和便携版 EXE。');
+  }
+  const pairs = await Promise.all(names.map(async name => {
+    const actual = await hashFile(path.join(directory, name));
+    if (actual !== checksums[name]) throw new Error(`发行文件与候选摘要不一致：${name}`);
+    return [name, actual];
+  }));
+  return Object.fromEntries(pairs);
+}
+
 async function stageCandidate(root, options) {
   const { version, commit, dist, output } = options;
   const context = await releaseContext(root, version);
@@ -239,25 +245,34 @@ async function stageCandidate(root, options) {
       checksum.algorithm !== 'SHA-256' || checksum.sha256 !== archiveSha256) {
     throw new Error('候选 ZIP 与 release-checksum.json 不一致。');
   }
+  const distributions = await verifyDistributionHashes(directory, version, checksum.distributions);
+  const hashes = { [archive]: archiveSha256, ...distributions };
+  const assets = [...Object.keys(hashes), 'release-checksum.json', 'SHA256SUMS.txt'];
   await fs.mkdir(path.dirname(output), { recursive: true });
   await fs.mkdir(output);
-  for (const name of [archive, 'release-checksum.json', 'candidate-manifest.json', 'README.txt']) {
+  for (const name of [...Object.keys(hashes), 'release-checksum.json', 'candidate-manifest.json', 'README.txt']) {
     await fs.copyFile(path.join(directory, name), path.join(output, name));
   }
-  await fs.writeFile(path.join(output, 'SHA256SUMS.txt'), `${archiveSha256}  ${archive}\n`, 'utf8');
+  await fs.writeFile(path.join(output, 'SHA256SUMS.txt'), Object.entries(hashes).map(([name, sha]) => `${sha}  ${name}\n`).join(''), 'utf8');
   await fs.writeFile(path.join(output, 'release-notes.md'), context.notes, 'utf8');
-  const release = { version, tag: context.tag, commit: commit.toLowerCase(), archive, archiveSha256 };
+  const release = { version, tag: context.tag, commit: commit.toLowerCase(), archive, archiveSha256, assets };
   await fs.writeFile(path.join(output, 'release.json'), JSON.stringify(release, null, 2), 'utf8');
-  console.log(`候选发布资产已冻结：${archive}；ZIP SHA-256 ${archiveSha256}`);
+  await verifyStaged(root, output, version, commit);
+  console.log(`候选发布资产已冻结：${assets.join('、')}`);
   return release;
 }
 
-function parseSha256Sums(text, archive) {
+function parseSha256Sums(text, names) {
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
-  if (lines.length !== 1) throw new Error('SHA256SUMS.txt 必须且只能包含一个 ZIP 摘要。');
-  const match = /^([a-f0-9]{64}) [ *](.+)$/.exec(lines[0]);
-  if (!match || match[2] !== archive) throw new Error('SHA256SUMS.txt 的格式或 ZIP 文件名不匹配。');
-  return match[1];
+  const remaining = new Set(names);
+  const hashes = new Map();
+  for (const line of lines) {
+    const match = /^([a-f0-9]{64}) [ *](.+)$/.exec(line);
+    if (!match || !remaining.delete(match[2])) throw new Error('SHA256SUMS.txt 的格式或资产文件名不匹配。');
+    hashes.set(match[2], match[1]);
+  }
+  if (remaining.size) throw new Error('SHA256SUMS.txt 缺少候选资产摘要。');
+  return hashes;
 }
 
 async function verifyStaged(root, directory, version, commit) {
@@ -282,8 +297,13 @@ async function verifyStaged(root, directory, version, commit) {
   if (actual !== release.archiveSha256 || checksum.sha256 !== actual || checksum.algorithm !== 'SHA-256') {
     throw new Error('冻结 ZIP 的实际摘要与发布信息不一致。');
   }
+  const distributions = await verifyDistributionHashes(directory, version, checksum.distributions);
+  const hashes = { [release.archive]: actual, ...distributions };
+  const assets = [...Object.keys(hashes), 'release-checksum.json', 'SHA256SUMS.txt'];
+  if (JSON.stringify(release.assets) !== JSON.stringify(assets)) throw new Error('冻结资产清单与预期不一致。');
   const sums = await fs.readFile(path.join(directory, 'SHA256SUMS.txt'), 'utf8');
-  if (parseSha256Sums(sums, release.archive) !== actual) throw new Error('SHA256SUMS.txt 与冻结 ZIP 不一致。');
+  const parsed = parseSha256Sums(sums, Object.keys(hashes));
+  if (Object.entries(hashes).some(([name, sha]) => parsed.get(name) !== sha)) throw new Error('SHA256SUMS.txt 与冻结文件不一致。');
   if (await fs.readFile(path.join(directory, 'release-notes.md'), 'utf8') !== context.notes) {
     throw new Error('冻结发布说明与 CHANGELOG.md 不一致。');
   }
@@ -298,7 +318,7 @@ async function verifyPublished(root, options) {
       release.isDraft !== false || release.isPrerelease !== false) {
     throw new Error('公开 Release 的标签、标题或正式版状态不匹配。');
   }
-  const publicNames = [staged.release.archive, 'release-checksum.json', 'SHA256SUMS.txt'].sort();
+  const publicNames = [...staged.release.assets].sort();
   const actualNames = (release.assets || []).map(asset => asset.name).sort();
   if (JSON.stringify(actualNames) !== JSON.stringify(publicNames)) {
     throw new Error(`公开资产集合不匹配：${actualNames.join('、') || '无'}`);

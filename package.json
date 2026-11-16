@@ -11,6 +11,7 @@
     "test": "node --test tests/core/*.test.cjs tests/windows/*.test.cjs tests/renderer/*.test.cjs",
     "build:native": "node scripts/build-native.cjs",
     "package": "node scripts/package.cjs",
+    "dist:win": "node scripts/package.cjs --distributions",
     "smoke": "electron . --smoke-test",
     "test:host": "electron scripts/electron-contract.cjs",
     "test:interaction": "electron scripts/check-streaming-controls.cjs",
@@ -35,6 +36,7 @@
   "devDependencies": {
     "@electron/packager": "20.3.0",
     "acorn": "8.19.0",
-    "electron": "45.2.1"
+    "electron": "45.2.1",
+    "electron-builder": "26.18.1"
   }
 }

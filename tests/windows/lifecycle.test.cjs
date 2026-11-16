@@ -1475,6 +1475,7 @@ function mainHarness() {
   const target = path.join(__dirname, '../../src/main.cjs');
   const context = {
     require: name => name === 'electron' ? electron : name === './core/store.cjs' ? { createStore: () => store } :
+      name === './core/distribution.cjs' ? require('../../src/core/distribution.cjs') :
       name === './windows/desktop.cjs' ? { createDesktop: () => desktop } : name === './core/shortcuts.cjs' ? require('../../src/core/shortcuts.cjs') : name === './core/history.cjs' ? require('../../src/core/history.cjs') : name.startsWith('./') ? {} : require(name),
     process: { argv: [], env: {}, pid: 1, platform: 'win32' }, ...time, structuredClone,
     auditStore: store, auditDesktop: desktop, auditSettings: persistedSettings,
