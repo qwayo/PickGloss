@@ -33,7 +33,8 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
   let orbPreferences = { quietFadeEnabled: true, edgeCollapseEnabled: true };
   const sourceWatcher = sourceFactory || typeof BrowserWindow.prototype.getNativeWindowHandle === 'function'
     ? (sourceFactory || createTranslationTracker)({ onChange: sourceChanged }) : null;
-  const html = path.join(__dirname, '..', 'renderer', 'index.html');
+  // 便携版可能从 Windows 短目录解包。导航与 IPC 校验使用同一个规范文件 URL。
+  const html = fs.realpathSync.native(path.join(__dirname, '..', 'renderer', 'index.html'));
   const htmlUrl = pathToFileURL(html).href;
   const preload = path.join(__dirname, '..', 'preload.cjs');
   const assets = path.join(__dirname, '..', 'renderer', 'assets');
@@ -385,7 +386,7 @@ function createDesktop({ onAction, onSelection, onSelectionContext, onContextSel
       if(!win.isDestroyed())win.destroy();
       onStatus({ error: '界面进程已退出，已保存的会话仍在。请从托盘重新打开 PickGloss。' });
     });
-    void win.loadFile(html, { query: { window: kind } });
+    void win.loadURL(`${htmlUrl}?window=${encodeURIComponent(kind)}`);
     return win;
   }
 
